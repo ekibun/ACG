@@ -6,7 +6,7 @@ file (STRINGS "${QUICK_JS_LIB_DIR}/VERSION" QUICKJS_VERSION)
 add_library(quickjs SHARED
   ${CMAKE_CURRENT_LIST_DIR}/quickjs.cpp
   ${QUICK_JS_LIB_DIR}/cutils.c
-  ${QUICK_JS_LIB_DIR}/libbf.c
+  ${QUICK_JS_LIB_DIR}/dtoa.c
   ${QUICK_JS_LIB_DIR}/libregexp.c
   ${QUICK_JS_LIB_DIR}/libunicode.c
   ${QUICK_JS_LIB_DIR}/quickjs.c
@@ -15,7 +15,6 @@ add_library(quickjs SHARED
 
 project(quickjs LANGUAGES CXX)
 target_compile_features(quickjs PUBLIC cxx_std_17)
-target_compile_options(quickjs PRIVATE -Wno-error=int-conversion)
 target_compile_options(quickjs PRIVATE "-DCONFIG_VERSION=\"${QUICKJS_VERSION}\"")
 target_compile_options(quickjs PRIVATE "-DDUMP_LEAKS")
 

@@ -1,4 +1,5 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import org.gradle.internal.os.OperatingSystem
 
 plugins {
     alias(libs.plugins.kotlinJvm)
@@ -13,6 +14,24 @@ dependencies {
     implementation(libs.kotlinx.coroutinesSwing)
 
     implementation(libs.compose.uiToolingPreview)
+}
+
+val buildJni by tasks.registering(Exec::class) {
+    description = "Build native libs (ffmpeg/quickjs) for the desktop JVM"
+    group = "build"
+    workingDir = rootDir.resolve("cxx")
+
+    val javaHome = javaToolchains.compilerFor {}.get().metadata.installationPath.asFile.absolutePath.replace("\\", "/")
+    if(OperatingSystem.current().isWindows) {
+        commandLine("cmd", "/c", "exec ./build.jni.sh \"$javaHome\"")
+    } else {
+        commandLine("./build.jni.sh", javaHome)
+    }
+}
+
+tasks.named<ProcessResources>("processResources") {
+    dependsOn(buildJni)
+    from(rootDir.resolve("cxx/build/bin"))
 }
 
 compose.desktop {

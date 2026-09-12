@@ -5,7 +5,9 @@
 
 extern "C"
 {
+#include "quickjs/cutils.h"
 #include "quickjs/libregexp.h"
+#include "quickjs/libunicode.h"
 #include "quickjs/quickjs-atom.h"
 }
 
@@ -44,9 +46,15 @@ Java_soko_ekibun_quickjs_QuickJS_initContext(JNIEnv *env, jclass, jobject ctx) {
                                           "(Ljava/lang/String;)Ljava/lang/String;");
         auto javaStr = env->NewStringUTF(module_name);
         auto retJava = (jstring) env->CallObjectMethod(opaque->thiz, load, javaStr);
-        if (retJava == nullptr)
-          return nullptr;
         env->DeleteLocalRef(javaStr);
+        if (retJava == nullptr) {
+          // quickjs expects the loader to return NULL *with* a pending
+          // exception (see js_host_resolve_imported_module). Returning NULL
+          // bare makes JS_LoadModuleInternal report whatever stale exception
+          // happens to be sitting in the runtime instead.
+          JS_ThrowReferenceError(ctx, "could not load module '%s'", module_name);
+          return nullptr;
+        }
         auto str = env->GetStringUTFChars(retJava, nullptr);
         JSValue func_val = JS_Eval(ctx, str, strlen(str), module_name,
                                    JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
@@ -242,7 +250,13 @@ jobject jsToJava(JNIEnv *env, JSContext *ctx, JSValue obj,
       { // ArrayBuffer
         size_t size;
         uint8_t *buf = JS_GetArrayBuffer(ctx, &size, obj);
-        if (buf) {
+        if (!buf) {
+          // This is only a type probe: JS_GetArrayBuffer already threw a
+          // TypeError ("ArrayBuffer object expected") for any other object,
+          // and leaving it pending poisons every later API that returns NULL
+          // without throwing. Drop it.
+          JS_FreeValue(ctx, JS_GetException(ctx));
+        } else {
           jbyteArray arr = env->NewByteArray((jsize) size);
           env->SetByteArrayRegion(arr, 0, (jsize) size, (int8_t *) buf);
           return arr;
