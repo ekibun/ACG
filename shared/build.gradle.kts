@@ -47,6 +47,9 @@ kotlin {
             implementation(libs.androidx.lifecycle.viewmodelCompose)
             implementation(libs.androidx.lifecycle.runtimeCompose)
             implementation(libs.ktor.client.core)
+            // 跨端 WebView：Android 走 android.webkit.WebView，
+            // 桌面(jvm)走 Nucleus Tao NativeView 里的 WebView2/WKWebView/WebKit2GTK。
+            implementation(libs.compose.webview)
         }
         jvmMain.dependencies {
             implementation(libs.ktor.client.java)
