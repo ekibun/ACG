@@ -14,7 +14,13 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.runBlocking
 import soko.ekibun.acg.common.Http
+import soko.ekibun.acg.web.WebViewInterception
+import soko.ekibun.acg.web.WebViewRequest
+import soko.ekibun.acg.web.WebViewTask
+import soko.ekibun.acg.web.WebViewTaskResult
+import soko.ekibun.acg.web.loadBackgroundWebView
 import soko.ekibun.quickjs.JSError
+import soko.ekibun.quickjs.JSFunction
 import soko.ekibun.quickjs.JSInvokable
 import soko.ekibun.quickjs.JSObject
 import soko.ekibun.quickjs.QuickJS
@@ -26,6 +32,9 @@ class JsEngine {
 
     /** 引擎插件类的包名。 */
     private const val ENGINE_PACKAGE = "soko.ekibun.acg.engine"
+
+    /** [webviewAsync] 与 `init.js` 里内联的 `webview` wrapper 约定的结果标记键。 */
+    private const val WEBVIEW_KIND_KEY = "__webview_kind__"
 
     /** 判断一个实参能否赋给指定的形参类型（含装箱与数值放宽）。 */
     private fun acceptsArg(paramType: Class<*>, arg: Any?): Boolean {
@@ -155,6 +164,110 @@ class JsEngine {
         "status" to response.status.value,
         "body" to response.bodyAsChannel().toByteArray(),
       )
+    }
+  }
+
+  /**
+   * 后台 WebView 桥 —— 插件 JS 里的 `webview(url, header, script, onInterceptRequest)`。
+   *
+   * 对齐 BangumiPlugin `assets/modules/http.js#__webview__`，两处有意的差异：
+   *
+   * 1. 返回 [Deferred]（JS 侧是 Promise），不阻塞 —— QuickJS 只有一个事件循环，
+   *    照参照实现那样 `Thread.sleep` 等加载会把整个引擎锁死；
+   * 2. 结果多包一层 [WEBVIEW_KIND_KEY]，好让 JS wrapper 区分「命中拦截」与
+   *    「脚本返回值」—— 两者都可能是任意对象，不加标记无从判别。
+   *
+   * `header` 与 `onInterceptRequest` 到达这里时各持一票 JS 引用。按本文件现有
+   * 惯例**不在这里归还**（[fetchAsync] 的 `options` 同样不还）：`Context.reuseWrapper`
+   * 复用已有包装时并不加票，谁先 `close()` 谁就会把别人手里的包装一并销毁，所以
+   * 「由被调用方归还」在当前语义下并不安全。代价是每次调用留下一个 JS 引用。
+   */
+  @Keep
+  private fun webviewAsync(
+    url: String,
+    header: JSObject?,
+    script: String?,
+    onInterceptRequest: JSFunction?,
+  ): Deferred<Any?> = CoroutineScope(Dispatchers.IO).async {
+    val task = WebViewTask(
+      url = url,
+      headers = header?.entries?.associate { it.key.toString() to it.value.toString() }
+        ?: emptyMap(),
+      script = script,
+      onInterceptRequest = onInterceptRequest?.let { fn ->
+        { request: WebViewRequest -> invokeInterceptor(fn, request) }
+      },
+    )
+
+    val payload: Any? = when (val result = loadBackgroundWebView(task)) {
+      is WebViewTaskResult.Intercepted -> mapOf(
+        WEBVIEW_KIND_KEY to "intercept",
+        "value" to mapOf(
+          "url" to result.interception.url,
+          "headers" to result.interception.headers,
+        ),
+      )
+
+      is WebViewTaskResult.Scripted -> mapOf(
+        WEBVIEW_KIND_KEY to "script",
+        "value" to result.json,
+      )
+
+      // 失败要让 JS 侧 reject，而不是回一个空值让脚本去猜哪一步没生效。
+      is WebViewTaskResult.Failed -> throw JSError(result.message)
+    }
+    payload
+  }
+
+  /**
+   * 把 WebView 的回调转给 JS 侧的 `onInterceptRequest`。
+   *
+   * 返回 null 表示放行。JS 回调抛错也按放行处理 —— 一次回调出错不该把整次加载
+   * 搞崩，但会把错误打到 console 上，别让它无声无息。
+   *
+   * 回调返回的 JS 对象在 Kotlin 侧是 [JSObject] 包装（它实现了 `Map`，所以
+   * `as? Map` 判断照样成立），每读一个属性都是一轮 native 转换。**包装各持一票
+   * JS 引用，读完必须归还** —— 与 `QuickJSTest.jsInvokableReceivesThisValAndArgs`
+   * 对回调里 `thisVal` 的处理一致；不还的话每拦一次请求就在 `Context.refs` 上挂一笔。
+   *
+   * 调用时机：本函数跑在 WebView 的回调线程上，此时脚本正挂起等 `webviewAsync`
+   * 的结果，QuickJS 派发线程是空闲的，所以这里的 `fn.invoke` / `close`
+   * 都能安全地借道 `runOnDispatcher` 落到 JS 线程。
+   */
+  private fun invokeInterceptor(
+    fn: JSFunction,
+    request: WebViewRequest,
+  ): WebViewInterception? {
+    val ret = try {
+      fn.invoke(
+        mapOf(
+          "url" to request.url,
+          "headers" to request.headers,
+          "method" to request.method,
+          "isForMainFrame" to request.isForMainFrame,
+          "isRedirect" to request.isRedirect,
+        )
+      )
+    } catch (e: Throwable) {
+      console("error", arrayOf("onInterceptRequest 回调出错，按放行处理: $e"))
+      return null
+    }
+    try {
+      val map = ret as? Map<*, *> ?: return null
+      val interceptedUrl = map["url"] as? String ?: return null
+      val headers = map["headers"] as? Map<*, *>
+      try {
+        return WebViewInterception(
+          url = interceptedUrl,
+          headers = headers?.entries
+            ?.associate { it.key.toString() to it.value.toString() }
+            ?: emptyMap(),
+        )
+      } finally {
+        (headers as? AutoCloseable)?.close()
+      }
+    } finally {
+      (ret as? AutoCloseable)?.close()
     }
   }
 }

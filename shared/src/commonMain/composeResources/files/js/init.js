@@ -145,6 +145,60 @@ async (_java) => {
     .map(v => "%" + v.toString(16).padStart(2, "0"))
     .join("").toUpperCase();
 
+  /**
+   * 后台 WebView —— 对应 BangumiPlugin 的 `modules/http.js#__webview__`。
+   *
+   * 那个工程里它是个 `require("http")` 出来的模块；这里**内联**，原因是 QuickJS
+   * 的动态 `import()` 在本工程的 JNI 桥上会把进程打崩（实测两种路径都 abort）：
+   * 模块不存在时命中 `assert(js_rc(p)->ref_count == 0)`（quickjs.c:6425），
+   * 模块存在时又在 `JS_FreeRuntime` 命中
+   * `assert(list_empty(&rt->gc_obj_list))`（quickjs.c:2464）。
+   * 所以这里没有对应的 `files/js/module/webview.js`。init.js 里其它能力
+   * （fetch / TextEncoder / FormData）本来也都是内联的，与之一致。
+   *
+   * 与参照实现只差一件事：那边是**阻塞**等待（`while(!finished) sleep(1000)`），
+   * 这里返回 Promise。QuickJS 只有一个事件循环，阻塞会把整个引擎锁死 ——
+   * 脚本从那边搬过来时，把 `var ret = __webview__(...)` 换成 `await webview(...)`。
+   *
+   * 用法（位置参数与 http.js 完全一致）：
+   *
+   *   // 1) 拦一个请求：命中即中止加载，把 url+headers 交回脚本自己去 fetch
+   *   const req = await webview(url, { "User-Agent": ua }, null, (request) =>
+   *     request.headers.Range ? { url: request.url, headers: request.headers } : null);
+   *   const buf = await (await fetch(req.url, { headers: req.headers })).arrayBuffer();
+   *
+   *   // 2) 跑页面 JS 取值：script 的返回值（JSON）解析后交回
+   *   const data = await webview(url, {}, "JSON.stringify(window.__NUXT__)");
+   */
+  const webview = async (url, header, script, onInterceptRequest) => {
+    const ret = await _java(
+      null,
+      "webviewAsync",
+      "" + (url || ""),
+      header || {},
+      script == null ? null : "" + script,
+      typeof onInterceptRequest === "function" ? onInterceptRequest : null
+    );
+    if (!ret || typeof ret !== "object") return undefined;
+
+    // Kotlin 侧用这个键区分「命中拦截」与「脚本返回值」；两者都可能是任意对象。
+    if (ret.__webview_kind__ === "intercept") return ret.value;
+
+    if (ret.__webview_kind__ === "script") {
+      const json = ret.value;
+      // 空串/null 表示脚本没有返回值 —— 对齐 http.js 的 `it = it && JSON.parse(it)`。
+      if (json == null || json === "") return undefined;
+      try {
+        return JSON.parse(json);
+      } catch (e) {
+        // 不是 JSON（脚本返回裸文本）时原样给出，比丢掉强。
+        return json;
+      }
+    }
+
+    return undefined;
+  };
+
   const globalProperties = {
     TextEncoder: _TextEncoder,
     TextDecoder: _TextDecoder,
@@ -169,6 +223,7 @@ async (_java) => {
       const response = await _java(null, "fetchAsync", new Request(input, init));
       return new Response(response);
     },
+    webview,
     encodeURI: (uri, encoding) => {
       const encoder = new _TextEncoder(encoding || "utf-8");
       return `${uri}`.replace(/[^a-zA-Z0-9-_.!~*'();/?:@&=+$,#]/g, (c) => encodeURI_hex(encoder, c));
