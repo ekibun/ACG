@@ -35,9 +35,11 @@ object Highlight {
     IDENT
   }
 
-  private external fun isIdentNext(c: Char): Boolean
-
+  /** 标识符首字符（字母/下划线/$）。 */
   private external fun isIdentFirst(c: Char): Boolean
+
+  /** 标识符后续字符（首字符集 + 数字）。 */
+  private external fun isIdentNext(c: Char): Boolean
 
   private data class TokenParser(val s: String, var offset: Int = 0)
 

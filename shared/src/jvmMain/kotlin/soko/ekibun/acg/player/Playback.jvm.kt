@@ -16,24 +16,23 @@ import javax.sound.sampled.AudioFormat
 import javax.sound.sampled.AudioSystem
 import javax.sound.sampled.DataLine
 import javax.sound.sampled.SourceDataLine
+import soko.ekibun.ffmpeg.AvFormat
 
 /**
  * 桌面端播放实现：音频走 javax.sound.sampled，视频渲染为 ImageBitmap 交给 Compose 绘制。
  *
- * [soko.ekibun.ffmpeg.AvPlayback] 传出的是 float32（AV_SAMPLE_FMT_FLT，每帧 4 字节 × 声道数）。
- * 这里把它转成 16bit PCM 交给声卡：转换后每帧 4 字节，正好等于 48kHz 立体声 16bit 的消耗速率，
- * 播放速度与真实时间一致。
- *
- * 注意不要照搬 Android 端的做法——那里把 float 数据原样按 ENCODING_PCM_8BIT 播放，
- * 字节率只有 1/4，会把整条解码管线拖到 1/4 速度（Android 端同样存在该问题）。
+ * [soko.ekibun.ffmpeg.AvPlayback] 的 native 侧会按构造时传入的 audioFormat 用 swr_convert
+ * 转码输出，因此这里的 audioFormat = AV_SAMPLE_FMT_FLT 意味着拿到的是 float32。
+ * 桌面声卡用 16bit PCM，故在这里转换成 16bit：转换后每帧 4 字节，正好等于 48kHz 立体声
+ * 16bit 的消耗速率，播放速度与真实时间一致。
  */
 class DesktopPlayback(onFrame: (Long?) -> Unit) : Playback(onFrame) {
   private val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
 
   override val sampleRate: Int = 48000
   override val channels: Int = 2
-  override val audioFormat: Int = 0 // AV_SAMPLE_FMT_FLT
-  override val videoFormat: Int = 25 // AV_PIX_FMT_RGBA
+  override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_FLT
+  override val videoFormat: Int = AvFormat.AV_PIX_FMT_RGBA
 
   private var lineRef: SourceDataLine? = null
 

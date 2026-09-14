@@ -11,7 +11,8 @@ async (_java) => {
     }
 
     append(name, value, filename) {
-      this.__items__.append({ name, value, filename })
+      // __items__ 是普通数组，没有 append（那是 FormData 自己的方法）。
+      this.__items__.push({ name, value, filename })
     }
 
     delete(name) {
@@ -21,45 +22,61 @@ async (_java) => {
     }
 
     entries() {
-      return function* () {
-        for (var item in __items__)
+      const items = this.__items__;
+      return (function* () {
+        for (const item of items)
           yield [item.name, item.value, item.filename];
-      };
+      })();
     }
 
     get(name) {
-      return this.__items__.find((v) => v.name === name);
+      const found = this.__items__.find((v) => v.name === name);
+      return found ? found.value : null;
     }
 
     getAll(name) {
-      var ret = [];
-      for (var item in __items__)
-        if (item.name === name) ret.append(item.value);
-      return value;
+      return this.__items__
+        .filter((v) => v.name === name)
+        .map((v) => v.value);
     }
 
     has(name) {
-      return this.__items__.find((v) => v.name === name) !== null;
+      return this.__items__.some((v) => v.name === name);
     }
 
     keys() {
-      return function* () {
-        for (var item in __items__)
+      const items = this.__items__;
+      return (function* () {
+        for (const item of items)
           yield item.name;
-      };
+      })();
     }
 
     set(name, value, filename) {
       const index = this.__items__.findIndex((v) => v.name === name);
-      if (index < 0) this.append(name, value, filename);
-      this.splice(index, 1, { name, value, filename });
+      if (index < 0) {
+        this.append(name, value, filename);
+        return;
+      }
+      // 原来写的是 this.splice(...)，但 splice 在 __items__ 上，不在 FormData 上
+      this.__items__.splice(index, 1, { name, value, filename });
     }
 
     values() {
-      return function* () {
-        for (var item in __items__)
+      const items = this.__items__;
+      return (function* () {
+        for (const item of items)
           yield item.value;
-      };
+      })();
+    }
+
+    forEach(callback, thisArg) {
+      for (const [name, value] of this.entries())
+        callback.call(thisArg, value, name, this);
+    }
+
+    [Symbol.iterator]() {
+      return this.entries();
     }
   };
 
@@ -123,8 +140,9 @@ async (_java) => {
     }
   }
 
+  // toString(16) 不补零：0x0a 会得到 "a"，URL 编码必须写成 "%0a"。
   const encodeURI_hex = (encoder, c) => [...new Uint8Array(encoder.encode(c))]
-    .map(v => "%" + v.toString(16))
+    .map(v => "%" + v.toString(16).padStart(2, "0"))
     .join("").toUpperCase();
 
   const globalProperties = {
@@ -159,20 +177,6 @@ async (_java) => {
       const encoder = new _TextEncoder(encoding || "utf-8");
       return `${uri}`.replace(/[^a-zA-Z0-9-_.!~*'()]/g, (c) => encodeURI_hex(encoder, c));
     }
-  }
-
-  function createClass(def) {
-    function DartObject(opaque) {
-      this.toString = () => `[object ${def.name}]`;
-      for (const method in def.methods) {
-        this[method] = (...methodArgs) => {
-          const dartRet = _dart(`${def.prefix}_${method}`, [opaque, ...methodArgs]);
-          if (def.methods[method]) return def.methods[method](DartObject, dartRet);
-          else return dartRet;
-        }
-      }
-    };
-    return (...args) => new DartObject(_dart(def.prefix, args));
   }
 
   Object.defineProperties(this, Object.assign({},

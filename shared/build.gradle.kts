@@ -52,9 +52,20 @@ kotlin {
             implementation(libs.ktor.client.java)
             implementation(libs.logback.classic)
         }
+        jvmTest.dependencies {
+            implementation(libs.kotlin.test)
+        }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
         }
+    }
+}
+
+// jniLoadLibrary() 从 classpath 资源里取 native 库，测试时需要能拿到 cxx 的构建产物
+tasks.named<ProcessResources>("jvmTestProcessResources") {
+    val binDir = rootProject.layout.projectDirectory.dir("cxx/build/bin")
+    from(binDir) {
+        include("*.dll", "*.so", "*.dylib")
     }
 }
 

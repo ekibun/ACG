@@ -1,5 +1,6 @@
 #include <jni.h>
 #include <map>
+#include <vector>
 
 extern "C"
 {
@@ -226,40 +227,89 @@ Java_soko_ekibun_ffmpeg_AvCodec_initNative(JNIEnv *env, jobject thiz, jlong stre
     avcodec_free_context(&ctx);
   return 0;
 }
+/*
+ * 解码产出必须按 FFmpeg 的收/发分离协议收集：
+ *   - avcodec_send_packet() 返回 AVERROR(EAGAIN) 表示"输入队列满"，此时必须先收帧；
+ *   - avcodec_receive_frame() 必须循环调用，直到返回 AVERROR(EAGAIN)（需要更多输入）
+ *     或 AVERROR_EOF（已 drain 完）。
+ * 一个 packet 在 B 帧/参考帧较多的编码下可能产出 0 帧（帧被解码器内部缓存）或多帧，
+ * 所以这里返回的是 AvFrame 数组而不是单帧。
+ *
+ * 注意：AVCodecContext::opaque 是 FFmpeg 保留的用户数据字段，不能挪作帧缓存。
+ * 每次 receive_frame 前都用一个临时 AVFrame，拿到帧就把所有权转交给 Java 侧
+ * （由 AvFrame.closeNative -> av_frame_free 释放）。
+ */
+static jobjectArray newAvFrameArray(JNIEnv *env, jint size) {
+  jclass cls = env->FindClass("soko/ekibun/ffmpeg/AvFrame");
+  if (!cls) return nullptr;
+  return env->NewObjectArray(size, cls, nullptr);
+}
+
+static jobject newAvFrame(JNIEnv *env, AVFrame *frame, AVStream *stream) {
+  jclass cls = env->FindClass("soko/ekibun/ffmpeg/AvFrame");
+  jmethodID constructor = env->GetMethodID(cls, "<init>", "(JJII)V");
+  return env->NewObject(
+      cls, constructor,
+      (jlong) frame,
+      (jlong) (frame->best_effort_timestamp * av_q2d(stream->time_base) * AV_TIME_BASE),
+      (jint) frame->width,
+      (jint) frame->height);
+}
+
 extern "C"
-JNIEXPORT jobject JNICALL
-Java_soko_ekibun_ffmpeg_AvCodec_sendPacketAndGetFrameNative(JNIEnv *env, jobject thiz, jlong pctx,
-                                                            jlong stream, jlong packet) {
+JNIEXPORT jobjectArray JNICALL
+Java_soko_ekibun_ffmpeg_AvCodec_sendPacketAndGetFramesNative(JNIEnv *env, jobject thiz, jlong pctx,
+                                                             jlong stream, jlong packet) {
   auto ctx = (AVCodecContext *) pctx;
-  auto frame = (AVFrame *) ctx->opaque;
-  if (!frame)
-    ctx->opaque = frame = av_frame_alloc();
-  if (avcodec_send_packet(ctx, (AVPacket *) packet) == 0 &&
-      avcodec_receive_frame(ctx, frame) == 0) {
-    ctx->opaque = nullptr;
-    jclass cls = env->FindClass("soko/ekibun/ffmpeg/AvFrame");
-    jmethodID constructor = env->GetMethodID(cls, "<init>", "(JJII)V");
-    jobject frameObj = env->NewObject(
-        cls, constructor,
-        (jlong) frame,
-        (jlong) (frame->best_effort_timestamp * av_q2d(((AVStream *)stream)->time_base) * AV_TIME_BASE),
-        (jint) frame->width,
-        (jint) frame->height);
-    return frameObj;
+  auto pstream = (AVStream *) stream;
+
+  auto empty = newAvFrameArray(env, 0);
+  if (!empty) return nullptr;
+
+  // drain 阶段：packet == 0 表示冲刷解码器内部缓存的尾帧
+  int ret = avcodec_send_packet(ctx, packet ? (AVPacket *) packet : nullptr);
+  if (ret < 0 && ret != AVERROR_EOF && ret != AVERROR(EAGAIN)) {
+    // 真错误：结束不了就如实返回空，避免把错误静默成"没有帧"
+    return empty;
   }
-  return nullptr;
+
+  std::vector<AVFrame *> out;
+  while (true) {
+    auto frame = av_frame_alloc();
+    if (!frame) break;
+    ret = avcodec_receive_frame(ctx, frame);
+    if (ret == 0) {
+      out.push_back(frame);
+      continue;
+    }
+    av_frame_free(&frame);
+    // AVERROR(EAGAIN)：需要继续喂包；AVERROR_EOF：drain 完成
+    break;
+  }
+
+  auto arr = newAvFrameArray(env, (jint) out.size());
+  if (!arr) {
+    for (auto frame : out) av_frame_free(&frame);
+    return nullptr;
+  }
+  for (size_t i = 0; i < out.size(); ++i) {
+    jobject frameObj = newAvFrame(env, out[i], pstream);
+    env->SetObjectArrayElement(arr, (jsize) i, frameObj);
+    env->DeleteLocalRef(frameObj);
+  }
+  return arr;
 }
 extern "C"
 JNIEXPORT void JNICALL
 Java_soko_ekibun_ffmpeg_AvCodec_flushNative(JNIEnv *env, jobject thiz, jlong ctx) {
+  // seek 用：丢弃解码器内部缓冲，之后需要重新喂关键帧。
+  // 与 drain（send_packet(NULL) 取出残余帧）是两回事。
   avcodec_flush_buffers((AVCodecContext *) ctx);
 }
 extern "C"
 JNIEXPORT void JNICALL
 Java_soko_ekibun_ffmpeg_AvCodec_closeNative(JNIEnv *env, jobject thiz, jlong pctx) {
   auto ctx = (AVCodecContext *) pctx;
-  if (ctx->opaque)
-    av_frame_free((AVFrame **) &(ctx->opaque));
   avcodec_free_context(&ctx);
 }
 
@@ -382,7 +432,10 @@ int64_t postFrameVideo(SWContext *ctx, AVFrame *frame) {
         (AVPixelFormat) frame->format,
         ctx->width,
         ctx->height,
-        AV_PIX_FMT_RGBA,
+        // Must match the pixel format used to size and fill ctx->_videoData
+        // above, otherwise sws_scale writes a different layout than the one
+        // the buffer was allocated for.
+        (AVPixelFormat) ctx->videoFormat,
         SWS_POINT,
         nullptr, nullptr, nullptr);
   }
