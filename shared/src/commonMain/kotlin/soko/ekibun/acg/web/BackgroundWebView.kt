@@ -15,12 +15,40 @@ import androidx.compose.runtime.Composable
  * | Android | 命令式建一个无头 `android.webkit.WebView`（照抄 `BackgroundWebView`） | `shouldInterceptRequest`，**含全部子资源** |
  * | 桌面 | 在不显示的 Nucleus 窗口里组合一个 Compose `WebView`（WebView2/WKWebView/WebKit2GTK） | 只有主框架导航：库的 `RequestInterceptor` 接在 `addNavigateListener` 上 |
  *
- * 这个差别是库的硬限制（其 README 明写 "RequestInterceptor does **not** intercept
- * sub-resources"），不是本工程的取舍。靠拦媒体分片（m3u8/ts）来拿真实地址的脚本
- * 目前在桌面端拿不到东西。
+ * 这个差别**不是平台能力问题，是库把钩子接在了「导航」上**（反编译 1.0.3 确认）：
+ * 三端桌面后端的 JNI 桥都只有 `addNavigateListener(handle, (url: String) -> Boolean)`
+ * 这一个请求相关入口，Windows 那份 native 只注册了
+ * `ICoreWebView2NavigationStartingEventHandler`（DLL 里 `WebResourceRequested`
+ * 一次都没出现）；Android 那份也**没有** override `shouldInterceptRequest`，而是把
+ * `onInterceptUrlRequest` 接在 `WebViewClient.shouldOverrideUrlLoading` 上 ——
+ * 同样是主框架导航。所以 README 那句 "RequestInterceptor does **not** intercept
+ * sub-resources" 是四端通吃的结论，不是桌面端独有的毛病。
+ *
+ * 由此有两条**写脚本时必须知道**的后果：
+ *
+ * 1. 靠拦媒体分片（m3u8/ts）拿真实地址的写法，在桌面端永远拦不到；
+ * 2. 桌面端回调里只有 url 是真的，其余字段是占位值 —— 库那边 `WebRequest` 被构造成
+ *    `headers = emptyMap()`、`isForMainFrame = true`、`isRedirect = true`、
+ *    `method` 取默认值。所以
+ *    `(request) => !request.isForMainFrame && request.headers.Range` 这种判断
+ *    **在桌面端恒不成立**，别拿它当「有没有命中」的依据。
+ *
+ * 要真支持子资源拦截，得改那层 C++ shim 和它的 JNI 面。引擎本身是支持的
+ * （WebView2 有 `add_WebResourceRequested` + `AddWebResourceRequestedFilter("*", ALL)`，
+ * Android 有 `shouldInterceptRequest`；只有 macOS 的 WKWebView 是真做不到任意 https 拦截，
+ * 得靠自定义 scheme + `WKURLSchemeHandler`），但预编译产物里没有这个入口，本工程改不了。
  */
 
-/** 后台 WebView 看到的一个请求。 */
+/**
+ * 后台 WebView 看到的一个请求。
+ *
+ * 字段是否可信，取决于哪一端在报（见文件头的说明）：
+ *
+ * - **Android**（我们自己写的 `shouldInterceptRequest`，含子资源）：五个字段都是真的。
+ * - **桌面**（库的 `RequestInterceptor`，只有主框架导航）：只有 [url] 是真的，
+ *   [headers] 恒为空、[method] 取默认值、[isForMainFrame] 与 [isRedirect] 恒为 `true`。
+ *   拿不到 `Range` 之类的请求头，也就没法照 `http.js` 的路子靠分片请求反推媒体地址。
+ */
 data class WebViewRequest(
     val url: String,
     val headers: Map<String, String>,
