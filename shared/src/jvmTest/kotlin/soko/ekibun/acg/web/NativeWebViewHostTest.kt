@@ -232,7 +232,6 @@ class NativeWebViewHostTest {
                     parentHwnd = 0L,
                     url = url("/page.html"),
                     userAgent = null,
-                    initScript = null,
                     enableDevtools = false,
                     zoom = 1.0,
                 )

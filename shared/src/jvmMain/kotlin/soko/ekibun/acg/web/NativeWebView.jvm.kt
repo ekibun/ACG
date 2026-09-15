@@ -224,11 +224,10 @@ public object NativeWebView {
         parentHwnd: Long,
         url: String?,
         userAgent: String?,
-        initScript: String?,
         enableDevtools: Boolean,
         zoom: Double,
     ): Long {
-        val handle = nativeCreateView(parentHwnd, userAgent, initScript, url, enableDevtools, zoom)
+        val handle = nativeCreateView(parentHwnd, userAgent, url, enableDevtools, zoom)
         if (handle != 0L) liveViews.add(handle)
         return handle
     }
@@ -469,7 +468,6 @@ public object NativeWebView {
     private external fun nativeCreateView(
         parentHwnd: Long,
         userAgent: String?,
-        initScript: String?,
         url: String?,
         enableDevtools: Boolean,
         zoom: Double,

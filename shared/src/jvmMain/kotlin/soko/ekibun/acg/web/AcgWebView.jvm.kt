@@ -65,7 +65,6 @@ actual fun AcgWebView(
                 parentHwnd = 0L,   // 父窗口在 attach 时经 JAWT 现取，见 WebViewCanvas
                 url = state.homeUrl,
                 userAgent = state.config.userAgent,
-                initScript = state.config.initScript,
                 enableDevtools = state.config.enableDevtools,
                 zoom = state.config.zoom,
             )

@@ -49,9 +49,6 @@ class WebViewConfig {
     /** 自定义 User-Agent；null 表示用默认的。 */
     var userAgent: String? = null
 
-    /** 每个文档创建时注入的脚本；用于 `window.ipc` 之类的前置桥。 */
-    var initScript: String? = null
-
     /** 是否允许 F12 开发者工具与右键菜单。调试页面时很有用，发布可以关掉。 */
     var enableDevtools: Boolean = false
 

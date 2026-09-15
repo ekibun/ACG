@@ -28,9 +28,11 @@ import androidx.compose.ui.viewinterop.AndroidView
  *
  * 与桌面端的行为差别（都是平台本性，不是实现取舍）：
  *
- * - **没有 [WebViewConfig.initScript] 的可靠注入点**：`onPageStarted` 里补一发
- *   `evaluateJavascript` 在「新文档已建立」和「页面脚本已跑」之间没有保证。
- *   真要文档级前置脚本，得引 `androidx.webkit` 的 `addDocumentStartJavaScript`。
+ * - **两端都不提供文档级前置脚本注入**（2026-09-15 统一）：桌面端本可以靠
+ *   `AddScriptToExecuteOnDocumentCreated` 做到，但配置项 `initScript` 已删掉；
+ *   Android 上 `onPageStarted` 里补一发 `evaluateJavascript` 在「新文档已建立」
+ *   和「页面脚本已跑」之间**没有保证**，真要做文档级前置脚本得引 `androidx.webkit`
+ *   的 `addDocumentStartJavaScript`。为了两端行为一致，索性都不做。
  * - 开发者工具在 Android 上是 Chrome 远程调试（`chrome://inspect`），
  *   对应 `WebView.setWebContentsDebuggingEnabled`，没有独立的 devtools 窗口。
  */
@@ -137,8 +139,6 @@ private fun WebView.configure(state: AcgWebViewState, context: Context) {
             state.currentUrl = url
             state.isLoading = true
             state.loadingState = WebViewLoadingState.Loading(0.15f)
-            // 见类注释：这里只是「尽量早」，不是文档级保证。
-            config.initScript?.let { view?.evaluateJavascript(it, null) }
         }
 
         override fun onPageFinished(view: WebView?, url: String?) {

@@ -583,11 +583,9 @@ struct View {
     ComPtr<ICoreWebView2DocumentTitleChangedEventHandler> titleHandler;
     ComPtr<ICoreWebView2NewWindowRequestedEventHandler> newWindowHandler;
     ComPtr<ICoreWebView2ProcessFailedEventHandler> processFailedHandler;
-    /** 页面侧「我要键盘焦点」消息的回调（见 [FocusMessageHandler]）。后台视图不注册。 */
-    ComPtr<ICoreWebView2WebMessageReceivedEventHandler> messageHandler;
 
     EventRegistrationToken tRequest{}, tNavStart{}, tNavDone{}, tSource{}, tHistory{}, tTitle{},
-        tNewWindow{}, tProcessFailed{}, tMessage{};
+        tNewWindow{}, tProcessFailed{};
 
     // ---- 后台任务用 ----
     /** 调用方传进来的标识 —— 后台任务的结果回调按它找收件人，避免
@@ -795,13 +793,17 @@ static bool webViewAlreadyHasKeyboardFocus(HWND host) {
  * 因此「点击 → 父窗口收消息 → SetFocus」这条经典路子对 WebView2 是**结构性失效**的，
  * 别再往这个方向使劲。
  *
- * ## 真正管用的三条路
+ * ## 点击之后靠什么把焦点送进来
  *
- * 1. 宿主 `WM_SETFOCUS` → 这里（激活流程走到我们头上时会有）；
- * 2. **页面侧 DOM 桥**：页面上任何一次按下/聚焦都 post 一条 `acg:focus`，
- *    由 [FocusMessageHandler] 调到这里。这条绕开了整个 Win32 嵌套 —— DOM 事件
- *    直接在页面里触发，不需要焦点，是**主路径**；
- * 3. AWT 组件 `focusGained` → `nativeViewFocus`（见 `AcgWebView.jvm.kt`），兜底。
+ * 1. **宿主 `WM_SETFOCUS`**（主路径，见 [wndProc]）：输入队列在 [nativeViewAttach] 里
+ *    就接到了 AWT 线程，所以点击激活 `SunAwtFrame` 时 AWT 会把焦点派下去，宿主收到
+ *    `WM_SETFOCUS` → 走到这里 → `MoveFocus`。2026-09-15 实测：把原来的 DOM 焦点桥
+ *   整个删掉之后键盘依然正常，说明这条链能独立走通。
+ * 2. AWT 组件 `focusGained` → `nativeViewFocus`（见 `AcgWebView.jvm.kt`），兜底。
+ *
+ * （曾经还有一条「页面侧 DOM 桥」：页面按下/聚焦就 post 一条 `acg:focus` 回来。
+ * 它在输入队列**没有**提前接上的年代是唯一能用的路 —— 那会儿点击消息压根到不了宿主。
+ * 2026-09-15 删除，源码在 git `f113a56`。）
  *
  * ## 关键实现细节（都是踩出来的）
  *
@@ -813,10 +815,12 @@ static bool webViewAlreadyHasKeyboardFocus(HWND host) {
  *   互不相干，`SetFocus` 会被系统**静默拒绝**（`GetFocus()` 恒为 NULL，实测
  *   `focus=0000000000000000` 刷了 33 条）。所以要先用 `AttachThreadInput` 把本线程
  *   接到前台线程的队列上，`SetFocus` 才会落到那份共享焦点上。
- * - **不要指望 AWT 主动把焦点给我们的组件**：窗口被激活时 AWT 把焦点留在
- *   `SunAwtFrame` 自己身上（`GetGUIThreadInfo(awtTid).hwndFocus == SunAwtFrame`），
- *   `WebViewCanvas.focusGained` 因此很少触发。兜底那条路基本是摆设，主路只有
- *   DOM 桥 + 这里的 AttachThreadInput。
+ * - **AWT 到底把焦点给了谁，别凭印象下结论。** 早期（队列还没提前接上时）观察到
+ *   AWT 把焦点留在 `SunAwtFrame` 自己身上、`WebViewCanvas.focusGained` 很少触发，
+ *   于是判定「兜底那条路是摆设」。2026-09-15 删掉 DOM 桥后键盘仍然正常，说明队列
+ *   一提前接上，画面就变了 —— 但**具体是哪条入口触发的（宿主 `WM_SETFOCUS` 还是
+ *   `focusGained`）日志里没分开打**，要分辨就在两处各加一条日志。
+
  * - **但不能在 `MoveFocus` 之后再去 `SetFocus`/`SetForegroundWindow` 宿主** —— 那会把
  *   焦点从 WebView 手里拽回来，键盘又回到宿主窗口上。（探针第一版就是这么自坑的：
  *   `MoveFocus` 后 `HASFOCUS=1`，紧接着自己抢前台，然后 `KEYS` 一直是 0。）
@@ -840,12 +844,14 @@ static void requestWebViewFocus(HWND host, int retries) {
     //
     // 这一条不是省事，是**输入法的硬需求**：`MoveFocus` / `SetFocus` 每次调用都相当于
     // **重新聚焦一次输入窗口**，Chromium 会把输入法的组合状态清掉（候选窗收起、
-    // 已敲的拼音作废）。而 DOM 桥在 `focus` / `mousedown` / `pointerdown` 上都会来喊一声，
-    // 打字过程中被喊到就会反复重置 —— 表现就是「焦点一直被强制切换，没法用输入法连续输入」。
+    // 已敲的拼音作废）。历史上 DOM 桥在 `focus` / `mousedown` / `pointerdown` 上都会
+    // 来喊一声，打字过程中被喊到就会反复重置 —— 表现就是「焦点一直被强制切换，
+    // 没法用输入法连续输入」。桥已删，但**这道闸必须留着**：现在电话更多了
+    // （AWT 激活、窗口缩放、重试定时器都可能打进来），没有它输入法一样会废。
     //
-    // 所以**所有**调用方（`WM_SETFOCUS`、AWT `focusGained`、页面 DOM 桥）都过这道闸。
-    // 别再给页面桥开后门：页面侧的 `document.hasFocus()` 在这个 AWT 嵌入式场景里不可信
-    // （实测焦点还在 `SunAwtFrame` 上时它就是 true），拿它当过滤条件会把桥彻底憋死。
+    // 所以**所有**调用方（`WM_SETFOCUS`、AWT `focusGained`）都过这道闸。
+    // 别再往这里加「页面说了算」的口子：页面侧的 `document.hasFocus()` 在这个 AWT
+    // 嵌入式场景里不可信（实测焦点还在 `SunAwtFrame` 上时它就是 true）。
     if (webViewAlreadyHasKeyboardFocus(host)) {
         view->focusRetries = 0;
         return;
@@ -867,14 +873,15 @@ static void requestWebViewFocus(HWND host, int retries) {
     const DWORD fgTid = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
     const DWORD hostTid = GetWindowThreadProcessId(host, nullptr);
 
-    // 第二步：**长久**接到 AWT 线程的输入队列上。
+    // 第二步：输入队列的接续 —— **这一步不在这里做**。
     //
-    // 之前这里是「临时接一下、析构就摘」的 `ScopedThreadInput`，那条路只能让我们自己
-    // 的 `GetFocus()` 变对，**前台队列的 `hwndFocus` 不变** —— 键盘照样被
-    // `SunAwtFrame` 吃掉（日志里「焦点进入 WebView」刷屏，页面却一个 keydown 都没有）。
-    // 必须长久接上，见 [ensureThreadAttached]。
-    ensureThreadAttached(view, host, hostTid);
-
+    // `AttachThreadInput` 只吃两个线程 ID，跟窗口父子关系无关；目标线程是 AWT 的 EDT
+    // （`SunAwtFrame` 的拥有者），进程内恒定。所以接上之后就永久有效，没必要每次
+    // 重新校验。真正会变的是**父窗口 HWND**，但那件事本来就要重新 `SetParent`，
+    // 也就是重新走一遍 [nativeViewAttach] —— 在那里接一次就够了。
+    //
+    // （下面的日志会把 `已接=` 打出来，万一哪天真的没接上，一眼能看出来。）
+    //
     // 官方路子：让 WebView2 把焦点搬进它自己的输入窗口。
     view->controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
     bool ok = isSelfOrDescendant(GetFocus(), host);
@@ -1630,124 +1637,17 @@ private:
     HWND hwnd_;
 };
 
-/** initScript 的完成回调（不需要结果，留个空实现）。 */
-class NoopScriptAddedHandler final
-    : public ComCallback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler> {
-public:
-    NoopScriptAddedHandler()
-        : ComCallback(IID_ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler) {}
-    HRESULT STDMETHODCALLTYPE Invoke(HRESULT errorCode, LPCWSTR id) override {
-        (void)errorCode;
-        (void)id;
-        return S_OK;
-    }
-};
-
 // ---------------------------------------------------------------------------
-// 键盘焦点：页面 → 原生的 DOM 桥
+// 键盘焦点：全部走 Win32 原生链，不做任何脚本注入
 // ---------------------------------------------------------------------------
-/**
- * 页面侧喊「我要键盘焦点」用的消息体。
- *
- * 选一个带冒号的怪字符串是为了**不跟页面自己的消息撞车** —— 万一以后这个视图也要
- * 用 `postMessage` 做别的事（`WebMessageReceived` 只有一个通道）。
- */
-static const wchar_t* kFocusMessage = L"acg:focus";
-
-/**
- * 注入到**每个文档**的焦点桥。
- *
- * 干的事很小：页面上任何一次「按下」或「拿到焦点」都往原生喊一声。原生收到就
- * `MoveFocus`（见 [requestWebViewFocus]）。
- *
- * 为什么走 DOM 而不是 Win32：见 [requestWebViewFocus] 的注释 —— WebView2 的窗口是
- * 跨进程两层的，点击消息到不了宿主。而 DOM 事件直接在页面里触发，**不需要焦点**，
- * 正好补上这个缺口。
- *
- * 几个细节：
- * - **不要拿 `document.hasFocus()` 当「已经有焦点」的判据**（试过，会坏事）。
- *   实测：真实 App 里即使 Win32 层面的键盘焦点还在 AWT 的 `SunAwtFrame` 上，
- *   页面里 `document.hasFocus()` **就已经是 true** 了 —— 拿它提前 return，
- *   页面**一次都不会喊**，焦点永远进不去（回归实测 `acg: message count: 0`）。
- *   所以「有没有焦点」这件事**只由原生侧判**（`GetGUIThreadInfo` 看真实的
- *   `hwndFocus`，见 `webViewAlreadyHasKeyboardFocus`），页面只管喊。
- * - 用**捕获阶段**（第三参 `true`）：页面自己 `stopPropagation` 也挡不住。
- * - 带 150ms 节流：拖动选择、连点不会把消息刷爆。
- * - `mousedown` 之外还听 `pointerdown` / `touchstart` / `focus`，覆盖触摸屏和
- *   「程序化 focus 到输入框」这类没有鼠标事件的场景。
- * - 挂在 `document` 和 `window` 上、`capture` 阶段，所以页面有没有 iframe 都无所谓
- *   （每个文档都会被注入一次，各管各的）。
- * - `window.chrome.webview` 不存在（`IsWebMessageEnabled` 关着）时静默失败，
- *   绝不因为桥本身把页面搞崩。
- */
-static const wchar_t* kFocusBridgeScript = LR"JS(
-(function () {
-  if (window.__acgFocusBridge) return;
-  window.__acgFocusBridge = 1;
-  var last = 0;
-  function ping() {
-    var now = Date.now();
-    if (now - last < 150) return;
-    last = now;
-    try { window.chrome.webview.postMessage('acg:focus'); } catch (e) {}
-  }
-  document.addEventListener('mousedown', ping, true);
-  document.addEventListener('pointerdown', ping, true);
-  document.addEventListener('touchstart', ping, true);
-  window.addEventListener('focus', ping, true);
-})();
-)JS";
-
-/**
- * **只在调试模式**追加的按键回显：页面每收到一次 `keydown` 就报一个计数。
- *
- * 为什么需要：`焦点进入 WebView` 只说明**窗口**拿到了焦点，不等于按键真的到了
- * 渲染进程/页面。「能不能打字」这个最终判据得有页面侧的证词。走 `postMessage`
- * 而不是改 `document.title`，是为了不污染页面状态（标题是 App 要显示给用户的）。
- *
- * 生产路径完全不注入 —— 每次按键多一条 IPC 不值得。
- */
-static const wchar_t* kKeyProbeScript = LR"JS(
-(function () {
-  if (window.__acgKeyProbe) return;
-  window.__acgKeyProbe = 1;
-  var n = 0;
-  document.addEventListener('keydown', function () {
-    n++;
-    try { window.chrome.webview.postMessage('acg:key:' + n); } catch (e) {}
-  }, true);
-})();
-)JS";
-
-/**
- * 收到页面那条 `acg:focus` 就把焦点搬进 WebView。
- *
- * 回调跑在 WebView 线程上（控制器就是这个线程建的），所以里面碰 HWND 是安全的。
- */
-class FocusMessageHandler final
-    : public ComCallback<ICoreWebView2WebMessageReceivedEventHandler> {
-public:
-    explicit FocusMessageHandler(HWND hwnd)
-        : ComCallback(IID_ICoreWebView2WebMessageReceivedEventHandler), hwnd_(hwnd) {}
-
-    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* /*sender*/,
-                                     ICoreWebView2WebMessageReceivedEventArgs* args) override {
-        LPWSTR raw = nullptr;
-        // 非字符串（对象/数组）会走到失败分支 —— 跟我们无关的消息一律当没看见。
-        if (!args || FAILED(args->TryGetWebMessageAsString(&raw)) || !raw) {
-            if (raw) CoTaskMemFree(raw);
-            return S_OK;
-        }
-        const bool wantsFocus = std::wcscmp(raw, kFocusMessage) == 0;
-        WV_LOG("view %p: 收到页面消息 \"%ls\" focus=%d", hwnd_, raw, wantsFocus ? 1 : 0);
-        CoTaskMemFree(raw);
-        if (wantsFocus) requestWebViewFocus(hwnd_, 2);
-        return S_OK;
-    }
-
-private:
-    HWND hwnd_;
-};
+// 这里曾经是 DOM 焦点桥（三个脚本常量和《FocusMessageHandler》回调，靠页面
+// `postMessage('acg:focus')` 回喊原生来 MoveFocus）。2026-09-15 整套删除 ——
+// 输入队列提前到 [nativeViewAttach] 接上之后纯原生链就够了，实测键盘正常。
+// 现在的入口只有两个：宿主 `WM_SETFOCUS`（主）、AWT `focusGained`（兜），
+// 都汇到 [requestWebViewFocus]。**本文件不再有任何脚本注入** —— `opt.initScript`
+// 也在同一天删掉了（桌面与 Android 都不提供文档级前置脚本，保持两端一致）。
+// 真要注入，WebView2 这边是 `AddScriptToExecuteOnDocumentCreated`，
+// Android 那边得引 `androidx.webkit` 的 `addDocumentStartJavaScript`。
 
 // ---------------------------------------------------------------------------
 // 视图配置（控制器就绪后调用，跑在 WebView 线程上）
@@ -1755,7 +1655,6 @@ private:
 struct ViewOptions {
     jlong token = 0;
     std::wstring userAgent;
-    std::wstring initScript;
     std::wstring script;      // 可见视图的初始 URL（可空 → about:blank）
     std::wstring url;
     std::vector<std::wstring> headers;
@@ -1831,14 +1730,13 @@ static void configureView(const std::shared_ptr<View>& view, const ViewOptions& 
     ComPtr<ICoreWebView2Settings> settings;
     if (SUCCEEDED(webview->get_Settings(settings.GetAddressOf())) && settings) {
         settings->put_IsScriptEnabled(TRUE);
-        // **必须是 TRUE**（可见视图），否则 `WebMessageReceived` 一次都不会触发 ——
-        // `AddScriptToExecuteOnDocumentCreated` 注入的 DOM 桥里 `window.chrome.webview`
-        // 压根不存在，`postMessage('acg:focus')` 被页面里的 try/catch 静静吃掉，
-        // 表现就是「点击永远送不进焦点，日志里一条『收到页面消息』都没有」。
-        // 这个值曾经被写死成 FALSE，DOM 桥因此完全失效（2026-09-15 查明）。
-        const HRESULT hrMsg = settings->put_IsWebMessageEnabled(view->background ? FALSE : TRUE);
-        WV_LOG("view %p: put_IsWebMessageEnabled(%d) hr=0x%08lX", view->hwnd,
-               view->background ? 0 : 1, static_cast<unsigned long>(hrMsg));
+        // 一直 FALSE：不给页面 `window.chrome.webview`，也就没有「页面 postMessage 喊
+        // 原生」这条通道。DOM 焦点桥已删（2026-09-15），页面 → 原生目前不需要任何消息。
+        // 这个值曾经被写死成 FALSE 时被误判成 bug（2026-09-15 前），其实那是对的；
+        // 当时误判的原因是桥自身失效，跟这里无关。要加消息通道先想清楚跨进程窗口那套。
+        const HRESULT hrMsg = settings->put_IsWebMessageEnabled(FALSE);
+        WV_LOG("view %p: put_IsWebMessageEnabled(0) hr=0x%08lX", view->hwnd,
+               static_cast<unsigned long>(hrMsg));
         settings->put_AreDefaultScriptDialogsEnabled(FALSE);
         settings->put_AreDevToolsEnabled(opt.enableDevtools ? TRUE : FALSE);
         settings->put_IsStatusBarEnabled(FALSE);
@@ -1916,42 +1814,19 @@ static void configureView(const std::shared_ptr<View>& view, const ViewOptions& 
         }
     }
 
-    // ---- 键盘焦点：页面 → 原生的 DOM 桥（只有可见视图要）----
+    // ---- 键盘焦点：这里**不注入任何脚本** ----
     //
-    // 见 [requestWebViewFocus]：点击落在 WebView2 最里层那个跨进程窗口上，宿主一条鼠标
-    // 消息都收不到，所以「点击 → 把焦点送进 WebView」只能从页面里喊回来。
-    // 这条桥是键盘可用的**主路径**，不是优化。
-    if (!view->background) {
-        auto* mh = new (std::nothrow) FocusMessageHandler(view->hwnd);
-        if (mh) {
-            view->messageHandler = mh;
-            mh->Release();
-            const HRESULT hrMsg = webview->add_WebMessageReceived(view->messageHandler.Get(),
-                                                                 &view->tMessage);
-            WV_LOG("view %p: add_WebMessageReceived hr=0x%08lX", view->hwnd,
-                   static_cast<unsigned long>(hrMsg));
-        } else {
-            WV_LOG("view %p: FocusMessageHandler 分配失败（键盘可能没反应）", view->hwnd);
-        }
-        auto* sh = new (std::nothrow) NoopScriptAddedHandler();
-        if (sh) {
-            const std::wstring bridge =
-                debugEnabled() ? (std::wstring(kFocusBridgeScript) + kKeyProbeScript)
-                               : std::wstring(kFocusBridgeScript);
-            const HRESULT hrScript = webview->AddScriptToExecuteOnDocumentCreated(bridge.c_str(), sh);
-            WV_LOG("view %p: AddScriptToExecuteOnDocumentCreated(焦点桥%s) hr=0x%08lX", view->hwnd,
-                   debugEnabled() ? "+按键探针" : "", static_cast<unsigned long>(hrScript));
-            sh->Release();
-        }
-    }
-
-    if (!opt.initScript.empty()) {
-        auto* h = new (std::nothrow) NoopScriptAddedHandler();
-        if (h) {
-            webview->AddScriptToExecuteOnDocumentCreated(opt.initScript.c_str(), h);
-            h->Release();
-        }
-    }
+    // 曾经在这一段注入一个 DOM 桥（页面按下 / 拿到焦点就 `postMessage('acg:focus')` 回来），
+    // 因为点击落在 WebView2 最里层那个跨进程窗口上，宿主一条鼠标消息都收不到，
+    // 「点击 → 把焦点送进 WebView」只能从页面里喊回来。
+    //
+    // 2026-09-15 **整套删掉**，实测键盘正常。走的是纯原生链：
+    // 输入队列在 [nativeViewAttach] 里就接到了 AWT 线程 → 点击时系统激活 SunAwtFrame
+    // → AWT 把焦点派回 Canvas → 宿主收到 `WM_SETFOCUS`（见 [wndProc]）
+    // → [requestWebViewFocus] → `MoveFocus`。
+    //
+    // 哪天又打不了字，先查 [nativeViewAttach] 里那次 attach 成不成
+    // （日志找「输入队列已接到 AWT 线程」），再考虑回 git 历史 `f113a56` 取回桥。
 
     notifyViewEvent(view->hwnd, kViewReady, L"", L"");
 
@@ -2063,9 +1938,13 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // WebView2 的窗口是跨进程两层的（host → Chrome_WidgetWin_0 → Chrome_WidgetWin_1
         // → Chrome_RenderWidgetHostHWND），点击落在最里层，而那些消息**只到直接父窗口**
         // （Chrome_WidgetWin_0），永远到不了我们。探针里真实点击之后宿主一条都没收到。
-        // 所以点击这条路由 DOM 桥补，见 [kFocusBridgeScript] / [FocusMessageHandler]。
+        // 那点击是怎么走到这儿的？靠激活流程：输入队列在 [nativeViewAttach] 里就接到了
+        // AWT 线程 → 点击激活 `SunAwtFrame` → AWT 把焦点派回 Canvas（宿主）→ 下面这条
+        // `WM_SETFOCUS`。2026-09-15 把 DOM 桥整个删掉之后实测键盘仍然正常，就是这条链
+        // 能独立走通的证据（此前队列没提前接上，这条链走不通，才需要页面回喊）。
         case WM_SETFOCUS:
-            // 焦点到了宿主窗口 —— 送到 WebView2 去。这是 WebView2 官方示例里的标准做法。
+            // 焦点到了宿主窗口 —— 送到 WebView2 去。WebView2 官方示例的标准做法，
+            // 也是现在**唯一的主路径**。
             requestWebViewFocus(hwnd, 2);
             return 0;
         case WV_WM_FOCUS:
@@ -2081,7 +1960,8 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_LBUTTONDOWN:
         case WM_RBUTTONDOWN:
         case WM_MBUTTONDOWN:
-            // 同理：只有直接落在宿主窗口上的点击才收得到。真正的页面点击走 DOM 桥。
+            // 同理：只有直接落在宿主窗口上的点击才收得到（页面里的点击落在最里层，
+            // 永远到不了这儿）。这一路只覆盖「WebView2 没铺满、露出来的那点边」。
             PostMessageW(hwnd, WV_WM_FOCUS, 0, 0);
             return 0;
         case WM_TIMER:
@@ -2421,8 +2301,7 @@ WV_JNI(void, nativeCancel)(JNIEnv*, jobject, jlong id) {
  * 一下 —— 纯建窗口，没有 COM 调用，正常是微秒级。
  */
 WV_JNI(jlong, nativeCreateView)(JNIEnv* env, jobject, jlong parentHwnd, jstring userAgent,
-                         jstring initScript, jstring url, jboolean enableDevtools,
-                         jdouble zoom) {
+                         jstring url, jboolean enableDevtools, jdouble zoom) {
     {
         std::lock_guard<std::mutex> lock(g_envMutex);
         if (!g_envDone || !g_envError.empty()) return 0;
@@ -2432,7 +2311,6 @@ WV_JNI(jlong, nativeCreateView)(JNIEnv* env, jobject, jlong parentHwnd, jstring 
     view->background = false;
     ViewOptions opt;
     opt.userAgent = toWide(env, userAgent);
-    opt.initScript = toWide(env, initScript);
     opt.url = toWide(env, url);
     opt.enableDevtools = enableDevtools == JNI_TRUE;
     opt.zoom = zoom;
@@ -2527,6 +2405,15 @@ WV_JNI(void, nativeViewAttach)(JNIEnv* env, jobject, jlong handle, jobject awtCo
         // 尺寸交给下面的 fitViewToParent。
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
+        // 输入队列的接续就在这里做**一次**，之后不再动。
+        //
+        // `AttachThreadInput` 只吃两个线程 ID，跟窗口父子关系无关；目标线程是 AWT 的
+        // EDT（`SunAwtFrame` 的拥有者），进程内恒定 —— 所以接上就永久有效。
+        // 会变的只有**父窗口 HWND**（SwingPanel 重建），而那本来就要重新 `SetParent`、
+        // 也就是重新走到这里；新的根窗口仍属 EDT，接上的那条不用换。
+        // `ensureThreadAttached` 自带幂等判断，重复调用零成本。
+        ensureThreadAttached(view, hwnd, GetWindowThreadProcessId(hwnd, nullptr));
 
         ShowWindow(hwnd, SW_SHOWNA);
         WV_LOG("view %p: attach 到 AWT 组件 %p", hwnd, parent);
