@@ -22,8 +22,9 @@ import kotlinx.coroutines.withTimeoutOrNull
  * Android 上不需要「宿主窗口」：`android.webkit.WebView` 本来就能脱离视图树独立工作，
  * 所以这里是**命令式**建的那一个，而不是组合出来的。界面上不必画任何东西。
  *
- * 与桌面端的差别：`shouldInterceptRequest` 看得见**全部**请求（含图片/分片等子资源），
- * 所以靠拦 `Range` 头拿真实媒体地址的脚本在 Android 上原样可用。
+ * `shouldInterceptRequest` 看得见**全部**请求（含图片/分片等子资源），桌面端的自研
+ * WebView2 宿主现在也是全量拦截 —— 两端契约一致，靠拦 `Range` 头拿真实媒体地址的
+ * 脚本在两边都原样可用。
  */
 
 /** 建 WebView 用的 Context，由 [BackgroundWebViewHost] 在组合里顺手记下来。 */

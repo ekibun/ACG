@@ -14,3 +14,4 @@ endif ()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg/ffmpeg.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/quickjs/quickjs.cmake")
+include("${CMAKE_CURRENT_SOURCE_DIR}/webview/webview.cmake")

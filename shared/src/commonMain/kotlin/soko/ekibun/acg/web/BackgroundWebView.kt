@@ -8,46 +8,33 @@ import androidx.compose.runtime.Composable
  * 对应 BangumiPlugin `app/src/main/assets/modules/http.js` 里的 `webviewload` /
  * `__webview__`：脚本要一个「能跑页面 JS、能拦请求、但不占界面」的 WebView。
  *
- * 两端实现方式不同，但对外契约一致：
+ * 两端都是**引擎层的全量请求钩子**，契约一致：
  *
  * | | 实现 | 请求可见范围 |
  * | --- | --- | --- |
- * | Android | 命令式建一个无头 `android.webkit.WebView`（照抄 `BackgroundWebView`） | `shouldInterceptRequest`，**含全部子资源** |
- * | 桌面 | 在不显示的 Nucleus 窗口里组合一个 Compose `WebView`（WebView2/WKWebView/WebKit2GTK） | 只有主框架导航：库的 `RequestInterceptor` 接在 `addNavigateListener` 上 |
+ * | Android | 命令式建一个无头 `android.webkit.WebView` | `WebViewClient.shouldInterceptRequest`，含全部子资源 |
+ * | 桌面 (Windows) | 自研 C++ 宿主（`cxx/webview/webview.cpp`）里 1×1 的隐藏窗口 | `add_WebResourceRequested` + `AddWebResourceRequestedFilter("*", ALL)`，含全部子资源 |
  *
- * 这个差别**不是平台能力问题，是库把钩子接在了「导航」上**（反编译 1.0.3 确认）：
- * 三端桌面后端的 JNI 桥都只有 `addNavigateListener(handle, (url: String) -> Boolean)`
- * 这一个请求相关入口，Windows 那份 native 只注册了
- * `ICoreWebView2NavigationStartingEventHandler`（DLL 里 `WebResourceRequested`
- * 一次都没出现）；Android 那份也**没有** override `shouldInterceptRequest`，而是把
- * `onInterceptUrlRequest` 接在 `WebViewClient.shouldOverrideUrlLoading` 上 ——
- * 同样是主框架导航。所以 README 那句 "RequestInterceptor does **not** intercept
- * sub-resources" 是四端通吃的结论，不是桌面端独有的毛病。
+ * 桌面端以前用的是预编译的 `dev.nucleusframework:composewebview`，它的
+ * `RequestInterceptor` 只接在 `addNavigateListener`（= 主框架导航）上，子资源一律
+ * 拦不到，于是「靠拦媒体分片（m3u8/ts）拿真实地址」这类写法在桌面上永远失效。
+ * 现在钩子接到了引擎的 `WebResourceRequested` 上，两端能力对齐。
  *
- * 由此有两条**写脚本时必须知道**的后果：
+ * cookie 也是统一的：桌面端可见页与后台页共用同一个 WebView2 environment
+ * （同一份 user data folder），Android 端共用系统 `CookieManager`。在这一页登录过，
+ * 脚本那边就是登录态；反之亦然。
  *
- * 1. 靠拦媒体分片（m3u8/ts）拿真实地址的写法，在桌面端永远拦不到；
- * 2. 桌面端回调里只有 url 是真的，其余字段是占位值 —— 库那边 `WebRequest` 被构造成
- *    `headers = emptyMap()`、`isForMainFrame = true`、`isRedirect = true`、
- *    `method` 取默认值。所以
- *    `(request) => !request.isForMainFrame && request.headers.Range` 这种判断
- *    **在桌面端恒不成立**，别拿它当「有没有命中」的依据。
- *
- * 要真支持子资源拦截，得改那层 C++ shim 和它的 JNI 面。引擎本身是支持的
- * （WebView2 有 `add_WebResourceRequested` + `AddWebResourceRequestedFilter("*", ALL)`，
- * Android 有 `shouldInterceptRequest`；只有 macOS 的 WKWebView 是真做不到任意 https 拦截，
- * 得靠自定义 scheme + `WKURLSchemeHandler`），但预编译产物里没有这个入口，本工程改不了。
+ * 有一条**两端都一样**的硬约束，见 [WebViewTask.onInterceptRequest] 的说明：
+ * 拦截回调不能从 JS 调用内部同步触发。
  */
 
 /**
  * 后台 WebView 看到的一个请求。
  *
- * 字段是否可信，取决于哪一端在报（见文件头的说明）：
- *
- * - **Android**（我们自己写的 `shouldInterceptRequest`，含子资源）：五个字段都是真的。
- * - **桌面**（库的 `RequestInterceptor`，只有主框架导航）：只有 [url] 是真的，
- *   [headers] 恒为空、[method] 取默认值、[isForMainFrame] 与 [isRedirect] 恒为 `true`。
- *   拿不到 `Range` 之类的请求头，也就没法照 `http.js` 的路子靠分片请求反推媒体地址。
+ * - 两端 [url] / [headers] / [method] / [isForMainFrame] 都是真的
+ *   （桌面端来自 `ICoreWebView2HttpRequestHeaders`，所以 `Range` 之类的头拿得到）。
+ * - [isRedirect] 只有 Android 有（`WebResourceRequest.isRedirect`）；WebView2 的
+ *   请求事件里没有这个信息，桌面上**恒为 false**。别用它当「有没有命中」的依据。
  */
 data class WebViewRequest(
     val url: String,
@@ -80,14 +67,13 @@ data class WebViewTask(
     /** 页面加载完成后注入并取回其返回值的脚本；null 表示不注入。 */
     val script: String? = null,
     /**
-     * 命中即中止加载。返回 null 表示放行。
-     *
-     * **会在 WebView 的回调线程上被调用**，实现里不要假设自己在哪条线程。
+     * 命中即中止加载。返回 null 表示放行。**会在 WebView 的回调线程上被调用**，
+     * 实现里不要假设自己在哪条线程。
      *
      * 但有一条硬约束：**不能从 JS 调用内部同步回调它**。脚本调 `webviewAsync`
      * 时 `_java` 仍在 native `evaluate` 里没返回，此时反向去调 JS 函数是对引擎的
      * 重入调用，本桥会让整轮 Promise 停摆（实测挂死不返回，耗时也不增长）。
-     * 所以拦截回调必须来自平台侧（`shouldInterceptRequest` / `RequestInterceptor`），
+     * 所以拦截回调必须来自平台侧（`shouldInterceptRequest` / `WebResourceRequested`），
      * 也就是「脚本已经挂在 `await` 上、派发线程空闲」的时刻 —— 两端实现都是这么做的。
      */
     val onInterceptRequest: ((WebViewRequest) -> WebViewInterception?)? = null,
@@ -112,11 +98,12 @@ sealed interface WebViewTaskResult {
     data class Scripted(val json: String?) : WebViewTaskResult
 
     /**
-     * 没跑起来：没有可用的 WebView 后端、宿主窗口没挂上、或者超时。
+     * 没跑起来或者超时：WebView 环境不可用（比如 Windows 没装 WebView2 运行时）、
+     * 导航失败、脚本执行失败。
      *
-     * 之所以要单独一个分支而不是简单返回 null：桌面端「没装 WebView2 运行时」时
-     * 库会**静默降级成空壳**（既不加载也不报错），脚本侧只会看到一个永远为空的
-     * 结果。把它变成一条明确的失败信息，比让人去猜哪一步没生效强。
+     * 之所以要单独一个分支而不是简单返回 null：这些情况以前会被后端**静默降级成
+     * 空壳**（既不加载也不报错），脚本侧只会看到一个永远为空的结果。变成一条明确的
+     * 失败信息，比让人去猜哪一步没生效强。
      */
     data class Failed(val message: String) : WebViewTaskResult
 }
@@ -127,16 +114,13 @@ const val BACKGROUND_WEBVIEW_TIMEOUT_MS: Long = 30_000
 /**
  * 消费后台任务的 Compose 宿主。
  *
- * - **桌面**：必须挂在一个**不显示**的窗口里（见 `desktopApp/main.kt`）。
- *   WebView2 需要真实 HWND，拿不到就静默降级成空壳，所以没有捷径可走。
- * - **Android**：只是顺手把 `Context` 记下来（命令式建 WebView 要用），什么都不画。
+ * - **桌面**：什么窗口都不用挂（native 自己有隐藏窗口），这里只顺手预热一下环境。
+ * - **Android**：顺手把 `Context` 记下来（命令式建 WebView 要用），什么都不画。
  */
 @Composable
 expect fun BackgroundWebViewHost()
 
 /**
  * 跑一次后台 WebView 任务；调用方挂起直到页面出结果、命中拦截或超时。
- *
- * 未注册宿主（桌面忘了挂窗口）时抛 [IllegalStateException]。
  */
 expect suspend fun loadBackgroundWebView(task: WebViewTask): WebViewTaskResult

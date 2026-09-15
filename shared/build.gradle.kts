@@ -47,13 +47,14 @@ kotlin {
             implementation(libs.androidx.lifecycle.viewmodelCompose)
             implementation(libs.androidx.lifecycle.runtimeCompose)
             implementation(libs.ktor.client.core)
-            // 跨端 WebView：Android 走 android.webkit.WebView，
-            // 桌面(jvm)走 Nucleus Tao NativeView 里的 WebView2/WKWebView/WebKit2GTK。
-            implementation(libs.compose.webview)
+            // 跨端 WebView 不再用预编译的 composewebview：Android 端直接用
+            // android.webkit.WebView，桌面端走自研的 cxx/webview（见 soko.ekibun.acg.web）。
         }
         jvmMain.dependencies {
             implementation(libs.ktor.client.java)
             implementation(libs.logback.classic)
+            // 桌面端可见 WebView 的宿主：整个 AWT 组件（SwingPanel 里的 Canvas）+ JAWT
+            // 取 HWND + SetParent，全在自己这边，不需要任何第三方窗口库。
         }
         jvmTest.dependencies {
             implementation(libs.kotlin.test)
@@ -70,6 +71,20 @@ tasks.named<ProcessResources>("jvmTestProcessResources") {
     from(binDir) {
         include("*.dll", "*.so", "*.dylib")
     }
+}
+
+// 临时调试：把 webview.cpp 的日志打开
+tasks.named<Test>("jvmTest") {
+    environment("ACG_WEBVIEW_DEBUG", "1")
+    environment("ACG_WEBVIEW_LOG", "${rootProject.layout.projectDirectory.asFile}/build/acg-webview.log")
+    // 让 WebView2 把自己那份 Chromium 日志写到 user data folder 下的
+    // EBWebView/chrome_debug.log —— 引擎出的问题只有这份日志说得清。
+    // 想试别的浏览器参数（比如 --disable-gpu）就设 ACG_WEBVIEW2_ARGS，会追加在后面。
+    val extraArgs = providers.environmentVariable("ACG_WEBVIEW2_ARGS").orNull.orEmpty()
+    environment(
+        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+        "--enable-logging --v=1" + if (extraArgs.isBlank()) "" else " $extraArgs",
+    )
 }
 
 dependencies {
