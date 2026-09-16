@@ -1,0 +1,97 @@
+# .agents/
+
+**给 AI agent 用的资产**：一个规则指针，加一组按需加载的技能（skills）。目录约定与
+[ShoMetrics/sho_metrics](https://github.com/ShoMetrics/sho_metrics/tree/main/.agents) 对齐，
+让不同宿主（WorkBuddy / Codex / Cursor 系）都能找到同一份内容。
+
+## 三处分工（别混）
+
+| 位置 | 是什么 | 什么时候进上下文 |
+|---|---|---|
+| `AGENTS.md`（根） / `cxx/AGENTS.md` | **指令** —— 刚性约定、"不读就会改错"的陷阱 | 自动加载（按目录就近生效） |
+| `.agents/skills/**`（本目录） | **参考** —— 出问题或写代码时才查的资料 | **按需**，由 skill 的 description 触发 |
+| `TODO.md`（根） | **状态** —— 未完成的工作、已知缺口 | 想动手改东西之前 |
+
+判断标准一句话：**"不读它就会改错"→ 写进就近的 AGENTS.md；"要查的时候才看"→ 放这里。**
+
+## 文档体例
+
+写或改仓库里的指令 / 参考文档时，除上面的分工外还有四条硬规矩（都是返工过才定下的）：
+
+- **状态词不进 `AGENTS.md`**：`待修` / `待办` / `待补` / `待迁移` / `待重新核定` 一律写进 [TODO.md](../TODO.md)；
+  指令文件只放**长期成立的规则**与**"不读就会改错"的陷阱**。这条可 grep 验收 ——
+  上述词在 `AGENTS.md` 里的出现次数应为 **0**。
+- **改文档同样不许引入未核实的事实**：删改时不得凭印象补技术断言（本项目为此返工过一次）。
+  不确定就先去读调用点，或跑一遍。
+- **删旧清单前，先逐条建"它在新的落点对照"**：确认每一条都有地方接手再删，别整段凭印象砍掉。
+- **同一个事实只留一个正本**：别处已有就在此处只写指针。索引集中在 `AGENTS.md` §9，
+  本目录不再重复一份。
+
+## 结构
+
+```
+.agents/
+├── rules/
+│   └── agents.md              # 只为兼容按 .agents/rules/ 加载规则的宿主；指向根 AGENTS.md
+└── skills/
+    └── <skill>/
+        ├── SKILL.md           # 必填。frontmatter 的 name + description 决定何时被加载
+        └── references/        # 按需加载的详细资料，SKILL.md 只做路由
+```
+
+现有技能：
+
+| skill | 什么时候用 |
+|---|---|
+| `coding-style` | 写 Kotlin / Compose / C++ / Gradle 代码时 |
+| `webview2-windows` | 桌面端 WebView 宿主出问题、要改它时 |
+| `quickjs-ownership` | 要动 QuickJS 的引用计数与所有权时 |
+| `project-traps` | 动不熟悉的模块、准备改历史踩坑区域之前 |
+| `debugging` | 崩溃 / 挂死 / 要开日志时 |
+
+## 接线：这些技能怎么被读到
+
+**本目录不建任何本地联接。** 历史上有过一个 `<workspace>/.workbuddy/skills` → `.agents/skills`
+的目录联接，2026-09-16 已按用户要求**删除**：它不入库、每台机器都得重建，收益只是"宿主可能自动登记
+技能"，而"宿主扫描器是否跟随联接"始终没验证过 —— 不如把路径写清楚。
+
+现在靠**显式路径**，不需要任何额外步骤：
+
+1. **首入口是 `AGENTS.md` §9 的表格** —— 每个技能在那儿都有"什么时候看"+ 路径。
+   `AGENTS.md` 是自动加载的，所以触发条件始终在上下文里。
+2. 要用了就直接读 `.agents/skills/<name>/SKILL.md`，再按它自己的路由去读 `references/`。
+
+- 宿主若自己认出了同名技能（把 `SKILL.md` 的 `description` 当触发条件），用技能名触发即可；
+  认不出也不影响功能 —— **两边指向同一份文件**。
+- **不要往 `<workspace>/.workbuddy/skills/` 放技能副本**：那是本地缓存目录，放了只会产生第二份真相。
+  本机的编译环境与本地文件清单记在 `.workbuddy/memory/MEMORY.md`（gitignore，不入库）。
+
+## 加一个新技能
+
+1. 先问自己：它是不是"要查的时候才看"的资料？如果"不读就会改错"，应该写进就近的 `AGENTS.md`，不是这里。
+2. 建 `.agents/skills/<kebab-case-名>/SKILL.md`，frontmatter 三段：
+
+   ```yaml
+   ---
+   name: <与目录名一致的 kebab-case>
+   description: >-
+     <这个技能覆盖什么。> Use when <精确的触发条件：什么任务、什么现象、什么文件>。
+   agent_created: true
+   ---
+   ```
+
+   - `description` **首先是触发条件，不是技能简介**。写"数据库相关的都看这个"会让它在任何沾边的任务上
+     被加载；写"改 migration 或审查 migration 上线时看"才准。**尽量短，但把适用边界说清。**
+   - `agent_created: true` 必须写，否则后续无法用 `skill_manage` 修改。
+3. SKILL.md 正文**只做路由**：说明覆盖什么、什么时候读哪个 `references/` 文件，
+   并明确写"**不要默认加载 `references/` 全部**"。
+4. 详细内容放 `references/*.md`。**同一个事实只允许有一个正本** —— 如果别处已有，这里只留指针。
+5. 技能数量保持少而精。每多一个技能，它的 name + description 就多占一份上下文，
+   描述之间还容易互相干扰。
+
+## 不要做
+
+- **不要在这里写规则**。规则属于 `AGENTS.md`；本目录只放"要查的时候才看"的资料。
+- **不要把技能复制到 `<workspace>/.workbuddy/skills/`**：那是本机的缓存目录、且不入库。
+  技能的正本只在 `.agents/skills/`，按需直接读 —— 复制出来的第二份一定会漂移。
+- **不要把一个技能写成操作手册**。模型自己会判断步骤，过细的流程反而是干扰。
