@@ -1,6 +1,15 @@
 package soko.ekibun.ffmpeg
 
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -34,7 +43,7 @@ import kotlin.time.Duration.Companion.milliseconds
 class FFPlayer(
   url: String,
   io: AvIO.Handler,
-  val playback: AvPlayback? = null
+  val playback: AvPlayback? = null,
 ) : AvFormat(url, io) {
   /**
    * 播放基准点。
@@ -80,7 +89,10 @@ class FFPlayer(
   /** 用户是否显式暂停过。seek 后据此决定要不要恢复播放。 */
   private var paused = false
 
-  suspend fun play(streams: Map<Int, AvStream>, seek: Long? = null) = withContext(dispatcher) {
+  suspend fun play(
+    streams: Map<Int, AvStream>,
+    seek: Long? = null,
+  ) = withContext(dispatcher) {
     pause()
     val p = seek ?: pts?.now(playback?.speedRatio ?: 1f) ?: 0
     pts = PTS(streams).also { it.playing = true }
@@ -88,12 +100,13 @@ class FFPlayer(
     seekTo(p)
   }
 
-  suspend fun pause() = withContext(dispatcher) {
-    paused = true
-    pts?.playing = false
-    playback?.pause()
-    playingJob?.join()
-  }
+  suspend fun pause() =
+    withContext(dispatcher) {
+      paused = true
+      pts?.playing = false
+      playback?.pause()
+      playingJob?.join()
+    }
 
   private var playingJob: Deferred<Unit>? = null
 
@@ -131,20 +144,22 @@ class FFPlayer(
     }
   }
 
-  suspend fun resume(stopOnNextFrame: Boolean = false) = withContext(dispatcher) {
-    if (stopOnNextFrame) {
-      val newPts = pts
-      val hitFrame = suspendCancellableCoroutine<Boolean> {
-        if (pts != newPts) return@suspendCancellableCoroutine
-        playingJob = async(dispatcher) { resumeImpl(it) }
+  suspend fun resume(stopOnNextFrame: Boolean = false) =
+    withContext(dispatcher) {
+      if (stopOnNextFrame) {
+        val newPts = pts
+        val hitFrame =
+          suspendCancellableCoroutine<Boolean> {
+            if (pts != newPts) return@suspendCancellableCoroutine
+            playingJob = async(dispatcher) { resumeImpl(it) }
+          }
+        if (pts != newPts) return@withContext
+        if (hitFrame) pause()
+      } else {
+        paused = false
+        playingJob = async(dispatcher) { resumeImpl(null) }
       }
-      if (pts != newPts) return@withContext
-      if (hitFrame) pause()
-    } else {
-      paused = false
-      playingJob = async(dispatcher) { resumeImpl(null) }
     }
-  }
 
   private val codecs = HashMap<Int, AvCodec>()
   private val frames = HashMap<Int, ArrayList<AvFrame>>()
@@ -157,38 +172,41 @@ class FFPlayer(
       // 所有 PTS 落后于它的视频帧解码后立刻丢弃（对应 ffplay 的 frame_drops_early），
       // 直到第一帧追上目标才撤掉这个标记、回到正常同步。
       val resyncTo = pts.base?.also { pts.base = null }
-      val playJobs = pts.streams.map { (codecType, stream) ->
-        async(dispatcher) {
-          var lastUpdateJob: Job? = null
-          while (isPlaying()) {
-            val frame = frames[stream.index]?.firstOrNull { frame ->
-              frame.processing != pts
-            }
-            if (frame == null) {
-              delay(1.milliseconds)
-              continue
-            }
-            frame.processing = pts
-            val lastUpdate = lastUpdateJob
-            lastUpdateJob = async(dispatcher) updateJob@{
-              if (!isPlaying()) return@updateJob
-              val muteOnNextFrame = {
-                codecType == AVMediaType.AUDIO && onNextFrame?.isActive == true
-              }
-              // decode frame
-              if (!muteOnNextFrame()) playback?.postFrame(codecType, frame)
-              lastUpdate?.join()
-              if (!isPlaying()) return@updateJob
-              // wait video
-              if (codecType == AVMediaType.VIDEO && onNextFrame?.isActive != true) {
-                while (frame.timeStamp > pts.now(playback?.speedRatio ?: 1f)) {
-                  delay(1.milliseconds)
-                  if (!isPlaying()) return@updateJob
+      val playJobs =
+        pts.streams.map { (codecType, stream) ->
+          async(dispatcher) {
+            var lastUpdateJob: Job? = null
+            while (isPlaying()) {
+              val frame =
+                frames[stream.index]?.firstOrNull { frame ->
+                  frame.processing != pts
                 }
+              if (frame == null) {
+                delay(1.milliseconds)
+                continue
               }
-              if (muteOnNextFrame()) return@updateJob
-              val timeStamp = playback?.flushFrame(codecType, frame) ?: -1
-              if (!isPlaying()) return@updateJob
+              frame.processing = pts
+              val lastUpdate = lastUpdateJob
+              lastUpdateJob =
+                async(dispatcher) updateJob@{
+                  if (!isPlaying()) return@updateJob
+                  val muteOnNextFrame = {
+                    codecType == AVMediaType.AUDIO && onNextFrame?.isActive == true
+                  }
+                  // decode frame
+                  if (!muteOnNextFrame()) playback?.postFrame(codecType, frame)
+                  lastUpdate?.join()
+                  if (!isPlaying()) return@updateJob
+                  // wait video
+                  if (codecType == AVMediaType.VIDEO && onNextFrame?.isActive != true) {
+                    while (frame.timeStamp > pts.now(playback?.speedRatio ?: 1f)) {
+                      delay(1.milliseconds)
+                      if (!isPlaying()) return@updateJob
+                    }
+                  }
+                  if (muteOnNextFrame()) return@updateJob
+                  val timeStamp = playback?.flushFrame(codecType, frame) ?: -1
+                  if (!isPlaying()) return@updateJob
               /*
                * seek 后的丢帧收敛（ffplay frame_drops_early）：
                *   diff = dpts - master_clock;  主时钟 == resyncTo
@@ -203,27 +221,29 @@ class FFPlayer(
                * relate（下面 `pts.update(timeStamp)`），时钟因此能先跳到目标，
                * 视频随后跟上来。
                */
-              if (codecType == AVMediaType.VIDEO && resyncTo != null &&
-                timeStamp >= 0 && timeStamp < resyncTo &&
-                resyncTo - timeStamp < maxResyncDropDistance
-              ) {
-                return@updateJob
-              }
-              if (timeStamp >= 0) pts.update(timeStamp)
-              if (codecType == AVMediaType.VIDEO && onNextFrame?.isActive == true) {
-                pts.update(frame.timeStamp)
-                onNextFrame.resumeWith(Result.success(true))
-              }
-              playback?.onFrame?.invoke(pts.now(playback.speedRatio))
-            }.also { job ->
-              job.invokeOnCompletion {
-                frames[stream.index]?.remove(frame)
-              }
+                  if (codecType == AVMediaType.VIDEO &&
+                    resyncTo != null &&
+                    timeStamp >= 0 &&
+                    timeStamp < resyncTo &&
+                    resyncTo - timeStamp < maxResyncDropDistance
+                  ) {
+                    return@updateJob
+                  }
+                  if (timeStamp >= 0) pts.update(timeStamp)
+                  if (codecType == AVMediaType.VIDEO && onNextFrame?.isActive == true) {
+                    pts.update(frame.timeStamp)
+                    onNextFrame.resumeWith(Result.success(true))
+                  }
+                  playback?.onFrame?.invoke(pts.now(playback.speedRatio))
+                }.also { job ->
+                  job.invokeOnCompletion {
+                    frames[stream.index]?.remove(frame)
+                  }
+                }
+              lastUpdate?.join()
             }
-            lastUpdate?.join()
           }
         }
-      }
       try {
         pts.playing = true
         playback?.resume()
@@ -235,8 +255,9 @@ class FFPlayer(
           }
           val packet = getPacket(pts.streams.values)
           if (packet == null) {
-            if (frames.map { it.value.size }.sum() == 0)
+            if (frames.map { it.value.size }.sum() == 0) {
               break
+            }
             delay(100.milliseconds)
             continue
           }
@@ -250,16 +271,20 @@ class FFPlayer(
             continue
           }
           val stream = pts.streams.values.first { it.index == packet.streamIndex }
-          val codec = codecs.getOrPut(stream.index) {
-            AvCodec(stream)
-          }
+          val codec =
+            codecs.getOrPut(stream.index) {
+              AvCodec(stream)
+            }
           @Suppress("DeferredResultUnused")
           async(dispatcher) {
             // 一个 packet 可能产出 0 帧（B 帧重排时帧被解码器缓存）或多帧，
             // 必须把整批都收进来，只取第一帧会丢帧。
-            val decoded = if (this@FFPlayer.pts == pts) {
-              codec.sendPacketAndGetFrames(packet)
-            } else emptyList()
+            val decoded =
+              if (this@FFPlayer.pts == pts) {
+                codec.sendPacketAndGetFrames(packet)
+              } else {
+                emptyList()
+              }
             sendingPacket--
             if (this@FFPlayer.pts != pts) {
               decoded.forEach { it.close() }
@@ -271,9 +296,11 @@ class FFPlayer(
         }
         // EOF 前把解码器内部缓存的尾帧 drain 出来，否则末尾若干帧永远播不出。
         if (isPlaying()) {
-          val drained = codecs.map { (index, codec) ->
-            async(dispatcher) { index to codec.drain() }
-          }.awaitAll()
+          val drained =
+            codecs
+              .map { (index, codec) ->
+                async(dispatcher) { index to codec.drain() }
+              }.awaitAll()
           if (pts == this@FFPlayer.pts) {
             val pending = drained.sumOf { it.second.size }
             if (pending > 0) {
@@ -299,14 +326,16 @@ class FFPlayer(
       playJobs.joinAll()
     }
 
-  override suspend fun close() = withContext(dispatcher) {
-    pause()
-    super.close()
-    codecs.map {
-      async(dispatcher) {
-        it.value.close()
-      }
-    }.awaitAll()
-    codecs.clear()
-  }
+  override suspend fun close() =
+    withContext(dispatcher) {
+      pause()
+      super.close()
+      codecs
+        .map {
+          async(dispatcher) {
+            it.value.close()
+          }
+        }.awaitAll()
+      codecs.clear()
+    }
 }

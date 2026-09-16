@@ -3,30 +3,34 @@ package soko.ekibun.acg.player
 import android.graphics.Bitmap
 import android.graphics.Paint
 import android.graphics.SurfaceTexture
-import android.media.*
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTimestamp
+import android.media.AudioTrack
 import android.view.Surface
+import androidx.core.graphics.createBitmap
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import soko.ekibun.ffmpeg.AvFormat
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
-import androidx.core.graphics.createBitmap
-import soko.ekibun.ffmpeg.AvFormat
 
 class AndroidPlayback(
   var surfaceTexture: SurfaceTexture,
   onFrame: (Long?) -> Unit,
 ) : Playback(
-  onFrame
-) {
+    onFrame,
+  ) {
   private val dispatcher by lazy {
     Executors.newSingleThreadExecutor().asCoroutineDispatcher()
   }
 
   companion object {
-    const val defaultRate = 48000
-    const val defaultChannel = AudioFormat.CHANNEL_OUT_STEREO
+    const val DEFAULT_RATE = 48000
+    const val DEFAULT_CHANNEL = AudioFormat.CHANNEL_OUT_STEREO
 
     /**
      * AudioTrack 的编码格式。native 会按它转码，所以改这个值就能整体切换音频位宽，
@@ -37,7 +41,7 @@ class AndroidPlayback(
      * 且 byte[] 写入路径不经过 short[] 那条 `> ENCODING_LEGACY_SHORT_ARRAY_THRESHOLD`
      * 的限制分支。
      */
-    const val defaultFormat = AudioFormat.ENCODING_PCM_8BIT
+    const val DEFAULT_FORMAT = AudioFormat.ENCODING_PCM_8BIT
   }
 
   override val sampleRate: Int by lazy { audio.sampleRate }
@@ -66,59 +70,66 @@ class AndroidPlayback(
     val audioMode = AudioTrack.MODE_STREAM
     AudioTrack(
       AudioAttributes.Builder().build(),
-      AudioFormat.Builder()
-        .setSampleRate(defaultRate)
-        .setChannelMask(defaultChannel)
-        .setEncoding(defaultFormat)
+      AudioFormat
+        .Builder()
+        .setSampleRate(DEFAULT_RATE)
+        .setChannelMask(DEFAULT_CHANNEL)
+        .setEncoding(DEFAULT_FORMAT)
         .build(),
       AudioTrack.getMinBufferSize(
-        defaultRate,
-        defaultChannel,
-        defaultFormat
+        DEFAULT_RATE,
+        DEFAULT_CHANNEL,
+        DEFAULT_FORMAT,
       ),
       audioMode,
-      AudioManager.AUDIO_SESSION_ID_GENERATE
+      AudioManager.AUDIO_SESSION_ID_GENERATE,
     )
   }
 
   var frameWrite = 0L
-  override suspend fun flushAudioBuffer(buf: ByteArray): Int = withContext(dispatcher) {
-    if (channels == 2 && isMuteVoice) {
-      // 左右声道相减（人声消除）。步长是每个采样点的字节数，不是固定 2：
-      // native 可能给 8bit(1) / 16bit(2) / float32(4)，按 2 走会串位。
-      val bytesPerSample = when (audio.audioFormat) {
-        AudioFormat.ENCODING_PCM_8BIT -> 1
-        AudioFormat.ENCODING_PCM_FLOAT -> 4
-        else -> 2
-      }
-      val frameBytes = bytesPerSample * 2
-      var i = 0
-      while (i + frameBytes <= buf.size) {
-        for (b in 0 until bytesPerSample) {
-          val diff = (buf[i + b].toInt() and 0xFF) - (buf[i + bytesPerSample + b].toInt() and 0xFF)
-          // 8bit 是 unsigned，以 128 为零点，消声后要加回偏置
-          val v = if (bytesPerSample == 1) diff + 128 else diff
-          buf[i + b] = v.toByte()
-          buf[i + bytesPerSample + b] = v.toByte()
+
+  override suspend fun flushAudioBuffer(buf: ByteArray): Int =
+    withContext(dispatcher) {
+      if (channels == 2 && isMuteVoice) {
+        // 左右声道相减（人声消除）。步长是每个采样点的字节数，不是固定 2：
+        // native 可能给 8bit(1) / 16bit(2) / float32(4)，按 2 走会串位。
+        val bytesPerSample =
+          when (audio.audioFormat) {
+            AudioFormat.ENCODING_PCM_8BIT -> 1
+            AudioFormat.ENCODING_PCM_FLOAT -> 4
+            else -> 2
+          }
+        val frameBytes = bytesPerSample * 2
+        var i = 0
+        while (i + frameBytes <= buf.size) {
+          for (b in 0 until bytesPerSample) {
+            val diff = (buf[i + b].toInt() and 0xFF) - (buf[i + bytesPerSample + b].toInt() and 0xFF)
+            // 8bit 是 unsigned，以 128 为零点，消声后要加回偏置
+            val v = if (bytesPerSample == 1) diff + 128 else diff
+            buf[i + b] = v.toByte()
+            buf[i + bytesPerSample + b] = v.toByte()
+          }
+          i += frameBytes
         }
-        i += frameBytes
+      }
+      if (audio.playState != AudioTrack.PLAYSTATE_PLAYING) audio.play()
+      if (buf.isNotEmpty()) audio.write(buf, 0, buf.size)
+      // AudioTrack 的 framePosition 以采样帧为单位，与 channels 无关，不要再除
+      frameWrite += buf.size / (audio.channelCount * bytesPerSampleOf(audio.audioFormat))
+      val timestamp = AudioTimestamp()
+      if (audio.getTimestamp(timestamp)) {
+        (frameWrite - timestamp.framePosition).toInt()
+      } else {
+        -1
       }
     }
-    if (audio.playState != AudioTrack.PLAYSTATE_PLAYING) audio.play()
-    if (buf.isNotEmpty()) audio.write(buf, 0, buf.size)
-    // AudioTrack 的 framePosition 以采样帧为单位，与 channels 无关，不要再除
-    frameWrite += buf.size / (audio.channelCount * bytesPerSampleOf(audio.audioFormat))
-    val timestamp = AudioTimestamp()
-    if (audio.getTimestamp(timestamp))
-      (frameWrite - timestamp.framePosition).toInt()
-    else -1
-  }
 
-  private fun bytesPerSampleOf(encoding: Int): Int = when (encoding) {
-    AudioFormat.ENCODING_PCM_8BIT -> 1
-    AudioFormat.ENCODING_PCM_FLOAT -> 4
-    else -> 2
-  }
+  private fun bytesPerSampleOf(encoding: Int): Int =
+    when (encoding) {
+      AudioFormat.ENCODING_PCM_8BIT -> 1
+      AudioFormat.ENCODING_PCM_FLOAT -> 4
+      else -> 2
+    }
 
   var bitmap: Bitmap? = null
 
@@ -126,7 +137,11 @@ class AndroidPlayback(
 
   val paint by lazy { Paint() }
 
-  override fun flushVideoBuffer(buf: ByteArray, width: Int, height: Int) {
+  override fun flushVideoBuffer(
+    buf: ByteArray,
+    width: Int,
+    height: Int,
+  ) {
     updateAspectRatio(width, height)
     surfaceTexture.setDefaultBufferSize(width, height)
     if (bitmap == null || bitmap?.width != width || bitmap?.height != height) {
@@ -140,19 +155,22 @@ class AndroidPlayback(
     surface.unlockCanvasAndPost(canvas)
   }
 
-  override suspend fun resume() = withContext(dispatcher) {
-    audio.play()
-  }
+  override suspend fun resume() =
+    withContext(dispatcher) {
+      audio.play()
+    }
 
-  override suspend fun pause() = withContext(dispatcher) {
-    audio.pause()
-  }
+  override suspend fun pause() =
+    withContext(dispatcher) {
+      audio.pause()
+    }
 
-  override suspend fun stop() = withContext(dispatcher) {
-    audio.pause()
-    frameWrite = 0
-    audio.flush()
-  }
+  override suspend fun stop() =
+    withContext(dispatcher) {
+      audio.pause()
+      frameWrite = 0
+      audio.flush()
+    }
 
   override fun close() {
     super.close()

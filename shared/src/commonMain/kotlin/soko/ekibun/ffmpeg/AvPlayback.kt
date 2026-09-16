@@ -3,7 +3,7 @@ package soko.ekibun.ffmpeg
 import soko.ekibun.jniLoadLibrary
 
 abstract class AvPlayback(
-  val onFrame: (Long?) -> Unit
+  val onFrame: (Long?) -> Unit,
 ) {
   abstract val sampleRate: Int
   abstract val channels: Int
@@ -16,10 +16,16 @@ abstract class AvPlayback(
     }
   }
 
-  private external fun speedRatioNative(ctx: Long, new: Float): Float
+  private external fun speedRatioNative(
+    ctx: Long,
+    new: Float,
+  ): Float
+
   var speedRatio: Float
     get() = speedRatioNative(ctx, 0f)
-    set(value) { speedRatioNative(ctx, value) }
+    set(value) {
+      speedRatioNative(ctx, value)
+    }
 
   private var isClosed = false
 
@@ -27,21 +33,36 @@ abstract class AvPlayback(
     sampleRate: Int,
     channels: Int,
     audioFormat: Int,
-    videoFormat: Int
+    videoFormat: Int,
   ): Long
 
   private val ctx: Long by lazy {
     initNative(sampleRate, channels, audioFormat, videoFormat)
   }
 
-  private external fun postFrameNative(ctx: Long, codecType: Int, frame: Long): Int
-  fun postFrame(codecType: Int, frame: AvFrame): Int {
+  private external fun postFrameNative(
+    ctx: Long,
+    codecType: Int,
+    frame: Long,
+  ): Int
+
+  fun postFrame(
+    codecType: Int,
+    frame: AvFrame,
+  ): Int {
     if (isClosed) return -1
     return postFrameNative(ctx, codecType, frame.ptr)
   }
 
-  private external fun getBuffer(ctx: Long, codecType: Int): ByteArray
-  suspend fun flushFrame(codecType: Int, frame: AvFrame): Long {
+  private external fun getBuffer(
+    ctx: Long,
+    codecType: Int,
+  ): ByteArray
+
+  suspend fun flushFrame(
+    codecType: Int,
+    frame: AvFrame,
+  ): Long {
     if (isClosed) return -1
     when (codecType) {
       AVMediaType.AUDIO -> {
@@ -55,12 +76,21 @@ abstract class AvPlayback(
   }
 
   abstract suspend fun flushAudioBuffer(buf: ByteArray): Int
-  abstract fun flushVideoBuffer(buf: ByteArray, width: Int, height: Int)
+
+  abstract fun flushVideoBuffer(
+    buf: ByteArray,
+    width: Int,
+    height: Int,
+  )
+
   abstract suspend fun resume()
+
   abstract suspend fun pause()
+
   abstract suspend fun stop()
 
   private external fun closeNative(ctx: Long)
+
   open fun close() {
     isClosed = true
     closeNative(ctx)

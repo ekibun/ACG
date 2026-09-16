@@ -44,7 +44,6 @@ import kotlin.test.assertTrue
  * 保证以后不会又被"只用窗口就能精确 seek"这种想当然改回去。
  */
 class SeekWindowSemanticsTest {
-
   /**
    * 复刻 `stream_seek` + `read_thread` 里 `seek_min` / `seek_max` 的算法
    * （ffplay.c:1526-1537 / 3092-3121）。
@@ -52,14 +51,21 @@ class SeekWindowSemanticsTest {
    * `rel == 0`（我们的拖动进度条就是这种）时窗口**必须无界** —— `INT64_MIN`/`INT64_MAX`。
    * 这正是 [LONG_MIN_WINDOW] / [LONG_MAX_WINDOW] 要表达的常量。
    */
-  private data class SeekWindow(val minTs: Long, val maxTs: Long)
-
-  private fun streamSeekWindow(pos: Long, rel: Long): SeekWindow = SeekWindow(
-    // seek_min = seek_rel > 0 ? seek_target - seek_rel + 2 : INT64_MIN
-    if (rel > 0) pos - rel + 2 else Long.MIN_VALUE,
-    // seek_max = seek_rel < 0 ? seek_target - seek_rel - 2 : INT64_MAX
-    if (rel < 0) pos - rel - 2 else Long.MAX_VALUE,
+  private data class SeekWindow(
+    val minTs: Long,
+    val maxTs: Long,
   )
+
+  private fun streamSeekWindow(
+    pos: Long,
+    rel: Long,
+  ): SeekWindow =
+    SeekWindow(
+      // seek_min = seek_rel > 0 ? seek_target - seek_rel + 2 : INT64_MIN
+      if (rel > 0) pos - rel + 2 else Long.MIN_VALUE,
+      // seek_max = seek_rel < 0 ? seek_target - seek_rel - 2 : INT64_MAX
+      if (rel < 0) pos - rel - 2 else Long.MAX_VALUE,
+    )
 
   /**
    * 复刻 `avformat_seek_file` 回退分支里 `dir` 的推导（seek.c:705）。
@@ -69,7 +75,11 @@ class SeekWindowSemanticsTest {
    * `dir = AVSEEK_FLAG_BACKWARD`。ffplay 的 `seek_min = INT64_MIN`
    * 因此隐含了"往前找关键帧"的语义。
    */
-  private fun fallbackDir(ts: Long, minTs: Long, maxTs: Long): Int {
+  private fun fallbackDir(
+    ts: Long,
+    minTs: Long,
+    maxTs: Long,
+  ): Int {
     val lowerSpan = ts - minTs
     val upperSpan = maxTs - ts
     // 与 C 的 uint64_t 比较等价：只看符号位决定的"哪个更大"
@@ -162,15 +172,20 @@ class SeekWindowSemanticsTest {
   fun windowCannotMakeFallbackSeekAccurate() {
     val ts = 42_000_000L
     // 两个极端的窗口，落到 av_seek_frame 的目标时间戳完全相同
-    val targets = listOf(
-      Long.MIN_VALUE to Long.MAX_VALUE,
-      ts to Long.MAX_VALUE,
-    ).map { (minTs, maxTs) -> fallbackSeekTarget(ts, minTs, maxTs) }
+    val targets =
+      listOf(
+        Long.MIN_VALUE to Long.MAX_VALUE,
+        ts to Long.MAX_VALUE,
+      ).map { (minTs, maxTs) -> fallbackSeekTarget(ts, minTs, maxTs) }
     assertEquals(listOf(ts, ts), targets)
   }
 
   /** 回退分支把 min/max 丢掉后，真正传给 `av_seek_frame` 的只剩 `ts`。 */
-  private fun fallbackSeekTarget(ts: Long, minTs: Long, maxTs: Long): Long {
+  private fun fallbackSeekTarget(
+    ts: Long,
+    minTs: Long,
+    maxTs: Long,
+  ): Long {
     // seek.c:706 `av_seek_frame(s, stream_index, ts, flags | dir)`
     // 唯一的窗口痕迹是 dir，而 dir 只改 BACKWARD 位，不改 ts。
     fallbackDir(ts, minTs, maxTs)
@@ -194,16 +209,20 @@ class SeekWindowSemanticsTest {
    * seek 后主时钟被设成目标 ts，于是关键帧到目标之间的帧会被快速丢完，
    * 画面直接推进到用户选的位置 —— 这就是"平滑"的来源。
    */
-  private fun shouldDropEarly(frameTs: Long, masterClock: Long, noSyncThreshold: Double): Boolean {
+  private fun shouldDropEarly(
+    frameTs: Long,
+    masterClock: Long,
+    noSyncThreshold: Double,
+  ): Boolean {
     val diff = frameTs - masterClock
     return kotlin.math.abs(diff) < noSyncThreshold && diff < 0
   }
 
   @Test
   fun framesBeforeTargetAreDroppedAfterSeek() {
-    val target = 42_000_000L       // 目标 42s
-    val keyframe = 40_000_000L     // demuxer 落在 40s 的关键帧
-    val frameInterval = 40_000L    // 25fps -> 40ms
+    val target = 42_000_000L // 目标 42s
+    val keyframe = 40_000_000L // demuxer 落在 40s 的关键帧
+    val frameInterval = 40_000L // 25fps -> 40ms
     // 从关键帧到目标之间约 50 帧，全部应被丢弃
     var dropped = 0
     var ts = keyframe

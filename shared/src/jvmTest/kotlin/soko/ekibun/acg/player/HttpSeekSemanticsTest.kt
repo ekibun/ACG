@@ -1,8 +1,8 @@
 package soko.ekibun.acg.player
 
+import soko.ekibun.ffmpeg.AvFormat
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import soko.ekibun.ffmpeg.AvFormat
 
 /**
  * `HttpIO.seek` 的 whence 语义回归。
@@ -12,31 +12,38 @@ import soko.ekibun.ffmpeg.AvFormat
  * 不会被"优化"回"都当绝对偏移"。
  */
 class HttpSeekSemanticsTest {
-
   /** 与 HttpIO.seek 中 `when(whence)` 完全同构的纯函数，用于锁定语义。 */
-  private class Cursor(var offset: Int, var size: Long = -1L) {
-    fun seek(offset: Int, whence: Int): Long = when (whence) {
-      AvFormat.AVSEEK_SIZE -> size
-      SEEK_SET -> {
-        this.offset = offset
-        this.offset.toLong()
-      }
-
-      SEEK_CUR -> {
-        this.offset = (this.offset + offset).coerceAtLeast(0)
-        this.offset.toLong()
-      }
-
-      SEEK_END -> {
-        if (size < 0) -1L
-        else {
-          this.offset = (size + offset).coerceAtLeast(0).toInt()
+  private class Cursor(
+    var offset: Int,
+    var size: Long = -1L,
+  ) {
+    fun seek(
+      offset: Int,
+      whence: Int,
+    ): Long =
+      when (whence) {
+        AvFormat.AVSEEK_SIZE -> size
+        SEEK_SET -> {
+          this.offset = offset
           this.offset.toLong()
         }
-      }
 
-      else -> -1L
-    }
+        SEEK_CUR -> {
+          this.offset = (this.offset + offset).coerceAtLeast(0)
+          this.offset.toLong()
+        }
+
+        SEEK_END -> {
+          if (size < 0) {
+            -1L
+          } else {
+            this.offset = (size + offset).coerceAtLeast(0).toInt()
+            this.offset.toLong()
+          }
+        }
+
+        else -> -1L
+      }
   }
 
   private companion object {

@@ -15,6 +15,7 @@ class AvPacket {
   private external fun initNative(): Long
 
   external fun closeNative(ptr: Long)
+
   protected fun finalize() {
     closeNative(ptr)
   }

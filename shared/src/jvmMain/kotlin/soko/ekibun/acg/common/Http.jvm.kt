@@ -5,8 +5,9 @@ import io.ktor.client.engine.java.Java
 import io.ktor.client.plugins.cookies.AcceptAllCookiesStorage
 import io.ktor.client.plugins.cookies.HttpCookies
 
-actual fun createHttpClient(followRedirects: Boolean): HttpClient = HttpClient(Java) {
+actual fun createHttpClient(followRedirects: Boolean): HttpClient =
+  HttpClient(Java) {
     install(HttpCookies) {
-        storage = AcceptAllCookiesStorage()
+      storage = AcceptAllCookiesStorage()
     }
-}
+  }

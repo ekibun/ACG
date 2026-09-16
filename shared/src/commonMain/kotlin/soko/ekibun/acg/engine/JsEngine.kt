@@ -1,7 +1,7 @@
 package soko.ekibun.acg.engine
 
-import androidx.annotation.Keep
 import acg.shared.generated.resources.Res
+import androidx.annotation.Keep
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.request
 import io.ktor.http.isSuccess
@@ -37,29 +37,36 @@ class JsEngine {
     private const val WEBVIEW_KIND_KEY = "__webview_kind__"
 
     /** 判断一个实参能否赋给指定的形参类型（含装箱与数值放宽）。 */
-    private fun acceptsArg(paramType: Class<*>, arg: Any?): Boolean {
+    private fun acceptsArg(
+      paramType: Class<*>,
+      arg: Any?,
+    ): Boolean {
       if (arg == null) return !paramType.isPrimitive
       // 基本类型按名字映射到装箱类名，避免在 Kotlin 里引用 java.lang.Integer.TYPE 等
-      val boxedName = if (paramType.isPrimitive) {
-        when (paramType.name) {
-          "boolean" -> "java.lang.Boolean"
-          "char" -> "java.lang.Character"
-          "byte" -> "java.lang.Byte"
-          "short" -> "java.lang.Short"
-          "int" -> "java.lang.Integer"
-          "long" -> "java.lang.Long"
-          "float" -> "java.lang.Float"
-          "double" -> "java.lang.Double"
-          else -> paramType.name
+      val boxedName =
+        if (paramType.isPrimitive) {
+          when (paramType.name) {
+            "boolean" -> "java.lang.Boolean"
+            "char" -> "java.lang.Character"
+            "byte" -> "java.lang.Byte"
+            "short" -> "java.lang.Short"
+            "int" -> "java.lang.Integer"
+            "long" -> "java.lang.Long"
+            "float" -> "java.lang.Float"
+            "double" -> "java.lang.Double"
+            else -> paramType.name
+          }
+        } else {
+          paramType.name
         }
-      } else paramType.name
       if (!paramType.isPrimitive && paramType.isInstance(arg)) return true
       if (arg::class.java.name == boxedName) return true
       // 数值放宽：JS 侧拿到的整数都是 Double，需要能落到 Int/Long/Float 形参上
       if (arg !is Number) return false
       return when (boxedName) {
         "java.lang.Integer", "java.lang.Long", "java.lang.Short",
-        "java.lang.Byte", "java.lang.Float", "java.lang.Double" -> true
+        "java.lang.Byte", "java.lang.Float", "java.lang.Double",
+        -> true
         else -> false
       }
     }
@@ -67,67 +74,83 @@ class JsEngine {
 
   private var quickjsDelegate: QuickJS.Context? = null
   private val quickjs: QuickJS.Context
-    get() = quickjsDelegate ?: run {
-      val moduleHandler = { module: String ->
-        val modulePath = if (module == "@init") "files/js/init.js" else
-          "files/js/module/" + module.replaceFirst(".js$".toRegex(), "") + ".js"
-        runBlocking {
-          try {
-            Res.readBytes(modulePath).decodeToString()
-          } catch (_: Exception) {
-            null
+    get() =
+      quickjsDelegate ?: run {
+        val moduleHandler = { module: String ->
+          val modulePath =
+            if (module == "@init") {
+              "files/js/init.js"
+            } else {
+              "files/js/module/" + module.replaceFirst(".js$".toRegex(), "") + ".js"
+            }
+          runBlocking {
+            try {
+              Res.readBytes(modulePath).decodeToString()
+            } catch (_: Exception) {
+              null
+            }
           }
         }
+        val ctx1 =
+          QuickJS.Context(
+            moduleHandler = moduleHandler,
+          )
+        quickjsDelegate = ctx1
+        val init = ctx1.evaluate(moduleHandler("@init")!!, "<init>") as JSInvokable
+        init(
+          object : JSInvokable {
+            override fun invoke(
+              vararg argv: Any?,
+              thisVal: Any?,
+            ): Any? {
+              val obj = argv[0]
+              return if (obj is String) {
+                // 按名称实例化引擎插件类。包名必须跟随本工程的实际包名，
+                // 而不是从别处拷来的 `soko.ekibun.nekomp.*`。
+                val className = "$ENGINE_PACKAGE.$obj"
+                val cls =
+                  javaClass.classLoader?.loadClass(className)
+                    ?: throw JSError("cannot load class '$className'")
+                val ctorArgs = argv.sliceArray(1 until argv.size)
+                // 按实参个数选构造函数，不要盲取 constructors[0]（顺序无保证，
+                // 且多个构造函数时会选错）。
+                val ctor =
+                  cls.constructors.firstOrNull { it.parameterCount == ctorArgs.size }
+                    ?: throw JSError(
+                      "no constructor of '$className' accepts ${ctorArgs.size} argument(s)",
+                    )
+                ctor.isAccessible = true
+                ctor.newInstance(*ctorArgs)
+              } else {
+                val methodName = argv[1] as String
+                val objWrap = (obj ?: this@JsEngine)
+                val callArgs = argv.sliceArray(2 until argv.size)
+                // 重载时 declaredMethods 里会有多个同名方法，`first{}` 可能选错。
+                // 用"名字 + 参数个数"匹配，仍不唯一时再按参数类型宽容匹配。
+                val candidates =
+                  objWrap.javaClass.methods
+                    .filter { it.name == methodName && it.parameterCount == callArgs.size }
+                val method =
+                  candidates.firstOrNull { m ->
+                    m.parameterTypes.withIndex().all { (i, t) -> acceptsArg(t, callArgs[i]) }
+                  } ?: candidates.firstOrNull()
+                    ?: throw JSError(
+                      "no method '$methodName' with ${callArgs.size} argument(s) " +
+                        "on ${objWrap.javaClass.name}",
+                    )
+                method.isAccessible = true
+                method.invoke(objWrap, *callArgs)
+              }
+            }
+          },
+        )
+        ctx1
       }
-      val ctx1 = QuickJS.Context(
-        moduleHandler = moduleHandler
-      )
-      quickjsDelegate = ctx1
-      val init = ctx1.evaluate(moduleHandler("@init")!!, "<init>") as JSInvokable
-      init(object : JSInvokable {
-        override fun invoke(vararg argv: Any?, thisVal: Any?): Any? {
-          val obj = argv[0]
-          return if (obj is String) {
-            // 按名称实例化引擎插件类。包名必须跟随本工程的实际包名，
-            // 而不是从别处拷来的 `soko.ekibun.nekomp.*`。
-            val className = "$ENGINE_PACKAGE.$obj"
-            val cls = javaClass.classLoader?.loadClass(className)
-              ?: throw JSError("cannot load class '$className'")
-            val ctorArgs = argv.sliceArray(1 until argv.size)
-            // 按实参个数选构造函数，不要盲取 constructors[0]（顺序无保证，
-            // 且多个构造函数时会选错）。
-            val ctor = cls.constructors.firstOrNull { it.parameterCount == ctorArgs.size }
-              ?: throw JSError(
-                "no constructor of '$className' accepts ${ctorArgs.size} argument(s)"
-              )
-            ctor.isAccessible = true
-            ctor.newInstance(*ctorArgs)
-          } else {
-            val methodName = argv[1] as String
-            val objWrap = (obj ?: this@JsEngine)
-            val callArgs = argv.sliceArray(2 until argv.size)
-            // 重载时 declaredMethods 里会有多个同名方法，`first{}` 可能选错。
-            // 用"名字 + 参数个数"匹配，仍不唯一时再按参数类型宽容匹配。
-            val candidates = objWrap.javaClass.methods
-              .filter { it.name == methodName && it.parameterCount == callArgs.size }
-            val method = candidates.firstOrNull { m ->
-              m.parameterTypes.withIndex().all { (i, t) -> acceptsArg(t, callArgs[i]) }
-            } ?: candidates.firstOrNull()
-            ?: throw JSError(
-              "no method '$methodName' with ${callArgs.size} argument(s) " +
-                "on ${objWrap.javaClass.name}"
-            )
-            method.isAccessible = true
-            method.invoke(objWrap, *callArgs)
-          }
-        }
-      })
-      ctx1
-    }
 
-  fun evaluate(cmd: String, name: String = "<eval>"): Any? {
-    return quickjs.evaluate(cmd, name)
-  }
+  fun evaluate(
+    cmd: String,
+    name: String = "<eval>",
+  ): Any? = quickjs.evaluate(cmd, name)
 
   fun reset() {
     // 主动销毁 runtime，而不是只把引用置空等 GC：JS 侧的 Java 对象持有
@@ -137,19 +160,24 @@ class JsEngine {
   }
 
   @Keep
-  private fun console(type: String, data: Array<Any?>) {
+  private fun console(
+    type: String,
+    data: Array<Any?>,
+  ) {
     println("$type\n${data.toList()}")
   }
 
   @Keep
-  private fun encode(input: String, to: String?): ByteArray {
-    return input.toByteArray(Charset.forName(to?:"utf-8"))
-  }
+  private fun encode(
+    input: String,
+    to: String?,
+  ): ByteArray = input.toByteArray(Charset.forName(to ?: "utf-8"))
 
   @Keep
-  private fun decode(input: ByteArray, from: String?): String {
-    return String(input, Charset.forName(from?:"utf-8"))
-  }
+  private fun decode(
+    input: ByteArray,
+    from: String?,
+  ): String = String(input, Charset.forName(from ?: "utf-8"))
 
   @Keep
   private fun fetchAsync(options: JSObject): Deferred<Any?> {
@@ -188,36 +216,44 @@ class JsEngine {
     header: JSObject?,
     script: String?,
     onInterceptRequest: JSFunction?,
-  ): Deferred<Any?> = CoroutineScope(Dispatchers.IO).async {
-    val task = WebViewTask(
-      url = url,
-      headers = header?.entries?.associate { it.key.toString() to it.value.toString() }
-        ?: emptyMap(),
-      script = script,
-      onInterceptRequest = onInterceptRequest?.let { fn ->
-        { request: WebViewRequest -> invokeInterceptor(fn, request) }
-      },
-    )
+  ): Deferred<Any?> =
+    CoroutineScope(Dispatchers.IO).async {
+      val task =
+        WebViewTask(
+          url = url,
+          headers =
+            header?.entries?.associate { it.key.toString() to it.value.toString() }
+              ?: emptyMap(),
+          script = script,
+          onInterceptRequest =
+            onInterceptRequest?.let { fn ->
+              { request: WebViewRequest -> invokeInterceptor(fn, request) }
+            },
+        )
 
-    val payload: Any? = when (val result = loadBackgroundWebView(task)) {
-      is WebViewTaskResult.Intercepted -> mapOf(
-        WEBVIEW_KIND_KEY to "intercept",
-        "value" to mapOf(
-          "url" to result.interception.url,
-          "headers" to result.interception.headers,
-        ),
-      )
+      val payload: Any? =
+        when (val result = loadBackgroundWebView(task)) {
+          is WebViewTaskResult.Intercepted ->
+            mapOf(
+              WEBVIEW_KIND_KEY to "intercept",
+              "value" to
+                mapOf(
+                  "url" to result.interception.url,
+                  "headers" to result.interception.headers,
+                ),
+            )
 
-      is WebViewTaskResult.Scripted -> mapOf(
-        WEBVIEW_KIND_KEY to "script",
-        "value" to result.json,
-      )
+          is WebViewTaskResult.Scripted ->
+            mapOf(
+              WEBVIEW_KIND_KEY to "script",
+              "value" to result.json,
+            )
 
-      // 失败要让 JS 侧 reject，而不是回一个空值让脚本去猜哪一步没生效。
-      is WebViewTaskResult.Failed -> throw JSError(result.message)
+          // 失败要让 JS 侧 reject，而不是回一个空值让脚本去猜哪一步没生效。
+          is WebViewTaskResult.Failed -> throw JSError(result.message)
+        }
+      payload
     }
-    payload
-  }
 
   /**
    * 把 WebView 的回调转给 JS 侧的 `onInterceptRequest`。
@@ -238,20 +274,21 @@ class JsEngine {
     fn: JSFunction,
     request: WebViewRequest,
   ): WebViewInterception? {
-    val ret = try {
-      fn.invoke(
-        mapOf(
-          "url" to request.url,
-          "headers" to request.headers,
-          "method" to request.method,
-          "isForMainFrame" to request.isForMainFrame,
-          "isRedirect" to request.isRedirect,
+    val ret =
+      try {
+        fn.invoke(
+          mapOf(
+            "url" to request.url,
+            "headers" to request.headers,
+            "method" to request.method,
+            "isForMainFrame" to request.isForMainFrame,
+            "isRedirect" to request.isRedirect,
+          ),
         )
-      )
-    } catch (e: Throwable) {
-      console("error", arrayOf("onInterceptRequest 回调出错，按放行处理: $e"))
-      return null
-    }
+      } catch (e: Throwable) {
+        console("error", arrayOf("onInterceptRequest 回调出错，按放行处理: $e"))
+        return null
+      }
     try {
       val map = ret as? Map<*, *> ?: return null
       val interceptedUrl = map["url"] as? String ?: return null
@@ -259,9 +296,11 @@ class JsEngine {
       try {
         return WebViewInterception(
           url = interceptedUrl,
-          headers = headers?.entries
-            ?.associate { it.key.toString() to it.value.toString() }
-            ?: emptyMap(),
+          headers =
+            headers
+              ?.entries
+              ?.associate { it.key.toString() to it.value.toString() }
+              ?: emptyMap(),
         )
       } finally {
         (headers as? AutoCloseable)?.close()

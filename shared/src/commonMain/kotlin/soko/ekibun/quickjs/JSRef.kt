@@ -51,19 +51,20 @@ interface JSRef {
  * 递归对象（`a['a'] = a`）会重复访问同一个实例，用 [seen] 去重，否则环形结构会
  * 无限递归 —— flutter_qjs 的 `_callRecursive` 出于同样原因也带一个 `cache` Set。
  */
-fun List<JSRef?>.dupRecursive(seen: MutableSet<Any> = mutableSetOf()): Unit =
-  forEach { it?.dupOrSkip(seen) }
+fun List<JSRef?>.dupRecursive(seen: MutableSet<Any> = mutableSetOf()): Unit = forEach { it?.dupOrSkip(seen) }
 
 /** [dupRecursive] 的释放对应体。 */
-fun List<JSRef?>.freeRecursive(seen: MutableSet<Any> = mutableSetOf()): Unit =
-  forEach { it?.freeOrSkip(seen) }
+fun List<JSRef?>.freeRecursive(seen: MutableSet<Any> = mutableSetOf()): Unit = forEach { it?.freeOrSkip(seen) }
 
 /**
  * 对任意值做递归操作：穿透 List / Map / Array，遇到 [JSRef] 就执行 [action]。
  *
  * 与 flutter_qjs 的 `_callRecursive` 行为一致 —— 它同样只认 List、Map 和 JSRef。
  */
-private fun Any?.walkRefs(seen: MutableSet<Any>, action: (JSRef) -> Unit) {
+private fun Any?.walkRefs(
+  seen: MutableSet<Any>,
+  action: (JSRef) -> Unit,
+) {
   if (this == null) return
   if (!seen.add(this)) return
   when (this) {

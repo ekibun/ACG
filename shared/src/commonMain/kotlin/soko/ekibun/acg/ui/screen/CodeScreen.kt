@@ -25,40 +25,46 @@ import soko.ekibun.acg.engine.JsEngine
 import soko.ekibun.quickjs.Highlight
 import soko.ekibun.quickjs.JSError
 
+// 同 App()：挂着 @Preview，但它是被 App() 调用的真实页签，不能是 private。
+@Suppress("ktlint:compose:preview-public-check")
 @Preview(showBackground = true)
 @Composable
 fun CodeScreen() {
-    var text by remember { mutableStateOf(TextFieldValue()) }
-    var evalval by remember { mutableStateOf("") }
+  var text by remember { mutableStateOf(TextFieldValue()) }
+  var evalval by remember { mutableStateOf("") }
 
-    Column {
-        TextField(
-            value = text,
-            onValueChange = {
-                text = TextFieldValue(Highlight.highlight(it.text), it.selection, it.composition)
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .weight(1f)
-        )
-        Row {
-            Button(onClick = {
-                MainScope().launch {
-                    evalval = try {
-                        val ret = JsEngine.instance.evaluate(text.text)
-                        if (ret is Deferred<*>) ret.await() else ret
-                    } catch (e: JSError) {
-                        e
-                    }.toString()
-                }
-            }) { Text("Run>") }
+  Column {
+    TextField(
+      value = text,
+      onValueChange = {
+        text = TextFieldValue(Highlight.highlight(it.text), it.selection, it.composition)
+      },
+      modifier =
+        Modifier
+          .fillMaxWidth()
+          .verticalScroll(rememberScrollState())
+          .weight(1f),
+    )
+    Row {
+      Button(onClick = {
+        MainScope().launch {
+          evalval =
+            try {
+              val ret = JsEngine.instance.evaluate(text.text)
+              if (ret is Deferred<*>) ret.await() else ret
+            } catch (e: JSError) {
+              e
+            }.toString()
         }
-        Text(
-            text = evalval, modifier = Modifier
-                .padding(10.dp)
-                .verticalScroll(rememberScrollState())
-                .weight(1f)
-        )
+      }) { Text("Run>") }
     }
+    Text(
+      text = evalval,
+      modifier =
+        Modifier
+          .padding(10.dp)
+          .verticalScroll(rememberScrollState())
+          .weight(1f),
+    )
+  }
 }

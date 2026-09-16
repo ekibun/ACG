@@ -1,0 +1,48 @@
+# C++ 格式契约。基线 = Google C++ 风格指南（clang-format 的 Google 预设）。
+#
+# 与 Google 预设的差异**只有一处**：行尾统一 LF（见下）。其余全部保持预设 —— 本文件里
+# 显式写出的项都属于「与预设同值，写出来锁住，防上游默认值变动」，已用
+#   clang-format --dump-config --style=Google <file>
+# 与本文件的 dump 逐项对比过，只差 LineEnding。
+#
+# 口径出处：`.agents/skills/coding-style/SKILL.md`「缩进」一节 + `references/cpp.md`。
+#
+# 用法：  clang-format -i <file>...
+# 本机怎么装 clang-format 见 `.workbuddy/memory/MEMORY.md`（本机专属，不入库）。
+---
+Language: Cpp
+BasedOnStyle: Google
+
+# —— 与 Google 预设同值，显式写出来锁住 ——
+IndentWidth: 2
+ContinuationIndentWidth: 4
+ColumnLimit: 80
+UseTab: Never
+ReflowComments: true
+SpacesBeforeTrailingComments: 2
+
+# —— 偏离 Google 预设 ——
+# 行尾统一 LF。预设是 `DeriveLF`（按文件里已有一个换行符定），同一份文件在不同机器上会漂，
+# 与本仓 `.editorconfig` 的 `end_of_line = lf` 也对不上。
+LineEnding: LF
+
+# —— 保持 Google 预设的副作用（写出来是为了留证）——
+# ReflowComments: true            注释按列宽**重排**。中英混排的注释被折行时，原文的行间断行
+#   会变成一个空格 —— 于是
+#     `... 在 GUI 程序里 stderr 没人` / `接；而且 ...`
+#   会变成
+#     `... 在 GUI 程序里 stderr` / `没人 接；而且 ...`
+#   句子被切开、凭空多出空格。2026-09-16 整篇重排后人工回修过一遍（20 处），回修完再跑
+#   clang-format 不再改动 —— 那 20 处已是终态。**再改这些注释时要连着重排结果一起看**。
+# SortIncludes: true + IncludeBlocks: Regroup
+#   按 include 类别**重组并排序** #include 块。原先担心 `cxx/webview/webview.cpp` 的
+#   `jawt_md.h` 必须排在 `windows.h` 之后 —— 2026-09-16 核实**不成立**：JDK 11 / 21 的
+#   `include/win32/jawt_md.h` 自带 `#include <windows.h>`；且重排后 `windows.h` 依然排在
+#   `jawt.h` / `jawt_md.h` 之前。
+# AlignAfterOpenBracket: true     换行后的实参**与第一个实参对齐**（cpp.md 明确要这一条）
+# AlignTrailingComments: false    不对行尾注释做竖排对齐（与 comments.md 一致）
+# PointerAlignment: Left          左 `*`/`&` 贴类型（`JNIEnv* env`）
+# BreakBeforeBraces: Attach       左大括号留在行尾（cpp.md 允许函数定义另起一行，非必须）
+# AccessModifierOffset: -1        `public:` 比类体少一级 = 缩进 1 空格（与 cpp.md 一致）
+# AlignConsecutiveAssignments: false
+# NamespaceIndentation: None

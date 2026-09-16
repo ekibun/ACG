@@ -39,6 +39,47 @@ JAVA_HOME=<任意一份 JDK> ./gradlew :androidApp:assembleDebug                
 
 `:androidApp` 自身的编译暂未纳入这道闸门 —— 改了 `androidApp/` 下的代码不会被这三条拦到。
 
+## 格式化 / lint（工具已就位，改完也要跑）
+
+```bash
+./gradlew :shared:ktlintCheck --continue      # Kotlin（标准规则 + compose-rules 规则集）
+./gradlew ktlintFormat --continue             # 同上，能自动修的它直接修掉
+clang-format -i cxx/webview/webview.cpp       # C++；改哪个点哪个，就那三个文件
+```
+
+规则正本是根目录的 `.editorconfig`（Kotlin）与 `.clang-format`（C++，Google 基线，只偏离
+「行尾统一 LF」一处），两边的取值必须一致。`clang-format` **不在 PATH 上**，
+本机那份的绝对路径见 `.workbuddy/memory/MEMORY.md`（本机专属、不入库）。
+
+**执行点（git hook）**：`.githooks/pre-commit` 在 `git commit` 当场拦一次 ——
+暂存区里有 `.kt` / `.kts` 就跑 `ktlintCheck --continue`，有 `cxx/{webview,quickjs,ffmpeg}/` 下的
+源文件就跑 `clang-format --dry-run --Werror`；两类都没有就直接放行（改个 `.md` 不该等 Gradle）。
+它**只校验、不改文件**。
+
+装法（每个 clone 做一次；`.git/config` 是本机私有的，不入库）：
+
+```bash
+git config core.hooksPath .githooks
+```
+
+⚠️ 它**不会静默放行**：Kotlin 那半找不到 `JAVA_HOME` / `java`、C++ 那半找不到 clang-format
+（可用 `ACG_CLANG_FORMAT` 指定，其次看 PATH 上的 `clang-format`）时，都会**明确报错并拒绝提交**。
+真想放行一次用 `git commit --no-verify`。
+
+⚠️ **Linux / macOS 上还要 `chmod +x .githooks/pre-commit`** —— git 对**没有执行位的 hook 是静默跳过**的，
+而 `core.fileMode=false` 的 Windows 上提交出去的文件偏偏是 `100644`。
+
+> 2026-09-17 用过一版 GitHub Actions，按用户要求撤掉了：CI 要推到远端之后才跑，
+> 拦不住「改动进仓库」这个动作。
+
+⚠️ 看结果时要分清是哪个 task 挂的：`ktlintCheck` **按 sourceSet 拆成多个任务**，
+不加 `--continue` 会在第一个失败的模块就中止 —— 那时报出来的违规数只覆盖了跑过的模块，
+会被误读成"违规不多"。
+
+⚠️ `.editorconfig` 的 `max_line_length` 现在是 **120**（不再是 `off`）—— 这会让 ktlint 的
+**整套换行类规则**同时生效；改这个值预期会扩散到多处代码，细节见
+[`coding-style/references/kotlin.md`](../../coding-style/references/kotlin.md) 的「官方未规定」一节。
+
 ## 测试
 
 ```bash

@@ -9,5 +9,5 @@ data class AvStream(
   val width: Int,
   val height: Int,
   val duration: Long,
-  val metadata: Map<String, String>
+  val metadata: Map<String, String>,
 )

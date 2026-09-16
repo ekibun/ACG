@@ -23,73 +23,76 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 
 actual suspend fun loadBackgroundWebView(task: WebViewTask): WebViewTaskResult {
-    val started = withContext(Dispatchers.IO) { NativeWebView.ensureStarted() }
-    started.exceptionOrNull()?.let { cause ->
-        return WebViewTaskResult.Failed(
-            "后台 WebView 起不来：${cause.message ?: cause}"
-        )
+  val started = withContext(Dispatchers.IO) { NativeWebView.ensureStarted() }
+  started.exceptionOrNull()?.let { cause ->
+    return WebViewTaskResult.Failed(
+      "后台 WebView 起不来：${cause.message ?: cause}",
+    )
+  }
+
+  // token 必须在 `run` 之前拿到并注册好 —— 页面可能在 `run` 返回之前就已经
+  // 把请求打过来了（native 是按 token 派发结果的，不是按句柄）。
+  val token = NativeWebView.newToken()
+  val outcome = CompletableDeferred<WebViewTaskResult>()
+
+  val sink =
+    object : NativeWebView.BackgroundSink {
+      override fun onIntercept(
+        url: String,
+        method: String,
+        isForMainFrame: Boolean,
+        headers: Map<String, String>,
+      ): Boolean {
+        val callback = task.onInterceptRequest ?: return false
+        // 见 WebViewRequest 的说明：桌面端的 isRedirect 拿不到，恒为 false。
+        val hit =
+          callback(
+            WebViewRequest(
+              url = url,
+              headers = headers,
+              method = method,
+              isForMainFrame = isForMainFrame,
+              isRedirect = false,
+            ),
+          ) ?: return false
+        // 返回 true = 命中：native 会给一个空 204 并把加载停掉；结果只落这一次。
+        outcome.complete(WebViewTaskResult.Intercepted(hit))
+        return true
+      }
+
+      override fun onFinished(json: String?) {
+        outcome.complete(WebViewTaskResult.Scripted(json))
+      }
+
+      override fun onFailed(message: String) {
+        outcome.complete(WebViewTaskResult.Failed("后台 WebView 失败：$message"))
+      }
     }
+  NativeWebView.registerBackground(token, sink)
 
-    // token 必须在 `run` 之前拿到并注册好 —— 页面可能在 `run` 返回之前就已经
-    // 把请求打过来了（native 是按 token 派发结果的，不是按句柄）。
-    val token = NativeWebView.newToken()
-    val outcome = CompletableDeferred<WebViewTaskResult>()
-
-    val sink = object : NativeWebView.BackgroundSink {
-        override fun onIntercept(
-            url: String,
-            method: String,
-            isForMainFrame: Boolean,
-            headers: Map<String, String>,
-        ): Boolean {
-            val callback = task.onInterceptRequest ?: return false
-            // 见 WebViewRequest 的说明：桌面端的 isRedirect 拿不到，恒为 false。
-            val hit = callback(
-                WebViewRequest(
-                    url = url,
-                    headers = headers,
-                    method = method,
-                    isForMainFrame = isForMainFrame,
-                    isRedirect = false,
-                )
-            ) ?: return false
-            // 返回 true = 命中：native 会给一个空 204 并把加载停掉；结果只落这一次。
-            outcome.complete(WebViewTaskResult.Intercepted(hit))
-            return true
-        }
-
-        override fun onFinished(json: String?) {
-            outcome.complete(WebViewTaskResult.Scripted(json))
-        }
-
-        override fun onFailed(message: String) {
-            outcome.complete(WebViewTaskResult.Failed("后台 WebView 失败：$message"))
-        }
+  var handle = 0L
+  try {
+    handle =
+      withContext(Dispatchers.IO) {
+        NativeWebView.run(task.url, task.effectiveHeaders(), task.script, token)
+      }
+    if (handle <= 0L) {
+      // native 在环境还没就绪时会直接返回 -1 且不回任何事件（没视图可挂），
+      // 所以这里不能干等 outcome。
+      return WebViewTaskResult.Failed(
+        "后台 WebView 立不起来：${task.url} —— WebView 环境不可用",
+      )
     }
-    NativeWebView.registerBackground(token, sink)
-
-    var handle = 0L
-    try {
-        handle = withContext(Dispatchers.IO) {
-            NativeWebView.run(task.url, task.effectiveHeaders(), task.script, token)
-        }
-        if (handle <= 0L) {
-            // native 在环境还没就绪时会直接返回 -1 且不回任何事件（没视图可挂），
-            // 所以这里不能干等 outcome。
-            return WebViewTaskResult.Failed(
-                "后台 WebView 立不起来：${task.url} —— WebView 环境不可用"
-            )
-        }
-        return withTimeoutOrNull(BACKGROUND_WEBVIEW_TIMEOUT_MS) { outcome.await() }
-            ?: WebViewTaskResult.Failed(
-                "后台 WebView 超时（${BACKGROUND_WEBVIEW_TIMEOUT_MS}ms）：${task.url}"
-            )
-    } finally {
-        NativeWebView.unregisterBackground(token)
-        // 命中拦截时 JVM 这边已经拿到结果、native 那边只是把加载停了，
-        // 这个隐藏窗口得由我们收掉。
-        NativeWebView.cancel(handle)
-    }
+    return withTimeoutOrNull(BACKGROUND_WEBVIEW_TIMEOUT_MS) { outcome.await() }
+      ?: WebViewTaskResult.Failed(
+        "后台 WebView 超时（${BACKGROUND_WEBVIEW_TIMEOUT_MS}ms）：${task.url}",
+      )
+  } finally {
+    NativeWebView.unregisterBackground(token)
+    // 命中拦截时 JVM 这边已经拿到结果、native 那边只是把加载停了，
+    // 这个隐藏窗口得由我们收掉。
+    NativeWebView.cancel(handle)
+  }
 }
 
 /**
@@ -100,7 +103,7 @@ actual suspend fun loadBackgroundWebView(task: WebViewTask): WebViewTaskResult {
  */
 @Composable
 actual fun BackgroundWebViewHost() {
-    LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) { NativeWebView.ensureStarted() }
-    }
+  LaunchedEffect(Unit) {
+    withContext(Dispatchers.IO) { NativeWebView.ensureStarted() }
+  }
 }

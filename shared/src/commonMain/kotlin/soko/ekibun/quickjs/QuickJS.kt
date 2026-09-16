@@ -1,8 +1,13 @@
 package soko.ekibun.quickjs
 
 import androidx.annotation.Keep
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import soko.ekibun.jniLoadLibrary
 import java.lang.ref.Cleaner
 import java.util.Collections
@@ -29,19 +34,34 @@ object QuickJS {
   private external fun jsNewError(ctx: Long): Long
 
   @JvmStatic
-  private external fun jsNewString(ctx: Long, obj: String): Long
+  private external fun jsNewString(
+    ctx: Long,
+    obj: String,
+  ): Long
 
   @JvmStatic
-  private external fun jsNewBool(ctx: Long, obj: Boolean): Long
+  private external fun jsNewBool(
+    ctx: Long,
+    obj: Boolean,
+  ): Long
 
   @JvmStatic
-  private external fun jsNewInt64(ctx: Long, obj: Long): Long
+  private external fun jsNewInt64(
+    ctx: Long,
+    obj: Long,
+  ): Long
 
   @JvmStatic
-  private external fun jsNewFloat64(ctx: Long, obj: Double): Long
+  private external fun jsNewFloat64(
+    ctx: Long,
+    obj: Double,
+  ): Long
 
   @JvmStatic
-  private external fun jsNewArrayBuffer(ctx: Long, obj: ByteArray): Long
+  private external fun jsNewArrayBuffer(
+    ctx: Long,
+    obj: ByteArray,
+  ): Long
 
   @JvmStatic
   private external fun jsNewObject(ctx: Long): Long
@@ -58,7 +78,7 @@ object QuickJS {
     obj: Long,
     k: Long,
     v: Long,
-    flags: Int = JSProp.C_W_E
+    flags: Int = JSProp.C_W_E,
   ): Int
 
   @JvmStatic
@@ -71,46 +91,75 @@ object QuickJS {
   @JvmStatic
   private external fun getObjectKeys(
     ctx: Long,
-    obj: Long
+    obj: Long,
   ): Array<Any>
 
   @JvmStatic
-  private external fun jsDupValue(ctx: Long, obj: Long): Long
+  private external fun jsDupValue(
+    ctx: Long,
+    obj: Long,
+  ): Long
 
   @JvmStatic
-  private external fun jsNewCFunction(ctx: Long, obj: Long): Long
+  private external fun jsNewCFunction(
+    ctx: Long,
+    obj: Long,
+  ): Long
 
   @JvmStatic
-  private external fun jsWrapObject(ctx: Long, obj: Any): Long
+  private external fun jsWrapObject(
+    ctx: Long,
+    obj: Any,
+  ): Long
 
   @JvmStatic
   private external fun isException(obj: Long): Boolean
 
   /** 只归还一个 JS 引用（对应 native 的 `JS_FreeValue`），不销毁包装。 */
   @JvmStatic
-  private external fun jsReleaseValue(ctx: Long, obj: Long)
+  private external fun jsReleaseValue(
+    ctx: Long,
+    obj: Long,
+  )
 
   /** 只销毁堆上的包装（对应 native 的 `delete`）。调用前必须先 [jsReleaseValue]。 */
   @JvmStatic
   private external fun jsDestroyHandle(obj: Long)
 
   @JvmStatic
-  private external fun evaluate(ctx: Long, cmd: String, name: String, flag: Int): Long
+  private external fun evaluate(
+    ctx: Long,
+    cmd: String,
+    name: String,
+    flag: Int,
+  ): Long
 
   @JvmStatic
   private external fun getException(ctx: Long): JSError
 
   @JvmStatic
-  private external fun jsThrowError(ctx: Long, err: Long): Long
+  private external fun jsThrowError(
+    ctx: Long,
+    err: Long,
+  ): Long
 
   @JvmStatic
-  private external fun jsToJava(ctx: Long, obj: Long): Any?
+  private external fun jsToJava(
+    ctx: Long,
+    obj: Long,
+  ): Any?
 
   @JvmStatic
   private external fun executePendingJob(ctx: Long): Int
 
   @JvmStatic
-  private external fun jsCall(ctx: Long, obj: Long, thisVal: Long, argc: Int, argv: LongArray): Long
+  private external fun jsCall(
+    ctx: Long,
+    obj: Long,
+    thisVal: Long,
+    argc: Int,
+    argv: LongArray,
+  ): Long
 
   @JvmStatic
   private external fun jsNewPromise(ctx: Long): LongArray
@@ -130,7 +179,6 @@ object QuickJS {
     val memoryLimit: Long = -1,
     val timeout: Long = -1,
   ) {
-
     /**
      * 一个 JS 值的持有者。
      *
@@ -143,9 +191,12 @@ object QuickJS {
      * 而包装可能被多个 JS 操作复用（每次配对一次 `jsDupValue`）。只靠 GC 时机
      * 归还会让 QuickJS 在 `JS_FreeRuntime` 时断言 `gc_obj_list` 非空并 abort。
      */
-    open class JSValue internal constructor(val ptr: Long, protected val ctx: Context) :
-      JSRef, JSRefLeakable, AutoCloseable {
-
+    open class JSValue internal constructor(
+      val ptr: Long,
+      protected val ctx: Context,
+    ) : JSRef,
+      JSRefLeakable,
+      AutoCloseable {
       private var _refCount: Int = 1
 
       override val refCount: Int get() = _refCount
@@ -194,17 +245,20 @@ object QuickJS {
         ctx.releaseValue(ptr)
       }
 
-      protected fun jsCall(vararg argv: Any?, thisVal: Any?): Any? {
-        return jsToJava(ctx.ptr, ctx.jsCallImpl(this, *argv, thisVal = thisVal))
-      }
+      protected fun jsCall(
+        vararg argv: Any?,
+        thisVal: Any?,
+      ): Any? = jsToJava(ctx.ptr, ctx.jsCallImpl(this, *argv, thisVal = thisVal))
 
-      protected fun getPropertyValue(k: Any): Any? = ctx.runOnDispatcher {
-        jsToJava(ctx.ptr, getPropertyValue(ctx.ptr, ptr, ctx.javaToJs(k)))
-      }
+      protected fun getPropertyValue(k: Any): Any? =
+        ctx.runOnDispatcher {
+          jsToJava(ctx.ptr, getPropertyValue(ctx.ptr, ptr, ctx.javaToJs(k)))
+        }
 
-      protected fun getObjectKeys(): Array<Any> = ctx.runOnDispatcher {
-        getObjectKeys(ctx.ptr, ptr)
-      }
+      protected fun getObjectKeys(): Array<Any> =
+        ctx.runOnDispatcher {
+          getObjectKeys(ctx.ptr, ptr)
+        }
     }
 
     /**
@@ -253,7 +307,10 @@ object QuickJS {
 
     /** 为新包装建立「指针 → 包装」映射。 */
     @Keep
-    private fun registerWrapper(ptr: Long, wrapper: Any) {
+    private fun registerWrapper(
+      ptr: Long,
+      wrapper: Any,
+    ) {
       wrapperCache[ptr] = wrapper
     }
 
@@ -268,7 +325,10 @@ object QuickJS {
      * `dup()` 让包装的票数与之一致：走的是同一套 releaseValue 账本，不会多一笔少一笔。
      */
     @Keep
-    private fun reuseWrapper(wrapper: Any, dupHandle: Long): Any {
+    private fun reuseWrapper(
+      wrapper: Any,
+      dupHandle: Long,
+    ): Any {
       releaseValue(dupHandle)
       return wrapper
     }
@@ -324,7 +384,9 @@ object QuickJS {
      */
     private class Reachable {
       @Volatile var ptr: Long = 0
-      private val armed = java.util.concurrent.atomic.AtomicBoolean(true)
+      private val armed =
+        java.util.concurrent.atomic
+          .AtomicBoolean(true)
 
       /** 返回要销毁的指针；已被销毁过则返回 null。 */
       fun disarm(): Long? = if (armed.compareAndSet(true, false)) ptr else null
@@ -368,12 +430,13 @@ object QuickJS {
       if (handle != null) destroyContext(handle)
     }
 
-    private fun javaToJs(obj: Any?): Long {
-      return javaToJsImpl(obj)
-    }
+    private fun javaToJs(obj: Any?): Long = javaToJsImpl(obj)
 
     @Keep
-    private fun wrapJSPromiseAsync(obj: Long, then: JSFunction?): Deferred<Any?> {
+    private fun wrapJSPromiseAsync(
+      obj: Long,
+      then: JSFunction?,
+    ): Deferred<Any?> {
       val ret = CompletableDeferred<Any?>()
       // 两个包装都是 native 交出来的新引用，由这里负责归还：
       // - `then` 是 jsToJava 在 Promise 分支里为 "then" 属性新建的 JSFunction
@@ -391,16 +454,22 @@ object QuickJS {
             return ret
           },
           object : JSInvokable {
-            override fun invoke(vararg argv: Any?, thisVal: Any?) {
+            override fun invoke(
+              vararg argv: Any?,
+              thisVal: Any?,
+            ) {
               ret.complete(argv[0])
             }
           },
           object : JSInvokable {
-            override fun invoke(vararg argv: Any?, thisVal: Any?) {
+            override fun invoke(
+              vararg argv: Any?,
+              thisVal: Any?,
+            ) {
               ret.completeExceptionally(argv[0] as? Throwable ?: JSError(argv.toString()))
             }
           },
-          thisVal = thisVal
+          thisVal = thisVal,
         ).let { releaseValue(it) }
       } finally {
         thisVal.close()
@@ -410,46 +479,49 @@ object QuickJS {
     }
 
     @Keep
-    private fun loadModule(name: String): String? {
-      return try {
+    private fun loadModule(name: String): String? =
+      try {
         moduleHandler?.invoke(name)
       } catch (e: Throwable) {
         e.printStackTrace()
         null
       }
-    }
 
     @Keep
-    private fun handleJSInvokable(obj: JSInvokable, argv: Array<Any>, thisVal: Any?): Long {
-      return try {
+    private fun handleJSInvokable(
+      obj: JSInvokable,
+      argv: Array<Any>,
+      thisVal: Any?,
+    ): Long =
+      try {
         javaToJs(obj.invoke(*argv, thisVal = thisVal))
       } catch (e: Throwable) {
         e.printStackTrace()
         jsThrowError(ptr, javaToJs(e))
       }
-    }
 
     private fun jsCallImpl(
       obj: JSValue,
       vararg argv: Any?,
-      thisVal: Any? = null
-    ): Long = runOnDispatcher {
-      // javaToJs 每次返回的都是「新引用」的裸句柄（新建 或 jsDupValue），
-      // 这里用 try/finally 保证归还：中途抛异常也不能漏。
-      val argvJs = argv.map { javaToJs(it) }.toLongArray()
-      val thisJs = javaToJs(thisVal)
-      try {
-        val ret = jsCall(ptr, obj.ptr, thisJs, argvJs.size, argvJs)
-        updateChannel.trySend(Unit)
-        if (isException(ret)) {
-          throw getException(ptr)
+      thisVal: Any? = null,
+    ): Long =
+      runOnDispatcher {
+        // javaToJs 每次返回的都是「新引用」的裸句柄（新建 或 jsDupValue），
+        // 这里用 try/finally 保证归还：中途抛异常也不能漏。
+        val argvJs = argv.map { javaToJs(it) }.toLongArray()
+        val thisJs = javaToJs(thisVal)
+        try {
+          val ret = jsCall(ptr, obj.ptr, thisJs, argvJs.size, argvJs)
+          updateChannel.trySend(Unit)
+          if (isException(ret)) {
+            throw getException(ptr)
+          }
+          ret
+        } finally {
+          releaseValue(thisJs)
+          argvJs.forEach { releaseValue(it) }
         }
-        ret
-      } finally {
-        releaseValue(thisJs)
-        argvJs.forEach { releaseValue(it) }
       }
-    }
 
     /**
      * 归还一个裸句柄持有的 JS 引用，并销毁包装。
@@ -478,7 +550,7 @@ object QuickJS {
      */
     fun javaToJsImpl(
       obj: Any?,
-      cache: MutableMap<Any, Long> = IdentityHashMap<Any, Long>()
+      cache: MutableMap<Any, Long> = IdentityHashMap<Any, Long>(),
     ): Long {
       if (obj == null || obj is Unit) return jsNULL()
       if (obj is Throwable) {
@@ -487,19 +559,22 @@ object QuickJS {
         // 所以这里传进去的 jsNewString 结果不需要、也不能再被引用。
         // 每个属性用一对独立的 jsNewString：句柄是一次性的，不能复用。
         definePropertyValue(
-          ptr, ret,
+          ptr,
+          ret,
           jsNewString(ptr, "name"),
-          jsNewString(ptr, obj.javaClass.name)
+          jsNewString(ptr, obj.javaClass.name),
         )
         definePropertyValue(
-          ptr, ret,
+          ptr,
+          ret,
           jsNewString(ptr, "message"),
-          jsNewString(ptr, obj.message ?: "")
+          jsNewString(ptr, obj.message ?: ""),
         )
         definePropertyValue(
-          ptr, ret,
+          ptr,
+          ret,
           jsNewString(ptr, "stack"),
-          jsNewString(ptr, obj.stackTraceToString())
+          jsNewString(ptr, obj.stackTraceToString()),
         )
         return ret
       }
@@ -544,9 +619,10 @@ object QuickJS {
         cache[obj] = ret
         obj.forEach { entry ->
           definePropertyValue(
-            ptr, ret,
+            ptr,
+            ret,
             javaToJsImpl(entry.key, cache),
-            javaToJsImpl(entry.value, cache)
+            javaToJsImpl(entry.value, cache),
           )
         }
         return ret
@@ -557,9 +633,10 @@ object QuickJS {
         cache[obj] = ret
         arrayObj.forEachIndexed { i, v ->
           definePropertyValue(
-            ptr, ret,
+            ptr,
+            ret,
             jsNewInt64(ptr, i.toLong()),
-            javaToJsImpl(v, cache)
+            javaToJsImpl(v, cache),
           )
         }
         return ret
@@ -582,7 +659,11 @@ object QuickJS {
      * `evaluate` native 返回的句柄由 [jsToJava] 消费掉（它在 native 侧就会调
      * `jsReleaseValue`），所以这里不需要额外归还。
      */
-    fun evaluate(cmd: String, name: String = "<eval>", flag: Int = JSEvalFlag.GLOBAL): Any? =
+    fun evaluate(
+      cmd: String,
+      name: String = "<eval>",
+      flag: Int = JSEvalFlag.GLOBAL,
+    ): Any? =
       runOnDispatcher {
         val ret = evaluate(ptr, cmd, name, flag)
         updateChannel.trySend(Unit)
@@ -619,8 +700,11 @@ object QuickJS {
           closed = true
         }
       }
-      if (Thread.currentThread() == dispatcherThread) destroy()
-      else runBlocking(dispatcher) { destroy() }
+      if (Thread.currentThread() == dispatcherThread) {
+        destroy()
+      } else {
+        runBlocking(dispatcher) { destroy() }
+      }
     }
 
     /**
@@ -666,15 +750,18 @@ object QuickJS {
           wrapperCache.clear()
           if (leaked.isNotEmpty()) {
             throw JSError(
-              "reference leak:\n    REFS\tTYPE\tPTR\n" + leaked.joinToString("\n")
+              "reference leak:\n    REFS\tTYPE\tPTR\n" + leaked.joinToString("\n"),
             )
           }
         } else {
           closed = true
         }
       }
-      if (Thread.currentThread() == dispatcherThread) runDestroy()
-      else runBlocking(dispatcher) { runDestroy() }
+      if (Thread.currentThread() == dispatcherThread) {
+        runDestroy()
+      } else {
+        runBlocking(dispatcher) { runDestroy() }
+      }
     }
   }
 }

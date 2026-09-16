@@ -13,7 +13,7 @@ import soko.ekibun.acg.player.Playback
  */
 @Composable
 expect fun VideoSurface(
-  modifier: Modifier,
   onPlayback: (Playback?) -> Unit,
   onFrame: (Long?) -> Unit,
+  modifier: Modifier = Modifier,
 )

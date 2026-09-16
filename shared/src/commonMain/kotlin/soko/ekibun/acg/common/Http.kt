@@ -13,7 +13,6 @@ import kotlin.getValue
 expect fun createHttpClient(followRedirects: Boolean): HttpClient
 
 object Http {
-
   private val clientWithRedirect by lazy {
     createHttpClient(followRedirects = true)
   }
@@ -32,43 +31,52 @@ object Http {
 
       (options["headers"] as? Map<*, *>)?.forEach { (key, value) ->
         val k = key.toString()
-        if (value is Iterable<*>) value.forEach {
-          headers.append(k, it.toString())
-        } else value?.let {
-          headers.append(k, value.toString())
+        if (value is Iterable<*>) {
+          value.forEach {
+            headers.append(k, it.toString())
+          }
+        } else {
+          value?.let {
+            headers.append(k, value.toString())
+          }
         }
       }
       val body = options["body"]
       if (body != null) {
         if (body is Map<*, *> && body["__js_proto__"] == "FormData") {
           // 构建 Multipart/FormData
-          setBody(MultiPartFormDataContent(formData {
-            (body["__items__"] as? Iterable<*>)?.forEach { item ->
-              val formItem = item as? Map<*, *> ?: return@forEach
-              val name = formItem["name"] as? String ?: return@forEach
-              val value = formItem["value"]
-              val type = formItem["type"]
+          setBody(
+            MultiPartFormDataContent(
+              formData {
+                (body["__items__"] as? Iterable<*>)?.forEach { item ->
+                  val formItem = item as? Map<*, *> ?: return@forEach
+                  val name = formItem["name"] as? String ?: return@forEach
+                  val value = formItem["value"]
+                  val type = formItem["type"]
 
-              if (type is String && value is ByteArray) {
-                val fileName = formItem["fileName"] as? String
-                append(
-                  key = name,
-                  value = value,
-                  headers = Headers.build {
-                    append(HttpHeaders.ContentType, type)
-                    fileName?.let {
-                      append(
-                        HttpHeaders.ContentDisposition,
-                        "filename=\"$it\""
-                      )
-                    }
+                  if (type is String && value is ByteArray) {
+                    val fileName = formItem["fileName"] as? String
+                    append(
+                      key = name,
+                      value = value,
+                      headers =
+                        Headers.build {
+                          append(HttpHeaders.ContentType, type)
+                          fileName?.let {
+                            append(
+                              HttpHeaders.ContentDisposition,
+                              "filename=\"$it\"",
+                            )
+                          }
+                        },
+                    )
+                  } else {
+                    append(name, value.toString())
                   }
-                )
-              } else {
-                append(name, value.toString())
-              }
-            }
-          }))
+                }
+              },
+            ),
+          )
         } else if (body is ByteArray) {
           setBody(body)
         } else {

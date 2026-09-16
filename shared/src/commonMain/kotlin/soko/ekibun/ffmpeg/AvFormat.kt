@@ -5,12 +5,16 @@ import kotlinx.coroutines.runBlocking
 import soko.ekibun.jniLoadLibrary
 import java.util.concurrent.Executors
 
-open class AvFormat(val url: String, val io: AvIO.Handler) {
+open class AvFormat(
+  val url: String,
+  val io: AvIO.Handler,
+) {
   companion object {
     const val AVSEEK_SIZE = 0x10000
     const val AV_TIME_BASE = 1000000
 
     // libavformat/avformat.h 的 AVSEEK_FLAG_*（seek 时传给 seekTo 的 flags）
+
     /** 落点取「不晚于 ts」的关键帧。注意 `avformat_seek_file` 内部会 `flags &= ~BACKWARD`，容器级 seek 请改用 min/max 窗口表达方向。 */
     const val AVSEEK_FLAG_BACKWARD = 1
 
@@ -57,21 +61,26 @@ open class AvFormat(val url: String, val io: AvIO.Handler) {
   private var streams: List<AvStream>? = null
 
   private external fun initNative(url: String): Long
-  private fun <T> runWithContext(create: Boolean = false, cb: (ctx: Long) -> T): T {
-    return runOnDispatcher {
+
+  private fun <T> runWithContext(
+    create: Boolean = false,
+    cb: (ctx: Long) -> T,
+  ): T =
+    runOnDispatcher {
       if (create && pctx == null) pctx = initNative(url)
       if ((pctx ?: 0L) == 0L) throw Exception("AvFormat closed")
       cb(pctx!!)
     }
-  }
 
   private external fun getStreamsNative(pctx: Long): Array<AvStream>
-  fun getStreams(): List<AvStream> = runWithContext(true) { ctx ->
-    if (streams == null) {
-      streams = getStreamsNative(ctx).toList()
+
+  fun getStreams(): List<AvStream> =
+    runWithContext(true) { ctx ->
+      if (streams == null) {
+        streams = getStreamsNative(ctx).toList()
+      }
+      streams!!
     }
-    streams!!
-  }
 
   private external fun seekToNative(
     pctx: Long,
@@ -79,7 +88,7 @@ open class AvFormat(val url: String, val io: AvIO.Handler) {
     streamIndex: Int,
     minTs: Long,
     maxTs: Long,
-    flags: Int
+    flags: Int,
   ): Int
 
   /**
@@ -101,9 +110,10 @@ open class AvFormat(val url: String, val io: AvIO.Handler) {
     minTs: Long = Long.MIN_VALUE,
     maxTs: Long = Long.MAX_VALUE,
     flags: Int = 0,
-  ): Unit = runWithContext { ctx ->
-    seekToNative(ctx, ts, stream?.index ?: -1, minTs, maxTs, flags)
-  }
+  ): Unit =
+    runWithContext { ctx ->
+      seekToNative(ctx, ts, stream?.index ?: -1, minTs, maxTs, flags)
+    }
 
   // < 0: error
   // >=0: stream index
@@ -112,30 +122,34 @@ open class AvFormat(val url: String, val io: AvIO.Handler) {
     packet: Long,
   ): Int
 
-  fun getPacket(streams: Collection<AvStream>): AvPacket? = runWithContext { ctx ->
-    val packet = AvPacket()
-    while (true) {
-      val ret = getPacketNative(ctx, packet.ptr)
-      if (ret < 0) {
-        return@runWithContext null
+  fun getPacket(streams: Collection<AvStream>): AvPacket? =
+    runWithContext { ctx ->
+      val packet = AvPacket()
+      while (true) {
+        val ret = getPacketNative(ctx, packet.ptr)
+        if (ret < 0) {
+          return@runWithContext null
+        }
+        if (streams.isEmpty() || streams.firstOrNull { it.index == ret } != null) {
+          packet.streamIndex = ret
+          break
+        }
       }
-      if (streams.isEmpty() || streams.firstOrNull { it.index == ret } != null) {
-        packet.streamIndex = ret
-        break
-      }
+      packet
     }
-    packet
-  }
 
   private external fun destroyNative(ctx: Long)
-  open suspend fun close() = runWithContext {
-    pctx?.let { ctx ->
-      destroyNative(ctx)
-    }
-    pctx = null
-  }
 
-  protected fun finalize() = runBlocking {
-    close()
-  }
+  open suspend fun close() =
+    runWithContext {
+      pctx?.let { ctx ->
+        destroyNative(ctx)
+      }
+      pctx = null
+    }
+
+  protected fun finalize() =
+    runBlocking {
+      close()
+    }
 }

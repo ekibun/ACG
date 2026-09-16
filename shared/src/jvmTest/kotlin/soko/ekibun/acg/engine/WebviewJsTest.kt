@@ -4,17 +4,17 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertIs
-import kotlin.test.assertNull
-import kotlin.test.assertTrue
 import soko.ekibun.quickjs.JSError
 import soko.ekibun.quickjs.JSFunction
 import soko.ekibun.quickjs.JSInvokable
 import soko.ekibun.quickjs.QuickJS
 import java.io.File
 import java.nio.charset.Charset
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * `init.js` 里那个 `webview(...)`（后台 WebView 的 JS wrapper）的回归测试。
@@ -37,13 +37,13 @@ import java.nio.charset.Charset
  * 会把别人手里的包装一起销毁），不是本 wrapper 引入的问题，故用例里不做清理。
  */
 class WebviewJsTest {
-
   /** 从源码目录读，保证验的就是正在编辑的那份文件。 */
   private fun initSource(): String {
-    val candidates = listOf(
-      File("src/commonMain/composeResources/files/js/init.js"),
-      File("shared/src/commonMain/composeResources/files/js/init.js"),
-    )
+    val candidates =
+      listOf(
+        File("src/commonMain/composeResources/files/js/init.js"),
+        File("shared/src/commonMain/composeResources/files/js/init.js"),
+      )
     return candidates.firstOrNull { it.exists() }?.readText()
       ?: error("init.js not found, cwd=${File(".").absolutePath}")
   }
@@ -52,40 +52,45 @@ class WebviewJsTest {
    * `_java` 桩。`webviewAsync` 的应答由 [respond] 决定，参数与
    * [JsEngine.webviewAsync] 的签名一一对应。
    */
-  private fun javaStub(
-    respond: (url: String, script: String?, fn: JSFunction?) -> Any?,
-  ) = object : JSInvokable {
-    override fun invoke(vararg argv: Any?, thisVal: Any?): Any? {
-      val method = argv.getOrNull(1) as? String ?: return null
-      return when (method) {
-        "encode" -> {
-          val data = argv.getOrNull(2) as? String ?: ""
-          val charset = (argv.getOrNull(3) as? String)
-            ?.let { runCatching { Charset.forName(it) }.getOrNull() } ?: Charsets.UTF_8
-          data.toByteArray(charset)
+  private fun javaStub(respond: (url: String, script: String?, fn: JSFunction?) -> Any?) =
+    object : JSInvokable {
+      override fun invoke(
+        vararg argv: Any?,
+        thisVal: Any?,
+      ): Any? {
+        val method = argv.getOrNull(1) as? String ?: return null
+        return when (method) {
+          "encode" -> {
+            val data = argv.getOrNull(2) as? String ?: ""
+            val charset =
+              (argv.getOrNull(3) as? String)
+                ?.let { runCatching { Charset.forName(it) }.getOrNull() } ?: Charsets.UTF_8
+            data.toByteArray(charset)
+          }
+
+          "decode" -> {
+            val data = argv.getOrNull(2) as? ByteArray ?: ByteArray(0)
+            val charset =
+              (argv.getOrNull(3) as? String)
+                ?.let { runCatching { Charset.forName(it) }.getOrNull() } ?: Charsets.UTF_8
+            String(data, charset)
+          }
+
+          "console" -> null
+
+          // argv[0]=obj(null) argv[1]=name argv[2]=url argv[3]=header
+          // argv[4]=script argv[5]=onInterceptRequest
+          "webviewAsync" ->
+            respond(
+              argv.getOrNull(2) as? String ?: "",
+              argv.getOrNull(4) as? String,
+              argv.getOrNull(5) as? JSFunction,
+            )
+
+          else -> null
         }
-
-        "decode" -> {
-          val data = argv.getOrNull(2) as? ByteArray ?: ByteArray(0)
-          val charset = (argv.getOrNull(3) as? String)
-            ?.let { runCatching { Charset.forName(it) }.getOrNull() } ?: Charsets.UTF_8
-          String(data, charset)
-        }
-
-        "console" -> null
-
-        // argv[0]=obj(null) argv[1]=name argv[2]=url argv[3]=header
-        // argv[4]=script argv[5]=onInterceptRequest
-        "webviewAsync" -> respond(
-          argv.getOrNull(2) as? String ?: "",
-          argv.getOrNull(4) as? String,
-          argv.getOrNull(5) as? JSFunction,
-        )
-
-        else -> null
       }
     }
-  }
 
   /**
    * 按 [JsEngine] 的方式加载 init.js。
@@ -93,7 +98,10 @@ class WebviewJsTest {
    * **不传 moduleHandler**，与 [InitJsTest] 一致 —— init.js 里所有能力都是内联的，
    * 一旦有人再往里加动态 `import()`，这条用例会立刻变成进程 abort（见 init.js 的注释）。
    */
-  private fun loadInit(ctx: QuickJS.Context, javaStub: JSInvokable) {
+  private fun loadInit(
+    ctx: QuickJS.Context,
+    javaStub: JSInvokable,
+  ) {
     val factory = assertIs<JSFunction>(ctx.evaluate(initSource(), name = "<init.js>"))
     try {
       runBlocking {
@@ -113,12 +121,16 @@ class WebviewJsTest {
    * 重入时序不保证有进展（见 [interceptCallbackCanBeInvokedFromKotlin] 的注释），
    * 超时至少把「卡死」变成一条失败，而不是让构建挂到天荒地老。
    */
-  private fun evalAsync(ctx: QuickJS.Context, body: String): Any? = runBlocking {
-    withTimeout(15_000) {
-      val out = ctx.evaluate("(async () => { $body })()", name = "<webview>")
-      assertIs<Deferred<Any?>>(out).await()
+  private fun evalAsync(
+    ctx: QuickJS.Context,
+    body: String,
+  ): Any? =
+    runBlocking {
+      withTimeout(15_000) {
+        val out = ctx.evaluate("(async () => { $body })()", name = "<webview>")
+        assertIs<Deferred<Any?>>(out).await()
+      }
     }
-  }
 
   @Test
   fun webviewIsExposedAsGlobal() {
@@ -143,21 +155,23 @@ class WebviewJsTest {
           CompletableDeferred<Any?>(
             mapOf(
               "__webview_kind__" to "intercept",
-              "value" to mapOf(
-                "url" to "https://cdn.example.com/1.m3u8",
-                "headers" to mapOf("Range" to "bytes=0-"),
-              ),
-            )
+              "value" to
+                mapOf(
+                  "url" to "https://cdn.example.com/1.m3u8",
+                  "headers" to mapOf("Range" to "bytes=0-"),
+                ),
+            ),
           )
-        }
+        },
       )
-      val out = evalAsync(
-        ctx,
-        """
-        const ret = await webview("https://example.com/play", { "User-Agent": "ua" });
-        return ret.url + "|" + ret.headers.Range;
-        """.trimIndent()
-      )
+      val out =
+        evalAsync(
+          ctx,
+          """
+          const ret = await webview("https://example.com/play", { "User-Agent": "ua" });
+          return ret.url + "|" + ret.headers.Range;
+          """.trimIndent(),
+        )
       assertEquals("https://cdn.example.com/1.m3u8|bytes=0-", out)
     } finally {
       ctx.close()
@@ -175,7 +189,7 @@ class WebviewJsTest {
         javaStub { _, script, _ ->
           seenScript = script
           CompletableDeferred<Any?>(mapOf("__webview_kind__" to "script", "value" to """{"a":1}"""))
-        }
+        },
       )
       val out = evalAsync(ctx, """return (await webview("https://a/", {}, "JSON.stringify({a:1})")).a;""")
       assertEquals(1L, out)
@@ -195,11 +209,14 @@ class WebviewJsTest {
   fun emptyScriptResultIsUndefined() {
     val ctx = QuickJS.Context()
     try {
-      loadInit(ctx, javaStub { _, _, _ ->
-        CompletableDeferred<Any?>(mapOf("__webview_kind__" to "script", "value" to ""))
-      })
+      loadInit(
+        ctx,
+        javaStub { _, _, _ ->
+          CompletableDeferred<Any?>(mapOf("__webview_kind__" to "script", "value" to ""))
+        },
+      )
       assertNull(
-        evalAsync(ctx, """return (await webview("https://a/", {})) === undefined ? null : "not undefined";""")
+        evalAsync(ctx, """return (await webview("https://a/", {})) === undefined ? null : "not undefined";"""),
       )
     } finally {
       ctx.close()
@@ -211,9 +228,12 @@ class WebviewJsTest {
   fun nonJsonScriptResultIsReturnedAsIs() {
     val ctx = QuickJS.Context()
     try {
-      loadInit(ctx, javaStub { _, _, _ ->
-        CompletableDeferred<Any?>(mapOf("__webview_kind__" to "script", "value" to "plain text"))
-      })
+      loadInit(
+        ctx,
+        javaStub { _, _, _ ->
+          CompletableDeferred<Any?>(mapOf("__webview_kind__" to "script", "value" to "plain text"))
+        },
+      )
       assertEquals("plain text", evalAsync(ctx, """return await webview("https://a/", {});"""))
     } finally {
       ctx.close()
@@ -225,16 +245,20 @@ class WebviewJsTest {
   fun failureRejects() {
     val ctx = QuickJS.Context()
     try {
-      loadInit(ctx, javaStub { _, _, _ ->
-        CompletableDeferred<Any?>().apply { completeExceptionally(JSError("后台 WebView 失败：超时")) }
-      })
-      val out = evalAsync(
+      loadInit(
         ctx,
-        """
-        try { await webview("https://a/", {}); return "no throw"; }
-        catch (e) { return "caught:" + e.message; }
-        """.trimIndent()
+        javaStub { _, _, _ ->
+          CompletableDeferred<Any?>().apply { completeExceptionally(JSError("后台 WebView 失败：超时")) }
+        },
       )
+      val out =
+        evalAsync(
+          ctx,
+          """
+          try { await webview("https://a/", {}); return "no throw"; }
+          catch (e) { return "caught:" + e.message; }
+          """.trimIndent(),
+        )
       assertEquals("caught:后台 WebView 失败：超时", out)
     } finally {
       ctx.close()
@@ -270,45 +294,48 @@ class WebviewJsTest {
           // 这里把「回调真的送过来了」变成测试线程可以直接 await 的结论。
           if (fn == null) {
             started.completeExceptionally(
-              AssertionError("onInterceptRequest 是函数时必须作为 JSFunction 送到 Kotlin 侧")
+              AssertionError("onInterceptRequest 是函数时必须作为 JSFunction 送到 Kotlin 侧"),
             )
           } else {
             started.complete(fn)
           }
           finish
-        }
+        },
       )
 
       // 脚本会停在 `await webview(...)` 上，等 `finish` 有结论
       var scriptResult: Any? = null
       var scriptFailure: Throwable? = null
-      val script = Thread {
-        try {
-          scriptResult = evalAsync(
-            ctx,
-            """
-            const ret = await webview("https://example.com/play", {}, null, (request) =>
-              request.headers.Range ? { url: request.url, headers: request.headers } : null);
-            return ret === undefined ? "undefined" : "not undefined";
-            """.trimIndent()
-          )
-        } catch (t: Throwable) {
-          scriptFailure = t
+      val script =
+        Thread {
+          try {
+            scriptResult =
+              evalAsync(
+                ctx,
+                """
+                const ret = await webview("https://example.com/play", {}, null, (request) =>
+                  request.headers.Range ? { url: request.url, headers: request.headers } : null);
+                return ret === undefined ? "undefined" : "not undefined";
+                """.trimIndent(),
+              )
+          } catch (t: Throwable) {
+            scriptFailure = t
+          }
         }
-      }
       script.start()
 
       // —— 下面两行等价于「WebView 回调线程调用 onInterceptRequest」——
       val fn = runBlocking { withTimeout(15_000) { started.await() } }
-      val hit = fn.invoke(
-        mapOf(
-          "url" to "https://cdn.example.com/seg.ts",
-          "headers" to mapOf("Range" to "bytes=0-1023"),
-          "method" to "GET",
-          "isForMainFrame" to false,
-          "isRedirect" to false,
+      val hit =
+        fn.invoke(
+          mapOf(
+            "url" to "https://cdn.example.com/seg.ts",
+            "headers" to mapOf("Range" to "bytes=0-1023"),
+            "method" to "GET",
+            "isForMainFrame" to false,
+            "isRedirect" to false,
+          ),
         )
-      )
       val hitMap = assertIs<Map<*, *>>(hit, "回调返回对象时必须能拿回 Kotlin 侧可读的值")
       try {
         assertEquals("https://cdn.example.com/seg.ts", hitMap["url"])
@@ -325,7 +352,7 @@ class WebviewJsTest {
       // 没命中时回调返回 null，Kotlin 侧按放行处理（`as? Map` 得到 null）
       assertNull(
         fn.invoke(mapOf("url" to "https://a/", "headers" to emptyMap<String, String>())),
-        "回调返回 null 必须原样变成 Kotlin null（放行）"
+        "回调返回 null 必须原样变成 Kotlin null（放行）",
       )
 
       // 放行：让 webview() 有结论，等价于「什么都没拦到、加载正常跑完」

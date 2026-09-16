@@ -10,7 +10,10 @@ object Highlight {
     jniLoadLibrary("quickjs")
   }
 
-  private fun parseString(input: TokenParser, sep: Char): Int {
+  private fun parseString(
+    input: TokenParser,
+    sep: Char,
+  ): Int {
     while (input.offset < input.s.length) {
       val c = input.s[input.offset]
       input.offset++
@@ -32,7 +35,7 @@ object Highlight {
     STRING,
     COMMENT,
     REGEXP,
-    IDENT
+    IDENT,
   }
 
   /** 标识符首字符（字母/下划线/$）。 */
@@ -41,7 +44,10 @@ object Highlight {
   /** 标识符后续字符（首字符集 + 数字）。 */
   private external fun isIdentNext(c: Char): Boolean
 
-  private data class TokenParser(val s: String, var offset: Int = 0)
+  private data class TokenParser(
+    val s: String,
+    var offset: Int = 0,
+  )
 
   private fun parseCurry(
     input: TokenParser,
@@ -68,7 +74,7 @@ object Highlight {
           cb(Token.STRING, st, input.offset)
         }
         '/' -> {
-          if (input.offset < input.s.length)
+          if (input.offset < input.s.length) {
             when (input.s[input.offset]) {
               '/' -> {
                 val st = input.offset - 1
@@ -86,41 +92,47 @@ object Highlight {
                 val ret = parseString(input, '/')
                 val offset = input.offset
                 val flag = "gimsuy".toMutableList()
-                if (ret == 0)
+                if (ret == 0) {
                   while (input.offset < input.s.length) {
                     val cc = flag.indexOf(input.s[input.offset])
                     if (cc < 0) break
                     flag.removeAt(cc)
                     input.offset++
                   }
-                if (input.offset < input.s.length && isIdentNext(input.s[input.offset]))
+                }
+                if (input.offset < input.s.length && isIdentNext(input.s[input.offset])) {
                   input.offset = offset
+                }
                 cb(Token.REGEXP, st, input.offset)
               }
             }
-        }
-        '}' -> if (endOnCurry) return
-        else -> if(isIdentFirst(c)) {
-          val st = input.offset - 1
-          while (input.offset < input.s.length && isIdentNext(input.s[input.offset]))
-            input.offset++
-          when(input.s.substring(st, input.offset)) {
-            "null", "false", "true",
-            "if", "else", "return",
-            "var", "this", "delete", "void",
-            "typeof", "new", "in", "instanceof",
-            "do", "while", "for", "break", "continue",
-            "switch", "case", "default", "throw",
-            "try", "catch", "finally",
-            "function", "debugger", "with",
-            "class", "const", "enum", "export",
-            "extends", "import", "super",
-            "implements", "interface", "let",
-            "package", "private", "protected",
-            "public", "static", "yield",
-            "await", "async" -> cb(Token.IDENT, st, input.offset)
           }
         }
+        '}' -> if (endOnCurry) return
+        else ->
+          if (isIdentFirst(c)) {
+            val st = input.offset - 1
+            while (input.offset < input.s.length && isIdentNext(input.s[input.offset])) {
+              input.offset++
+            }
+            when (input.s.substring(st, input.offset)) {
+              "null", "false", "true",
+              "if", "else", "return",
+              "var", "this", "delete", "void",
+              "typeof", "new", "in", "instanceof",
+              "do", "while", "for", "break", "continue",
+              "switch", "case", "default", "throw",
+              "try", "catch", "finally",
+              "function", "debugger", "with",
+              "class", "const", "enum", "export",
+              "extends", "import", "super",
+              "implements", "interface", "let",
+              "package", "private", "protected",
+              "public", "static", "yield",
+              "await", "async",
+              -> cb(Token.IDENT, st, input.offset)
+            }
+          }
       }
     }
   }

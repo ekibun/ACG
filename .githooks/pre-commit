@@ -1,0 +1,87 @@
+#!/bin/sh
+# 提交前拦截：Kotlin 走 ktlint、C++ 走 clang-format —— **只校验，不改文件**。
+#
+# 为什么是 git hook 而不是 CI：CI 要推到远端之后才跑，拦不住「改动进仓库」这个动作。
+# 这里在 `git commit` 当场拦一次。
+#
+# 口径正本：skill `coding-style`（`.agents/skills/coding-style/`）+ 根 `.editorconfig`（Kotlin）
+# 与根 `.clang-format`（C++）。本脚本只管「跑哪个命令」，不重复任何规则。
+#
+# 装法（每个 clone 做一次；`.git/config` 是本机私有的，不入库）：
+#     git config core.hooksPath .githooks
+#   Linux / macOS 上还要 `chmod +x .githooks/pre-commit` —— git 对**没有执行位的 hook
+#   是静默跳过**的（而 Windows 上 `core.fileMode=false`，提交出去的就是 100644）。
+#
+# 本机依赖（缺了会**明确报错**，不会静默放行）：
+#   - 暂存区里有 `.kt` / `.kts` → 要能跑 `./gradlew`，即 `JAVA_HOME` 或 PATH 上有 java。
+#     `gradlew` 不会自己去找 JDK，命令行下必须给一份。
+#   - 暂存区里有 `cxx/{webview,quickjs,ffmpeg}/` 下的源文件 → 要能找到 clang-format：
+#     先看 `$ACG_CLANG_FORMAT`，再看 PATH 上的 `clang-format`。版本要对齐 `.clang-format`
+#     的基线（本机用 23.1.1；版本不同会出假失败）。
+#
+# 只想放行这一次：`git commit --no-verify`。别养成习惯 —— 跳过就白设了。
+
+set -u
+
+# 只看暂存区、只看这次要提交的。改个 .md 不应该等 Gradle。
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+if [ -z "$staged" ]; then
+  exit 0
+fi
+
+kt=$(printf '%s\n' "$staged" | grep -E '\.kts?$' || true)
+cpp=$(printf '%s\n' "$staged" | grep -E '^cxx/(webview|quickjs|ffmpeg)/[^/]+\.(c|cc|cpp|cxx|h|hpp)$' || true)
+
+if [ -z "$kt" ] && [ -z "$cpp" ]; then
+  exit 0
+fi
+
+fail=0
+
+# —— Kotlin ——
+# 跑的是**全仓** `ktlintCheck` 而不是只查暂存的那几个文件：ktlint 的 Gradle 任务按
+# sourceSet 拆开、没有「只查某些文件」的入口，而且几条规则的判定要看同包上下文。
+if [ -n "$kt" ]; then
+  echo "[pre-commit] ktlint：检查 Kotlin（暂存区有 .kt/.kts）…"
+  if [ -z "${JAVA_HOME:-}" ] && ! command -v java >/dev/null 2>&1; then
+    echo "[pre-commit] 失败：找不到 java —— 设 JAVA_HOME，或把 java 放进 PATH。" >&2
+    echo "             （gradlew 不会自己去找 JDK）" >&2
+    fail=1
+  elif ! ./gradlew ktlintCheck --continue --console=plain -q; then
+    echo "[pre-commit] 失败：ktlint 有违规（清单见上）。" >&2
+    echo "             能自动修的：./gradlew ktlintFormat --continue" >&2
+    echo "             ⚠️ ktlintFormat 会误删/误加 import —— 跑完必须重跑三道编译闸门。" >&2
+    fail=1
+  fi
+fi
+
+# —— C++ ——
+if [ -n "$cpp" ]; then
+  cf=${ACG_CLANG_FORMAT:-}
+  if [ -z "$cf" ]; then
+    cf=$(command -v clang-format 2>/dev/null || true)
+  fi
+  if [ -z "$cf" ]; then
+    echo "[pre-commit] 失败：找不到 clang-format。" >&2
+    echo "             设 ACG_CLANG_FORMAT 指到它，或把它放进 PATH。" >&2
+    fail=1
+  else
+    # 按行拆成位置参数：路径含空格也不会被拆坏，且一次调用就能报全部文件。
+    oldifs=$IFS
+    IFS='
+'
+    set -f
+    set -- $cpp
+    set +f
+    IFS=$oldifs
+
+    if ! "$cf" --dry-run --Werror "$@"; then
+      echo "[pre-commit] 失败：上面这些 C++ 文件需要重新格式化。修法：" >&2
+      echo "             \"$cf\" -i <文件>…" >&2
+      echo "             ⚠️ 改完扫一眼中文注释有没有被折出多余空格（ReflowComments 会把断行变空格）。" >&2
+      fail=1
+    fi
+  fi
+fi
+
+exit $fail

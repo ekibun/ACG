@@ -15,9 +15,9 @@ import soko.ekibun.acg.player.Playback
 
 @Composable
 actual fun VideoSurface(
-  modifier: Modifier,
   onPlayback: (Playback?) -> Unit,
   onFrame: (Long?) -> Unit,
+  modifier: Modifier,
 ) {
   val currentOnPlayback by rememberUpdatedState(onPlayback)
   val currentOnFrame by rememberUpdatedState(onFrame)
@@ -38,7 +38,7 @@ actual fun VideoSurface(
         bitmap = it,
         contentDescription = null,
         modifier = Modifier.fillMaxSize(),
-        contentScale = ContentScale.FillBounds
+        contentScale = ContentScale.FillBounds,
       )
     }
   }

@@ -11,9 +11,12 @@ agent_created: true
 
 # 编码风格
 
-**这是目标基线，不是对现状的描述。** 现有代码尚未统一（59 个自有文件里 34 个 2 空格、24 个 4 空格；
-注释中英混杂；无任何 lint 配置），所以**不要拿「周围代码就是这么写的」当理由沿用**：
-新代码按本基线写，改到哪一行就顺手对齐那一处，**不要为此做大范围格式化重构**（那属于无关改动）。
+**这是目标基线，不是对现状的描述。** 缩进、通配符 import、尾随逗号这几项**已由工具执行**
+（正本是根 `.editorconfig` 与 `.clang-format`，跑 `ktlintFormat` / `clang-format -i` 即可），
+且 **2026-09-16 已对全仓跑过一次**（`webview.cpp` 的 4 空格遗留也是那次整篇重排掉的）；
+只剩**注释中英混杂**。所以**不要拿「周围代码就是这么写的」当理由沿用**：新代码按本基线写。
+格式化工具自身的两个坑 —— `ktlintFormat` 会误删/误加 import、compose-rules 的
+`preview-public-check` 对本项目是误报 —— 见 [`references/kotlin.md`](./references/kotlin.md)。
 
 ## 适用范围：只管我们自己的代码
 
@@ -35,8 +38,9 @@ agent_created: true
 - **续行：比它所属的声明多缩进 4 个空格**（换行后的参数表、初始化列表、链式调用等）。
   续行量 ≠ 块缩进量，别把两者混成一条规则。
 - **不做水平/竖排对齐**（Kotlin 官方也明确反对）。
-- 存量：59 个自有文件 **34 个已是 2 空格、24 个还是 4 空格**，统一到 2 是独立待办（根 `TODO.md`）
-  —— **现在不要为此大范围重排**。
+- 存量：**已统一** —— 正本是根 `.editorconfig`（`indent_size = 2`、`continuation_indent_size = 4`）
+  与根 `.clang-format`（`IndentWidth: 2`、`ContinuationIndentWidth: 4`），Kotlin 侧由 ktlint 的
+  Gradle 插件执行、C++ 侧由 clang-format 执行。**别手工去凑**，改完跑一遍工具即可。
 
 ## 注释（四种文件同一条）
 

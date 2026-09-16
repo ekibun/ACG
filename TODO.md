@@ -146,33 +146,6 @@
 
 ## F. 风格基线的落地（`.agents/skills/coding-style/`）
 
-### F1. 三处「官方未规定」的默认值待拍板
-
-- **现状**：`references/kotlin.md` 末尾给了三条**建议值**，但那是建议、不是规定：
-  通配符 import 不用 / 行长软上限 120 字符 / 调用处多行参数一律加尾随逗号。
-- **完成判据**：拍板后把「建议」改成「本项目定」，并删掉这一条 todo。
-
-### F2. 引入格式化与静态检查配置（缩进基准 = 2 空格）
-
-- **现状**：仓库里**没有** `.editorconfig` / ktlint / detekt，也没有任何 lint 插件，风格只能靠人守。
-- **为什么现在没做**：引入了就会产生大量存量 diff，得单独安排一次提交。
-- **完成判据**：加 `.editorconfig`（**`indent_size = 2`**、`indent_style = space`、UTF-8、LF），
-  并选定 ktlint 或 detekt 在提交前 / CI 跑。
-
-### F3. 存量缩进统一到 2 空格
-
-- **现状**（实测扫描，已排除 submodule 与 `cxx/webview/sdk/`）：59 个自有源文件里
-  **34 个是 2 空格、24 个是 4 空格、1 个无缩进**。4 空格那批：根 `build.gradle.kts` 与
-  `settings.gradle.kts`、`androidApp/{build.gradle.kts,MainActivity.kt}`、
-  `desktopApp/{build.gradle.kts,main.kt}`、`shared/build.gradle.kts`、`App.kt`、
-  `ui/screen/{CodeScreen,PlayScreen,WebScreen}.kt`、
-  `web/{AcgWebView,BackgroundWebView}.kt` 与它们的 `.android.kt` / `.jvm.kt`、
-  `web/NativeWebView.jvm.kt`、`jni.android.kt` / `jni.jvm.kt`、
-  `common/{Http.android.kt,Http.jvm.kt}`、`NativeWebViewHostTest.kt`、`cxx/webview/webview.cpp`。
-- **为什么现在没做**：纯格式化会产生上万行 diff，必须**独立提交**，不能混进功能改动。
-- **完成判据**：范围内块缩进基准全部为 2 空格（续行仍为 4），改动只含空白；
-  完成后同步改 `SKILL.md`「缩进」一节里的存量那句话。
-
 ### F4. 存量注释统一到中文 + 统一格式
 
 - **现状**（同一份扫描）：自有代码注释行**含中文 1519、纯 ASCII 788**
@@ -183,6 +156,19 @@
 - **完成判据**：范围内注释一律中文（标识符、术语、报错与日志原文保持英文），形式按
   `.agents/skills/coding-style/references/comments.md`。
 - **建议与 A1 合并成同一次清扫**：先按 A1 删掉被证伪的注释，再按本条把剩下的译成中文并统一形式。
+
+### F5. 根项目的 `*.kts` 不在 ktlint 覆盖范围内
+
+- **现状**：ktlint 是经根 `build.gradle.kts` 的 `subprojects {}` 挂到各模块上的，**根项目自己不挂**
+  → 根 `build.gradle.kts` 与 `settings.gradle.kts` 既不参与 `ktlintCheck`，也不会被 `ktlintFormat` 修。
+  证据（2026-09-17 实测）：`./gradlew ktlintCheck` 的日志里只有 `:androidApp:` / `:shared:` /
+  `:desktopApp:` 的 `runKtlintCheckOverKotlinScripts`，没有根项目的同名任务；
+  两个文件至今仍是 **4 空格缩进**、根 `build.gradle.kts` 且缺行尾换行 —— 都与
+  `.editorconfig` 的 `[*.{kt,kts}]`（2 空格 / `insert_final_newline = true`）冲突。
+- **为什么现在没做**：修它要改根构建脚本的插件挂法并重跑闸门，属独立的一次改动，不在格式化批次里。
+- **完成判据**：根项目也应用 ktlint（或另给根 `*.kts` 一个检查任务），两个文件按契约重排；
+  日志里出现根项目的 `runKtlintCheckOverKotlinScripts`。
+- **影响**：`.githooks/pre-commit` 调的就是 `ktlintCheck`，所以**改根构建脚本不会被任何闸门拦住**。
 
 ---
 

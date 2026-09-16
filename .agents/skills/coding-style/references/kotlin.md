@@ -3,13 +3,13 @@
 来源：[Kotlin 官方编码约定](https://kotlinlang.org/docs/coding-conventions.html)。
 下面标「基线」的是官方原文规则；标「本项目」的是本仓库叠加的决定。
 
-> 官方一句话总纲：**当有疑问时，照抄周围代码的风格**。但本仓库现有代码自相矛盾
-> （缩进 2/4 并存），所以有约定时以本文为准。
+> 官方一句话总纲：**当有疑问时，照抄周围代码的风格**。但本仓库的约定**比官方更严**
+> （如块缩进取 2 而非 4、不用通配符 import），所以有约定时以本文为准。
 
 ## 格式（基线）
 
 - **缩进：块缩进每级 2 个空格、续行 4 个空格** —— 这条**覆盖**官方基线的 4 空格块缩进；
-  全语言统一的规则见 [`SKILL.md`](../SKILL.md) 的「缩进」一节（含存量现状与待办）。
+  全语言统一的规则见 [`SKILL.md`](../SKILL.md) 的「缩进」一节。
 - 左花括号放在构造开始行的**末尾**，右花括号**单独一行**并与起始构造水平对齐。
 - 行长**不设字符数上限**，判断标准是「能否放在一行」：放不下就换行。
 - **尾随逗号：声明处鼓励使用**（参数、when 分支等），**调用处自选**。
@@ -111,12 +111,34 @@
 - 可见性以 `private` 为主；`internal` 只在确实要给同模块的测试或兄弟类用时才用。
 - 一个「契约」一个文件是允许的：把某个功能的 state / controller / `@Composable` 入口放在同一文件
   （如 `AcgWebView.kt`），符合官方的「语义紧密相关」；但不要靠这个理由把文件堆到上千行。
-- 本项目**无** `.editorconfig` / ktlint / detekt 配置，所以约定靠人守。加 lint 是待办（见根 `TODO.md`）。
+- 格式化与 lint **已配置**：根 `.editorconfig`（ktlint 读它）+ `org.jlleitschuh.gradle.ktlint` 插件
+  （挂 `io.nlopez.compose.rules:ktlint` 规则集）。约定由工具执行，**别再靠人守**；
+  还没接的是「什么时候跑」，见根 `TODO.md`。
+- ⚠️ **`ktlintFormat` 的自动修复不可盲信，跑完必须重跑编译闸门**（2026-09-16 实测两次翻车）：
+  它**删了仍在使用的 import**（`VideoSurface.kt` 的 `androidx.compose.ui.Modifier` —— 只用在默认值里，
+  被当成未用；`QuickJS.kt` 的 `CompletableDeferred`），**又加了没用的**（`await`）。
+  这些只会在编译期暴露，所以「`ktlintFormat` 跑绿了」**不等于**代码没坏。
+- ⚠️ **compose-rules 的 `preview-public-check` 对本项目是错误假设**：它给「带 `@Preview` 的 composable」
+  自动加 `private`，而本项目 `App()` / `CodeScreen()` / `PlayScreen()` **既挂 `@Preview` 又是真实入口**
+  （分别被 `MainActivity`、桌面 `main.kt`、`App()` 调用）→ 加完跨文件调用**全断**。
+  正确处置是**保持 public 并加 `@Suppress("ktlint:compose:preview-public-check")`** ——
+  compose 规则不吃 `.editorconfig`，只能用 `@Suppress`。
+- 任务**按 sourceSet 拆**（`ktlintCommonMainSourceSetCheck` 等），逐模块跑，不加 `--continue`
+  会在第一个失败模块中止、把违规数读少。
 
 ## 官方未规定、本项目需自行决定的三处
 
-这三处官方没有给规则，且现有代码不统一。**新代码按下面的建议写**，正式拍板后再改这里：
+这三处官方没有给规则，现有代码曾不统一。**三条都已拍板，取值都写在根 `.editorconfig`，
+并由 ktlint 的标准规则执行**（改口径要 `.editorconfig` 与本文件一起改）：
 
-1. **通配符 import**：建议不用，显式 import（现有代码只有 2 处通配符，视作例外）。
-2. **最大行长**：官方不设上限。建议以 120 字符为软上限 —— 超过就换行，别硬撑。
-3. **调用处尾随逗号**：建议多行参数列表**一律加**尾随逗号（与声明处一致，diff 更干净）。
+1. **通配符 import**：不用，显式 import —— 标准规则 `no-wildcard-imports`。
+2. **最大行长**：**软上限 120 字符**（`.editorconfig` 里 `max_line_length = 120`）。
+   官方本身不设上限，判断标准仍是「能否放在一行」。
+   ⚠️ 这条**不只是"多一条规则"**：`max_line_length` 一从 `off` 变成具体数字，ktlint 的
+   **一整套换行类规则**会同时被激活 —— `function-signature`、`parameter-list-wrapping`、
+   `argument-list-wrapping`、`chain-method-continuation`、`multiline-expression-wrapping` 等。
+   2026-09-17 设成 120 时全仓冒出 5 处新违规；而且 `multiline-expression-wrapping` 会**否决**
+   「把签名收成一行、函数体不动」这种最小改法 —— 它要求多行表达式体另起一行，于是整个
+   `= object : ... { }` 的函数体要跟着 +2 缩进。**改这个值要预期到这种扩散**，
+   别以为只是加一条长度检查。
+3. **调用处尾随逗号**：多行参数列表**一律加** —— 标准规则 `trailing-comma-*`。

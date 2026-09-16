@@ -7,7 +7,7 @@ class AvFrame(
   val ptr: Long,
   val timeStamp: Long,
   val width: Int,
-  val height: Int
+  val height: Int,
 ) {
   /** 标记该帧正在被哪个 PTS 播放轮次消费，避免同一帧被重复取用。 */
   var processing: FFPlayer.PTS? = null
@@ -27,7 +27,9 @@ class AvFrame(
     private val cleaner: Cleaner = Cleaner.create()
   }
 
-  private class Releaser(@JvmField val ptr: Long) : Runnable {
+  private class Releaser(
+    @JvmField val ptr: Long,
+  ) : Runnable {
     override fun run() {
       if (ptr != 0L) closeNative(ptr)
     }

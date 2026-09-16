@@ -20,16 +20,17 @@ import java.awt.Dimension
  * 插件 JS 的「后台 WebView」**不需要额外窗口**：自研的 `cxx/webview` 宿主自己建
  * 隐藏窗口 + 自己的消息泵。`App()` 里的 `BackgroundWebViewHost()` 只是预热。
  */
-fun main(args: Array<String>) = application {
+fun main(args: Array<String>) =
+  application {
     Window(
-        onCloseRequest = ::exitApplication,
-        state = rememberWindowState(size = DpSize(1200.dp, 800.dp)),
-        title = "ACG",
+      onCloseRequest = ::exitApplication,
+      state = rememberWindowState(size = DpSize(1200.dp, 800.dp)),
+      title = "ACG",
     ) {
-        // compose.desktop 的 `Window` 没有 minimumSize 参数，直接在 ComposeWindow 上设。
-        LaunchedEffect(Unit) {
-            window.minimumSize = Dimension(720, 480)
-        }
-        App()
+      // compose.desktop 的 `Window` 没有 minimumSize 参数，直接在 ComposeWindow 上设。
+      LaunchedEffect(Unit) {
+        window.minimumSize = Dimension(720, 480)
+      }
+      App()
     }
-}
+  }

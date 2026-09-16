@@ -12,9 +12,9 @@ import soko.ekibun.acg.player.Playback
 
 @Composable
 actual fun VideoSurface(
-  modifier: Modifier,
   onPlayback: (Playback?) -> Unit,
   onFrame: (Long?) -> Unit,
+  modifier: Modifier,
 ) {
   val currentOnPlayback by rememberUpdatedState(onPlayback)
   val currentOnFrame by rememberUpdatedState(onFrame)
@@ -28,7 +28,7 @@ actual fun VideoSurface(
             override fun onSurfaceTextureAvailable(
               p0: SurfaceTexture,
               p1: Int,
-              p2: Int
+              p2: Int,
             ) {
               currentOnPlayback(AndroidPlayback(p0, currentOnFrame))
             }
@@ -36,16 +36,15 @@ actual fun VideoSurface(
             override fun onSurfaceTextureSizeChanged(
               p0: SurfaceTexture,
               videoWidth: Int,
-              videoHeight: Int
+              videoHeight: Int,
             ) {
             }
 
-            override fun onSurfaceTextureDestroyed(p0: SurfaceTexture): Boolean {
-              return false
-            }
+            override fun onSurfaceTextureDestroyed(p0: SurfaceTexture): Boolean = false
 
             override fun onSurfaceTextureUpdated(p0: SurfaceTexture) {}
           }
       }
-    })
+    },
+  )
 }

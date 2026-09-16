@@ -27,17 +27,17 @@ import kotlin.test.assertTrue
  * - 模块加载（moduleHandler）
  */
 class QuickJSTest {
-
-  private fun context(moduleHandler: ((String) -> String?)? = null) =
-    QuickJS.Context(moduleHandler)
+  private fun context(moduleHandler: ((String) -> String?)? = null) = QuickJS.Context(moduleHandler)
 
   /**
    * `async (a) => a` 在 JS 侧返回 Promise，桥接层会转成 Deferred，
    * 所以调用此类函数要 await 才能拿到真正的值（与 flutter_qjs 的
    * `await testWrap.invoke([...])` 一致）。
    */
-  private fun callAsync(fn: JSFunction, vararg argv: Any?): Any? =
-    runBlocking { assertIs<Deferred<Any?>>(fn.invoke(*argv)).await() }
+  private fun callAsync(
+    fn: JSFunction,
+    vararg argv: Any?,
+  ): Any? = runBlocking { assertIs<Deferred<Any?>>(fn.invoke(*argv)).await() }
 
   @Test
   fun evaluatePrimitives() {
@@ -58,11 +58,11 @@ class QuickJSTest {
     val ctx = context()
     try {
       val err = assertFailsWith<JSError> { ctx.evaluate("throw new Error('boom')") }
-        assertEquals(
-            err.message?.contains("boom"),
-            true,
-            "message should carry the JS text, got: ${err.message}"
-        )
+      assertEquals(
+        err.message?.contains("boom"),
+        true,
+        "message should carry the JS text, got: ${err.message}",
+      )
     } finally {
       ctx.close()
     }
@@ -74,11 +74,11 @@ class QuickJSTest {
     val ctx = context()
     try {
       val err = assertFailsWith<JSError> { ctx.evaluate("a=()=>a();a();") }
-        assertEquals(
-            err.message?.contains("stack overflow", ignoreCase = true),
-            true,
-            "expected a stack overflow error, got: ${err.message}"
-        )
+      assertEquals(
+        err.message?.contains("stack overflow", ignoreCase = true),
+        true,
+        "expected a stack overflow error, got: ${err.message}",
+      )
     } finally {
       ctx.close()
     }
@@ -89,18 +89,18 @@ class QuickJSTest {
   fun javaToJsRoundTripPrimitives() {
     val ctx = context()
     try {
-        assertIs<JSFunction>(ctx.evaluate("async (a) => a", name = "<testWrap>")).use { wrap ->
-            assertEquals(null, callAsync(wrap, null))
-            val primitives = listOf<Any?>(0, 1, 0.1, true, false, "str")
-            val wrapped = callAsync(wrap, primitives) as Array<*>
-            assertEquals(primitives.size, wrapped.size)
-            for (i in primitives.indices) {
-                val expected = primitives[i]
-                val actual = wrapped[i]
-                // 整数经 JS_TAG_INT 回来是 Long，小数经 JS_TAG_FLOAT64 回来是 Double
-                if (expected is Int) assertEquals(expected.toLong(), actual) else assertEquals(expected, actual)
-            }
+      assertIs<JSFunction>(ctx.evaluate("async (a) => a", name = "<testWrap>")).use { wrap ->
+        assertEquals(null, callAsync(wrap, null))
+        val primitives = listOf<Any?>(0, 1, 0.1, true, false, "str")
+        val wrapped = callAsync(wrap, primitives) as Array<*>
+        assertEquals(primitives.size, wrapped.size)
+        for (i in primitives.indices) {
+          val expected = primitives[i]
+          val actual = wrapped[i]
+          // 整数经 JS_TAG_INT 回来是 Long，小数经 JS_TAG_FLOAT64 回来是 Double
+          if (expected is Int) assertEquals(expected.toLong(), actual) else assertEquals(expected, actual)
         }
+      }
     } finally {
       ctx.close()
     }
@@ -156,7 +156,7 @@ class QuickJSTest {
     val err = assertFailsWith<JSError> { ctx.closeAndCheckLeaks() }
     assertTrue(
       err.message?.startsWith("reference leak:") == true,
-      "expected a reference leak report, got: ${err.message}"
+      "expected a reference leak report, got: ${err.message}",
     )
   }
 
@@ -200,16 +200,21 @@ class QuickJSTest {
     try {
       val seenThis = ArrayList<Any?>()
       val seenArgs = ArrayList<List<Any?>>()
-      val func = object : JSInvokable {
-        override fun invoke(vararg argv: Any?, thisVal: Any?): Any? {
-          seenThis += thisVal
-          seenArgs += argv.toList()
-          return "ok"
+      val func =
+        object : JSInvokable {
+          override fun invoke(
+            vararg argv: Any?,
+            thisVal: Any?,
+          ): Any? {
+            seenThis += thisVal
+            seenArgs += argv.toList()
+            return "ok"
+          }
         }
-      }
-      val call = assertIs<JSFunction>(
-        ctx.evaluate("(function (func, arg) { return func.call(this, arg) })", name = "<testThis>")
-      )
+      val call =
+        assertIs<JSFunction>(
+          ctx.evaluate("(function (func, arg) { return func.call(this, arg) })", name = "<testThis>"),
+        )
       try {
         val ret = call.invoke(func, "arg", thisVal = mapOf("name" to "this"))
         assertEquals("ok", ret)
@@ -234,17 +239,20 @@ class QuickJSTest {
   fun javaExceptionBecomesJsError() {
     val ctx = context()
     try {
-      val boom = object : JSInvokable {
-        override fun invoke(vararg argv: Any?, thisVal: Any?): Any? =
-          throw IllegalStateException("kaboom")
-      }
+      val boom =
+        object : JSInvokable {
+          override fun invoke(
+            vararg argv: Any?,
+            thisVal: Any?,
+          ): Any? = throw IllegalStateException("kaboom")
+        }
       val setter = assertIs<JSFunction>(ctx.evaluate("(f) => { this.__f = f }", name = "<set>"))
       try {
         setter.invoke(boom)
         val err = assertFailsWith<JSError> { ctx.evaluate("__f()") }
         assertTrue(
           err.message?.contains("kaboom") == true,
-          "expected java message to surface, got: ${err.message}"
+          "expected java message to surface, got: ${err.message}",
         )
       } finally {
         setter.close()
@@ -256,55 +264,59 @@ class QuickJSTest {
 
   /** flutter_qjs: '[Promise.reject, Promise.resolve, new Promise(()=>{})]' 全部转成 Deferred */
   @Test
-  fun promisesBecomeDeferred() = runBlocking {
-    val ctx = context()
-    try {
-      val promises = ctx.evaluate(
-        "[Promise.reject('reject'), Promise.resolve('resolve'), new Promise(() => {})]",
-        name = "<promises>"
-      ) as Array<*>
-      assertEquals(3, promises.size)
-      assertTrue(promises.all { it is Deferred<*> }, "each promise should map to a Deferred")
+  fun promisesBecomeDeferred() =
+    runBlocking {
+      val ctx = context()
+      try {
+        val promises =
+          ctx.evaluate(
+            "[Promise.reject('reject'), Promise.resolve('resolve'), new Promise(() => {})]",
+            name = "<promises>",
+          ) as Array<*>
+        assertEquals(3, promises.size)
+        assertTrue(promises.all { it is Deferred<*> }, "each promise should map to a Deferred")
 
-      // 运行时类型是 Object[]，只能逐元素取用，整体 cast 成 Array<Deferred> 会失败
-      val rejected = assertIs<Deferred<Any?>>(promises[0])
-      val resolved = assertIs<Deferred<Any?>>(promises[1])
-      val pending = assertIs<Deferred<Any?>>(promises[2])
-      assertEquals("resolve", resolved.await())
-      // reject 的值不是 Throwable，桥接层会包成 JSError
-      val rejection = assertFailsWith<Throwable> { rejected.await() }
-      assertTrue(
-        rejection is JSError || rejection.message?.contains("reject") == true,
-        "rejection should surface, got: $rejection"
-      )
-      // 永不 settle 的 promise 不应完成
-      assertEquals(null, withTimeoutOrNull(200) { pending.await() })
-    } finally {
-      ctx.close()
+        // 运行时类型是 Object[]，只能逐元素取用，整体 cast 成 Array<Deferred> 会失败
+        val rejected = assertIs<Deferred<Any?>>(promises[0])
+        val resolved = assertIs<Deferred<Any?>>(promises[1])
+        val pending = assertIs<Deferred<Any?>>(promises[2])
+        assertEquals("resolve", resolved.await())
+        // reject 的值不是 Throwable，桥接层会包成 JSError
+        val rejection = assertFailsWith<Throwable> { rejected.await() }
+        assertTrue(
+          rejection is JSError || rejection.message?.contains("reject") == true,
+          "rejection should surface, got: $rejection",
+        )
+        // 永不 settle 的 promise 不应完成
+        assertEquals(null, withTimeoutOrNull(200) { pending.await() })
+      } finally {
+        ctx.close()
+      }
     }
-  }
 
   /** Kotlin 的 Deferred 传进 JS 后应当是 Promise，可被 await */
   @Test
-  fun deferredBecomesJsPromise() = runBlocking {
-    val ctx = context()
-    try {
-      val d = CompletableDeferred<Any?>()
-      val consume = assertIs<JSFunction>(ctx.evaluate("async (p) => await p", name = "<await>"))
+  fun deferredBecomesJsPromise() =
+    runBlocking {
+      val ctx = context()
       try {
-        val job = CoroutineScope(Dispatchers.Default).launch {
-          delay(50)
-          d.complete("done")
+        val d = CompletableDeferred<Any?>()
+        val consume = assertIs<JSFunction>(ctx.evaluate("async (p) => await p", name = "<await>"))
+        try {
+          val job =
+            CoroutineScope(Dispatchers.Default).launch {
+              delay(50)
+              d.complete("done")
+            }
+          assertEquals("done", callAsync(consume, d))
+          job.join()
+        } finally {
+          consume.close()
         }
-        assertEquals("done", callAsync(consume, d))
-        job.join()
       } finally {
-        consume.close()
+        ctx.close()
       }
-    } finally {
-      ctx.close()
     }
-  }
 
   /** 数组元素转换：每个元素都应原样落位（回归 jsToJava 数组分支的双转换 bug） */
   @Test
@@ -386,7 +398,7 @@ class QuickJSTest {
         export default { data: handlerData };
         """.trimIndent(),
         name = "evalModule",
-        flag = JSEvalFlag.MODULE
+        flag = JSEvalFlag.MODULE,
       )
       val eventual = ctx.evaluate("import('evalModule')", name = "<import>")
       val mod = assertIs<Deferred<Any?>>(eventual)
@@ -411,15 +423,16 @@ class QuickJSTest {
   fun missingModuleThrows() {
     val ctx = context { null }
     try {
-      val err = assertFailsWith<JSError> {
-        runBlocking {
-          val p = assertIs<Deferred<Any?>>(ctx.evaluate("import('nope')", name = "<import>"))
-          p.await()
+      val err =
+        assertFailsWith<JSError> {
+          runBlocking {
+            val p = assertIs<Deferred<Any?>>(ctx.evaluate("import('nope')", name = "<import>"))
+            p.await()
+          }
         }
-      }
       assertTrue(
         err.message?.contains("nope") == true || err.message?.contains("could not load module") == true,
-        "expected module load failure, got: ${err.message}"
+        "expected module load failure, got: ${err.message}",
       )
     } finally {
       ctx.close()
@@ -478,7 +491,7 @@ class QuickJSTest {
     val err = assertFailsWith<JSError> { ctx.closeAndCheckLeaks() }
     assertTrue(
       err.message?.startsWith("reference leak:") == true,
-      "expected a reference leak report, got: ${err.message}"
+      "expected a reference leak report, got: ${err.message}",
     )
     // 再次调用应当幂等（已关闭）
     ctx.closeAndCheckLeaks()
@@ -502,7 +515,7 @@ class QuickJSTest {
       val err = assertFailsWith<JSError> { ctx.evaluate("while(true) {}") }
       assertTrue(
         err.message?.startsWith("InternalError: interrupted") == true,
-        "expected an interrupt error, got: ${err.message}"
+        "expected an interrupt error, got: ${err.message}",
       )
     } finally {
       ctx.close()
@@ -517,7 +530,7 @@ class QuickJSTest {
       val err = assertFailsWith<JSError> { ctx.evaluate("new Array(1000000).fill(0)") }
       assertTrue(
         err.message?.startsWith("InternalError: out of memory") == true,
-        "expected an out-of-memory error, got: ${err.message}"
+        "expected an out-of-memory error, got: ${err.message}",
       )
     } finally {
       ctx.close()
