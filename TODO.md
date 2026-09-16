@@ -157,19 +157,6 @@
   `.agents/skills/coding-style/references/comments.md`。
 - **建议与 A1 合并成同一次清扫**：先按 A1 删掉被证伪的注释，再按本条把剩下的译成中文并统一形式。
 
-### F5. 根项目的 `*.kts` 不在 ktlint 覆盖范围内
-
-- **现状**：ktlint 是经根 `build.gradle.kts` 的 `subprojects {}` 挂到各模块上的，**根项目自己不挂**
-  → 根 `build.gradle.kts` 与 `settings.gradle.kts` 既不参与 `ktlintCheck`，也不会被 `ktlintFormat` 修。
-  证据（2026-09-17 实测）：`./gradlew ktlintCheck` 的日志里只有 `:androidApp:` / `:shared:` /
-  `:desktopApp:` 的 `runKtlintCheckOverKotlinScripts`，没有根项目的同名任务；
-  两个文件至今仍是 **4 空格缩进**、根 `build.gradle.kts` 且缺行尾换行 —— 都与
-  `.editorconfig` 的 `[*.{kt,kts}]`（2 空格 / `insert_final_newline = true`）冲突。
-- **为什么现在没做**：修它要改根构建脚本的插件挂法并重跑闸门，属独立的一次改动，不在格式化批次里。
-- **完成判据**：根项目也应用 ktlint（或另给根 `*.kts` 一个检查任务），两个文件按契约重排；
-  日志里出现根项目的 `runKtlintCheckOverKotlinScripts`。
-- **影响**：`.githooks/pre-commit` 调的就是 `ktlintCheck`，所以**改根构建脚本不会被任何闸门拦住**。
-
 ---
 
 *建立于 2026-09-16。条目来源：`AGENTS.md` / `cxx/AGENTS.md` / `.agents/skills/*/references/` 里的
