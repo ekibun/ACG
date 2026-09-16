@@ -66,8 +66,22 @@ git config core.hooksPath .githooks
 （可用 `ACG_CLANG_FORMAT` 指定，其次看 PATH 上的 `clang-format`）时，都会**明确报错并拒绝提交**。
 真想放行一次用 `git commit --no-verify`。
 
-⚠️ **Linux / macOS 上还要 `chmod +x .githooks/pre-commit`** —— git 对**没有执行位的 hook 是静默跳过**的，
-而 `core.fileMode=false` 的 Windows 上提交出去的文件偏偏是 `100644`。
+⚠️ **hook 拿到的 PATH 可能是被裁剪过的**（2026-09-17 实测，Git for Windows 2.55，从非 MSYS 终端提交）：
+git 传给 hook 的 PATH 里有 Git 的 `cmd/`（只有 git.exe），**没有 Git 自带的 `usr/bin/`** ——
+`grep` / `sed` / `uname` / `xargs` / `cygpath` 全在那儿。两个后果都很难看：`gradlew` 自己就跑不起来
+（`xargs` 缺失时它只吐一句 `xargs is not available`）；更糟的是**若用 `grep` 之类去筛暂存区文件名**，
+`grep` 找不到 → 文件列表变空 → 脚本判定「没有要检查的文件」→ `exit 0` **静默放行**，
+提交照常成功、其实什么都没查。所以 `.githooks/pre-commit` 现在：筛文件名只用 shell 内建（`case`），
+并从 `git --exec-path` 推出 Git 自带的 `usr/bin` 补进 PATH（只补 `./gradlew` 那一条命令）。
+另有一个 MSYS 的坑：**PATH 搜索不认 `C:/…` 这种 Windows 风格条目，只认 `/c/…` / `/usr/bin` 风格**，
+而负责转换的 `cygpath` 恰好在那个还没进 PATH 的目录里 —— 归一化只能用内建的 `cd -P` + `pwd`。
+
+验证 hook 不用真提交：**`git hook run pre-commit`** 走的就是 `git commit` 的那条调用路径。
+
+⚠️ **执行位**：`.githooks/pre-commit` 在仓库里已按 `100755` 记录（Windows 上 `core.fileMode=false`，
+直接 `git add` 出来的会是 `100644`，所以当初用 `git update-index --chmod=+x` 显式写进了索引）。
+克隆下来一般就带着；若在 Linux / macOS 上发现丢了，`chmod +x .githooks/pre-commit` 一次 ——
+git 对**没有执行位的 hook 是静默跳过**的。
 
 > 2026-09-17 用过一版 GitHub Actions，按用户要求撤掉了：CI 要推到远端之后才跑，
 > 拦不住「改动进仓库」这个动作。

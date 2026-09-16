@@ -9,19 +9,54 @@
 #
 # 装法（每个 clone 做一次；`.git/config` 是本机私有的，不入库）：
 #     git config core.hooksPath .githooks
-#   Linux / macOS 上还要 `chmod +x .githooks/pre-commit` —— git 对**没有执行位的 hook
-#   是静默跳过**的（而 Windows 上 `core.fileMode=false`，提交出去的就是 100644）。
+#   仓库里已按 100755 记录执行位，克隆下来一般就带着；若在 Linux / macOS 上丢了，
+#   `chmod +x .githooks/pre-commit` —— git 对**没有执行位的 hook 是静默跳过**的。
 #
 # 本机依赖（缺了会**明确报错**，不会静默放行）：
-#   - 暂存区里有 `.kt` / `.kts` → 要能跑 `./gradlew`，即 `JAVA_HOME` 或 PATH 上有 java。
+#   - 暂存区里有 `.kt` / `.kts` → 要能跑 `./gradlew`，即 `JAVA_HOME` 或 PATH 上有 java，
+#     且 `uname` / `xargs` / `sed` / `tr` / `cygpath` 可用（见下面的 PATH 修补）。
 #     `gradlew` 不会自己去找 JDK，命令行下必须给一份。
 #   - 暂存区里有 `cxx/{webview,quickjs,ffmpeg}/` 下的源文件 → 要能找到 clang-format：
 #     先看 `$ACG_CLANG_FORMAT`，再看 PATH 上的 `clang-format`。版本要对齐 `.clang-format`
 #     的基线（本机用 23.1.1；版本不同会出假失败）。
 #
 # 只想放行这一次：`git commit --no-verify`。别养成习惯 —— 跳过就白设了。
+#
+# ⚠️ 改本脚本时**只能用 shell 内建，加文件头点名的那几个工具**。
+#   2026-09-17 踩过一次：原版用 `grep` 筛暂存区文件名，而 git 起的 hook 拿到的 PATH 是被
+#   裁剪过的（见下一段），`grep` 找不到 → 文件列表变空 → 脚本判定「没有要检查的文件」
+#   → `exit 0` **静默放行**。提交照常成功，什么都没查 —— 不报错、只失效，比不装 hook 更危险。
+#   所以：不要用 `grep` / `awk` 去筛文件名，用 shell 自己的 `case`。
 
 set -u
+
+# —— PATH 修补 ——
+# 实测（Git for Windows 2.55，从非 MSYS 终端提交）：git 传给 hook 的 PATH 里有 Git 的
+# `cmd/`（只有 git.exe），**没有 Git 自带的 `usr/bin/`** —— 而 sed / uname / xargs /
+# cygpath / tr 全在那儿。`gradlew` 这个 POSIX 脚本少了它们会死得很难看（`xargs` 缺失时
+# 它只吐一句 "xargs is not available"）。这里从 git 自己的安装位置把 `usr/bin` 推出来，
+# **不写死机器路径**：`git --exec-path` = `<安装根>/mingw64/libexec/git-core`，
+# 退掉 `/libexec/*` 得 `<安装根>/mingw64`，再取同级就是 `<安装根>/usr/bin`。
+#
+# ⚠️ 两个坑（2026-09-17 实测）：
+#   1) MSYS 的 PATH 搜索**不认** `C:/…` 这种 Windows 风格条目，只认 `/c/…` / `/usr/bin` 这种
+#      POSIX 风格。而能把前者转成后者的 `cygpath` 恰好就在这个还没进 PATH 的目录里 ——
+#      先有鸡还是先有蛋。所以用**内建的 `cd -P` + `pwd`** 归一化（MSYS 下它给出 `/usr/bin`）。
+#   2) 别只靠 `[ -x ]` 判断成败，要**真的搜一次**（`command -v`）—— `-x` 通过而 PATH 搜不到
+#      是上面第 1 点的典型表现。
+# 其他平台 PATH 上本来就有这些工具，这个分支不会进。
+git_usr_bin=
+if ! command -v sed >/dev/null 2>&1; then
+  exec_path=$(git --exec-path 2>/dev/null || true)
+  root=${exec_path%/libexec/*}
+  for cand in "$root/usr/bin" "${root%/*}/usr/bin"; do
+    d=$( cd -P "$cand" 2>/dev/null && pwd )
+    if [ -n "$d" ] && PATH="$d:$PATH" command -v sed >/dev/null 2>&1; then
+      git_usr_bin=$d
+      break
+    fi
+  done
+fi
 
 # 只看暂存区、只看这次要提交的。改个 .md 不应该等 Gradle。
 staged=$(git diff --cached --name-only --diff-filter=ACMR)
@@ -29,8 +64,36 @@ if [ -z "$staged" ]; then
   exit 0
 fi
 
-kt=$(printf '%s\n' "$staged" | grep -E '\.kts?$' || true)
-cpp=$(printf '%s\n' "$staged" | grep -E '^cxx/(webview|quickjs|ffmpeg)/[^/]+\.(c|cc|cpp|cxx|h|hpp)$' || true)
+# 挑出要检查的文件。**只用 shell 内建**（理由见文件头）。
+kt=
+cpp=
+set -f                       # 文件名里的 * ? 不当通配符展开
+for f in $staged; do
+  case "$f" in
+    *.kt | *.kts)
+      kt="$kt$f
+" ;;
+  esac
+  case "$f" in
+    cxx/*)
+      rest=${f#cxx/}
+      dir=${rest%%/*}
+      inner=${rest#*/}
+      # 只认 `cxx/<自研目录>/<源文件>` 这一层：`inner` 里再有 `/` 就说明落进了
+      # `cxx/webview/sdk/`、`cxx/ffmpeg/ffmpeg/` 这类第三方或 submodule 的深层目录，
+      # 不归我们管。
+      case "$inner" in
+        */*) ;;
+        *.c | *.cc | *.cpp | *.cxx | *.h | *.hpp)
+          case "$dir" in
+            webview | quickjs | ffmpeg)
+              cpp="$cpp$f
+" ;;
+          esac ;;
+      esac ;;
+  esac
+done
+set +f
 
 if [ -z "$kt" ] && [ -z "$cpp" ]; then
   exit 0
@@ -43,15 +106,40 @@ fail=0
 # sourceSet 拆开、没有「只查某些文件」的入口，而且几条规则的判定要看同包上下文。
 if [ -n "$kt" ]; then
   echo "[pre-commit] ktlint：检查 Kotlin（暂存区有 .kt/.kts）…"
-  if [ -z "${JAVA_HOME:-}" ] && ! command -v java >/dev/null 2>&1; then
+
+  # 先确认 gradlew 真跑得起来。少了这一步，工具缺失时只会得到一句看不懂的报错，
+  # 甚至（像 `grep` 那次）什么都得不到。
+  missing=
+  for t in uname xargs sed tr cygpath; do
+    if [ -n "$git_usr_bin" ]; then
+      PATH="$git_usr_bin:$PATH" command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+    else
+      command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+    fi
+  done
+
+  if [ -n "$missing" ]; then
+    echo "[pre-commit] 失败：gradlew 需要的工具不在 PATH 上：$missing" >&2
+    echo "             git 传给 hook 的 PATH 可能被裁剪过 —— 把 Git 自带的 usr/bin 放进 PATH 再提交。" >&2
+    fail=1
+  elif [ -z "${JAVA_HOME:-}" ] && ! command -v java >/dev/null 2>&1; then
     echo "[pre-commit] 失败：找不到 java —— 设 JAVA_HOME，或把 java 放进 PATH。" >&2
     echo "             （gradlew 不会自己去找 JDK）" >&2
     fail=1
-  elif ! ./gradlew ktlintCheck --continue --console=plain -q; then
-    echo "[pre-commit] 失败：ktlint 有违规（清单见上）。" >&2
-    echo "             能自动修的：./gradlew ktlintFormat --continue" >&2
-    echo "             ⚠️ ktlintFormat 会误删/误加 import —— 跑完必须重跑三道编译闸门。" >&2
-    fail=1
+  else
+    gradlew_ok=0
+    if [ -n "$git_usr_bin" ]; then
+      # 只给 gradlew 这一条命令补 PATH，缩小影响面。
+      PATH="$git_usr_bin:$PATH" ./gradlew ktlintCheck --continue --console=plain -q && gradlew_ok=1
+    else
+      ./gradlew ktlintCheck --continue --console=plain -q && gradlew_ok=1
+    fi
+    if [ "$gradlew_ok" -ne 1 ]; then
+      echo "[pre-commit] 失败：ktlint 有违规（Gradle 用了 -q，清单在上面那份它指出的报告文件里）。" >&2
+      echo "             能自动修的：./gradlew ktlintFormat --continue" >&2
+      echo "             ⚠️ ktlintFormat 会误删/误加 import —— 跑完必须重跑三道编译闸门。" >&2
+      fail=1
+    fi
   fi
 fi
 
