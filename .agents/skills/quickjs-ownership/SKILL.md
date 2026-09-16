@@ -22,4 +22,4 @@ agent_created: true
 - `tag = -1` 是**正常的对象**（`JS_TAG_OBJECT = -1`），不是异常。
 
 另外：`import()` / `require()` 一律不许用 —— 本桥的模块加载路径会把进程 `abort()`，
-能力全部内联进 `init.js`（位置见根 [`AGENTS.md`](../../../AGENTS.md) §2）。
+能力全部内联进 `init.js`（位置见根 [`AGENTS.md`](../../../AGENTS.md) §3）。

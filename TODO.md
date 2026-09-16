@@ -20,11 +20,15 @@
 
 - **现状**：代码里大量注释是 AI 写的且已被证伪。已知样本：
   `必须 jbr-11`、`Tao 后端是唯一选择`、`HttpIO.offset += ret 是重复累加`、
-  `RequestInterceptor 拦不到子资源` 相关的反编译结论。
+  `RequestInterceptor 拦不到子资源` 相关的反编译结论，以及
+  `ffmpeg/AvFormat.kt:26` 的"`AVPixelFormat` 只有 0..13"（本地 `libavutil/pixfmt.h` 里
+  25 = `AV_PIX_FMT_ARGB` 是合法值，真正原因是通道序不同；2026-09-16 复核）。
 - **为什么现在没做**：属于独立的一次清扫，与文档改动不能混在一起。
 - **完成判据**：上述样本逐处修正或删除；全仓复查一遍同类注释。
-- **完成后必须做的收尾**：`AGENTS.md` 顶部那条「注释不可信（临时状态）」**整条删除**。
-  一条长期成立的"别信注释"规则本身是坏味道——它会训练 agent 忽略有用信号。
+- **完成后必须做的收尾**（**动手前要先经用户明确确认**）：删掉 `AGENTS.md` **§4 末条**
+  （"代码注释可能已过时甚至被证伪…读到先当线索、不当结论"）—— 一条长期成立的"别信注释"规则
+  本身是坏味道，会训练 agent 忽略有用信号。
+  用户 2026-09-16 晚明确：**注释现在还不完全可信，这条规则先留着**，等他确认后再删。
 
 ## B. 已知缺陷，待修
 
@@ -35,7 +39,7 @@
   第 2 处（`desktopApp/build/resources/main/`，`:desktopApp:processResources`）已自动。
 - **为什么现在没做**：补任务本身是代码改动，本轮只改文档。
 - **完成判据**：补一个 `dependsOn(:desktopApp:buildJni)` 的 copy 任务，把第 3 处并进 Gradle 工具链；
-  之后 `AGENTS.md` §原生与 dll 与该条一起简化为"三处全自动"。
+  之后 skill `build-and-test` 的 `references/dll-sync.md` 与该条一起简化为"三处全自动"。
 - **影响**：漏拷的症状是"改动没生效、连日志都没有"，最容易被误判成代码问题。
 
 ### B2. `QuickJSTest > objectWithVariousTagsRoundTrips` 偶发失败
@@ -50,23 +54,26 @@
 - **现状**：未审计。Windows 控制台按代码页解码，中文输出会变乱码，误导排查。
 - **完成判据**：`shared/src/jvmTest/` 下测试的输出全为英文（ASCII）；加一条约定性检查。
 
-### B4. `commonMain` 里存在平台符号（违反根 AGENTS.md 的硬规则）
+### B4. `commonMain` 里存在平台符号（违反根 AGENTS.md §4 的硬规则）
 
-- **现状**：约定是 `commonMain` 不许出现 `java.*` / `android.*`。实测**至少 6 个文件 11 处**
-  直接 import 了 `java.*`：`quickjs/QuickJS.kt`、`ffmpeg/{AvFrame,AvCodec,AvFormat,FFPlayer}.kt`、
-  `acg/engine/JsEngine.kt`；另有内联的 `java.util.concurrent.atomic.AtomicBoolean`
-  与 `catch (_: java.io.IOException)`。
+- **现状**：约定是 `commonMain` 不许出现 `java.*` / `android.*`。**7 个文件 11 处**（2026-09-16 复核）：
+  `quickjs/QuickJS.kt`、`ffmpeg/{AvFrame,AvCodec,AvFormat,FFPlayer}.kt`、`acg/engine/JsEngine.kt`
+  直接 import `java.*`；另有 `QuickJS.kt:327` 的内联 `java.util.concurrent.atomic.AtomicBoolean`
+  与 `acg/player/HttpIO.kt:47` 的内联 `catch (_: java.io.IOException)`。
   也就是说 `soko.ekibun.{quickjs,ffmpeg}` 事实上是按 JVM-only 写的。
-- **为什么现在没做**：要么补 `expect`/`actual`，要么承认这两个包不做多平台 —— 是决策题。
-- **完成判据**：要么逐个改成 `expect` 最小原语 + 两端 `actual`，要么在 `AGENTS.md` 里把规则的
-  适用范围写清（例如"`soko.ekibun.{quickjs,ffmpeg}` 为 JVM-only，不受此限"），**不要放着两说**。
+- **方向已定**（用户 2026-09-16 晚）：**不给这两个包开例外** —— 规则保持，把这些 Java 语义
+  逐处提到外面（`expect` 一个最小原语、两端各 `actual`），`commonMain` 里最终不剩平台符号。
+- **为什么现在没做**：属于独立的一次重构，要和文档改动分开。
+- **完成判据**：上述 11 处全部去掉；`commonMain` 里搜 `java\.` / `android\.` 结果均为 0。
+- **完成后必须做的收尾**：删掉 `AGENTS.md` §4 里那句"现状…仍有直接引用…见 `TODO.md` B4"
+  的指针（届时规则已无例外），并删掉本条。
 
 ## C. 事实未实测，文档里暂无据
 
 ### C1. Android APK 产物路径
 
 - **现状**：`androidApp/build/outputs/apk/debug/` 是按标准 AGP 默认写的，**本机没实跑过**。
-- **完成判据**：真跑一次 `:androidApp:assembleDebug`，按实测结果改 `AGENTS.md` §提交·产物清单。
+- **完成判据**：真跑一次 `:androidApp:assembleDebug`，按实测结果写进 `AGENTS.md` / skill `build-and-test`。
 
 ### C2. 桌面安装包命令与产物路径
 
@@ -74,13 +81,13 @@
   （`:desktopApp:tasks --all` 里有 `package` / `packageMsi` / `packageDeb` / `packageDmg` /
   `packageDistributionForCurrentOS` / `packageRelease*` / `createDistributable` /
   `runDistributable` / `packageUberJarForCurrentOS` / `notarizeDmg`）。
-- **完成判据**：至少跑通 Windows 侧的打包，把命令与产物位置写进 AGENTS.md。
+- **完成判据**：至少跑通 Windows 侧的打包，把命令与产物位置写进 skill `build-and-test`。
 
 ### C3. 热重载到底能不能用
 
 - **现状**：`hotRun` / `hotRunAsync` / `hotRunArgfile` / `runHot(Deprecated)` 任务**存在**，
   但 `--auto` 参数**不存在**（此前记录有误，已纠正）。热重载是否真可用**未验证**。
-- **完成判据**：验证一次；可用则写进 AGENTS.md，不可用则不问（保持现状不提）。
+- **完成判据**：验证一次；可用则写进 skill `build-and-test`，不可用则不问（保持现状不提）。
 
 ## D. 文档债
 
@@ -99,7 +106,7 @@
 
 ### D3. 术语表
 
-- **现状**：`AGENTS.md` §1 曾有一个「术语（待补）」空节，属未兑现的承诺，已随瘦身删除。
+- **现状**：`AGENTS.md` 曾有一个「术语（待补）」空节，属未兑现的承诺，已随瘦身删除。
 - **完成判据**：整理出项目专有名词表，或明确决定不维护。**若整理，不要放回 `AGENTS.md`**
   —— 它是"要查的时候才看"的资料，放 `.agents/` 下；`AGENTS.md` 只留一行指针。
 
@@ -109,7 +116,8 @@
 
 - **现状**：`NativeWebView.jvm.kt` 仍在 `soko.ekibun.acg.web`，与"所有 native 绑定统一收在
   `soko.ekibun.*`"的规则不符（`quickjs` / `ffmpeg` / `jni.kt` 已经在那儿）。
-- **完成判据**：迁到 `soko.ekibun` 下，并同步更新 AGENTS.md 的措辞（去掉"待迁移"）。
+- **完成判据**：迁到 `soko.ekibun` 下。`AGENTS.md` 侧**不用再改** —— 原书写"去掉「待迁移」"，
+  但该措辞已随 2026-09-16 的瘦身清掉（状态词计数已归零），§3 那句现在就是最终形态。
 
 ### E2. `:androidApp` 自身编译未纳入构建闸门
 

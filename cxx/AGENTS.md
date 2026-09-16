@@ -1,8 +1,8 @@
 # cxx/AGENTS.md
 
-只讲 `cxx/` 下的原生构建、JNI 桥与各库的硬约束。项目整体约定见 [../AGENTS.md](../AGENTS.md)（含
-dll 落位三处、构建命令、完成标准）；WebView2 与 QuickJS 的深水手册在
-[`../.agents/skills/`](../.agents/skills/) 下对应的技能里。
+只讲 `cxx/` 下的原生构建、JNI 桥与各库的硬约束。项目整体约定见 [../AGENTS.md](../AGENTS.md)；构建 / 测试 / dll 同步见 skill `build-and-test`；
+WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills/) 下对应的技能里；通用做法（最小实现、外科手术式改动）见
+根 [../AGENTS.md](../AGENTS.md) §1。
 
 产物是三个共享库，各自被同名 `.cmake` 引入，源码在 `cxx/{webview,quickjs,ffmpeg}/`：
 
@@ -17,6 +17,9 @@ dll 落位三处、构建命令、完成标准）；WebView2 与 QuickJS 的深�
   `-DLIBRARY_OUTPUT_PATH=bin` 给。文件名就是 `webview.dll` / `quickjs.dll` / `ffmpeg.dll`。
 - `cxx/ffmpeg/ffmpeg/`、`cxx/quickjs/quickjs/` 是 **git submodule**（完整上游源码树）。
   找参考实现（如 `fftools/ffplay.c`）**直接读本地文件，不要联网下载**；也不要修改它们。
+- **改完 native 必须把 dll 同步到运行位置**。三处落位、哪几处自动、哪处要手动拷，见
+  [`../.agents/skills/build-and-test/references/dll-sync.md`](../.agents/skills/build-and-test/references/dll-sync.md) —— 漏掉第 3 处的症状是"改动没生效、连日志都没有"，
+  最容易被误判成代码问题。**别在这里另抄一份清单。**
 
 ## 原生构建
 
@@ -42,17 +45,6 @@ dll 落位三处、构建命令、完成标准）；WebView2 与 QuickJS 的深�
 - `cmake --build ... | grep -E 'error'` **无输出不代表成功** —— 漏掉 `error:` / 本地化的 `错误 1`
   会把编译失败看成成功。看 `tail`，或匹配 `错误|error`。
 - CMake 增量对 `.cpp` 时间戳敏感；改完立即构建若只报 `Built target` 而没有编译行，`touch` 一下。
-
-## dll 同步
-
-改完 native **必须**把 dll 同步到位（落位三处见 [../AGENTS.md](../AGENTS.md) §5），
-源是 `cxx/build/bin/<name>.dll`：
-
-1. `shared/build/processedResources/jvm/test/` —— 跑 `:shared:jvmTest` 时由 `jvmTestProcessResources` 自动刷
-2. `desktopApp/build/resources/main/` —— 由 `:desktopApp:processResources` 刷
-3. `desktopApp/build/run/main/classpath/classes/` —— **没有任何任务写这里，必须手动拷**
-
-漏掉第 3 处的症状是"改动没生效、连日志都没有"，最容易被误判成代码问题。
 
 ## JNI
 
@@ -89,14 +81,15 @@ dll 落位三处、构建命令、完成标准）；WebView2 与 QuickJS 的深�
   - `jsToJava` 是**唯一**的对象/标量分发点，递归点必须走它（历史上把对象分支移出去过一次，
     症状是"数组元素全是 null"、"promise 没有 then"）；
   - `tag = -1` 是**正常的对象**（`JS_TAG_OBJECT = -1`），不是异常。
-- **`import()` / `require()` 一律不许用**：本桥的模块加载路径会把进程 `abort()`。
-  能力全部内联进 `init.js`（位置见 [../AGENTS.md](../AGENTS.md) §2）。
+- **`import()` / `require()` 一律不许用**：本桥的模块加载路径会把进程 `abort()`（见
+  [`../.agents/skills/project-traps/references/silent-failures.md`](../.agents/skills/project-traps/references/silent-failures.md)）。
+  能力全部内联进 `init.js`（脚本位置见 [../AGENTS.md](../AGENTS.md) §3）。
 
 ## ffmpeg
 
-- `AvPlayback.audioFormat` / `videoFormat` 是**平台要求 native 输出什么格式**，不是
-  native 实际输出什么；两端可以不同（Android 的 `ENCODING_PCM_8BIT` 是有意为之）。
-- `videoFormat` 必须是 `AV_PIX_FMT_RGBA = 26`。**不要写 25** —— 那是 `AV_PIX_FMT_ARGB`，通道序不同。
+- `AvPlayback.audioFormat` / `videoFormat` 的语义（平台**要求** native 输出什么格式）见
+  [../AGENTS.md](../AGENTS.md) §4。`videoFormat` 必须是 `AV_PIX_FMT_RGBA = 26` ——
+  **不要写 25**，那是 `AV_PIX_FMT_ARGB`，通道序不同。
 - 自定义 AVIO 下的 seek 能力由 `HttpIO.seek` 的模拟质量决定（`aviobuf.c` 会因 seek 回调非空
   判为 `AVIO_SEEKABLE_NORMAL`）；语义有专属用例 `HttpSeekSemanticsTest` /
   `SeekWindowSemanticsTest`，动这块必须让它们保持绿。

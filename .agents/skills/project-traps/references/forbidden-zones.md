@@ -19,4 +19,5 @@
   AWT 是重型组件、永远画在 Compose 之上，所以 `AcgWebView` 的 `content` 覆盖层在 Windows 上会被盖住。
 - **通用**：不要顺手重构无关代码、不要顺手统一命名/格式、不要把 alpha 依赖降级。
 - 测试偶发失败先重跑确认不是环境问题，再定性；已知 `QuickJSTest > objectWithVariousTagsRoundTrips`
-  是真实竞态、已标 **待修**（见 `AGENTS.md` §3）—— 不要只靠重跑掩盖，也别用改产品代码去迁就的方式打补丁。
+  是真实竞态、已标 **待修**（状态见 `TODO.md` B2，症状清单见 [silent-failures.md](./silent-failures.md)）——
+  不要只靠重跑掩盖，也别用改产品代码去迁就的方式打补丁。

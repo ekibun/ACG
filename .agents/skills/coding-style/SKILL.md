@@ -56,5 +56,5 @@ agent_created: true
 两者冲突时**以「本项目」为准**。两者都没覆盖的地方，优先照抄范围内最规范的那个文件，而不是自创。
 
 本技能**只管风格**。硬约束（`commonMain` 不许出现平台符号、`expect`/`actual` 的粒度、
-`audioFormat` 方向的含义、`engine` 类名是对外契约、dll 三处同步等）在根
-[`AGENTS.md`](../../../AGENTS.md) 与 [`cxx/AGENTS.md`](../../../cxx/AGENTS.md)，此处不重复。
+`audioFormat` 方向的含义、`engine` 类名是对外契约等）在根
+[`AGENTS.md`](../../../AGENTS.md) 与 [`cxx/AGENTS.md`](../../../cxx/AGENTS.md)；构建 / 测试 / dll 同步见 skill `build-and-test`。此处不重复。
