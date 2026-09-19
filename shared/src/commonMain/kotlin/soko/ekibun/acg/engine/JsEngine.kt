@@ -96,54 +96,61 @@ class JsEngine {
             moduleHandler = moduleHandler,
           )
         quickjsDelegate = ctx1
-        val init = ctx1.evaluate(moduleHandler("@init")!!, "<init>") as JSInvokable
-        init(
-          object : JSInvokable {
-            override fun invoke(
-              vararg argv: Any?,
-              thisVal: Any?,
-            ): Any? {
-              val obj = argv[0]
-              return if (obj is String) {
-                // 按名称实例化引擎插件类。包名必须跟随本工程的实际包名，
-                // 而不是从别处拷来的 `soko.ekibun.nekomp.*`。
-                val className = "$ENGINE_PACKAGE.$obj"
-                val cls =
-                  javaClass.classLoader?.loadClass(className)
-                    ?: throw JSError("cannot load class '$className'")
-                val ctorArgs = argv.sliceArray(1 until argv.size)
-                // 按实参个数选构造函数，不要盲取 constructors[0]（顺序无保证，
-                // 且多个构造函数时会选错）。
-                val ctor =
-                  cls.constructors.firstOrNull { it.parameterCount == ctorArgs.size }
-                    ?: throw JSError(
-                      "no constructor of '$className' accepts ${ctorArgs.size} argument(s)",
-                    )
-                ctor.isAccessible = true
-                ctor.newInstance(*ctorArgs)
-              } else {
-                val methodName = argv[1] as String
-                val objWrap = (obj ?: this@JsEngine)
-                val callArgs = argv.sliceArray(2 until argv.size)
-                // 重载时 declaredMethods 里会有多个同名方法，`first{}` 可能选错。
-                // 用"名字 + 参数个数"匹配，仍不唯一时再按参数类型宽容匹配。
-                val candidates =
-                  objWrap.javaClass.methods
-                    .filter { it.name == methodName && it.parameterCount == callArgs.size }
-                val method =
-                  candidates.firstOrNull { m ->
-                    m.parameterTypes.withIndex().all { (i, t) -> acceptsArg(t, callArgs[i]) }
-                  } ?: candidates.firstOrNull()
-                    ?: throw JSError(
-                      "no method '$methodName' with ${callArgs.size} argument(s) " +
-                        "on ${objWrap.javaClass.name}",
-                    )
-                method.isAccessible = true
-                method.invoke(objWrap, *callArgs)
+        // 声明成 JSInvokable 会丢掉 AutoCloseable -> 这个工厂函数再也关不掉，
+        // 每个引擎实例固定漏 1 票，reset() 的泄漏报告随之永久带一条噪音。
+        // JS 侧没有别的引用持有它，调用完即可归还。
+        val init = ctx1.evaluate(moduleHandler("@init")!!, "<init>") as JSFunction
+        try {
+          init(
+            object : JSInvokable {
+              override fun invoke(
+                vararg argv: Any?,
+                thisVal: Any?,
+              ): Any? {
+                val obj = argv[0]
+                return if (obj is String) {
+                  // 按名称实例化引擎插件类。包名必须跟随本工程的实际包名，
+                  // 而不是从别处拷来的 `soko.ekibun.nekomp.*`。
+                  val className = "$ENGINE_PACKAGE.$obj"
+                  val cls =
+                    javaClass.classLoader?.loadClass(className)
+                      ?: throw JSError("cannot load class '$className'")
+                  val ctorArgs = argv.sliceArray(1 until argv.size)
+                  // 按实参个数选构造函数，不要盲取 constructors[0]（顺序无保证，
+                  // 且多个构造函数时会选错）。
+                  val ctor =
+                    cls.constructors.firstOrNull { it.parameterCount == ctorArgs.size }
+                      ?: throw JSError(
+                        "no constructor of '$className' accepts ${ctorArgs.size} argument(s)",
+                      )
+                  ctor.isAccessible = true
+                  ctor.newInstance(*ctorArgs)
+                } else {
+                  val methodName = argv[1] as String
+                  val objWrap = (obj ?: this@JsEngine)
+                  val callArgs = argv.sliceArray(2 until argv.size)
+                  // 重载时 declaredMethods 里会有多个同名方法，`first{}` 可能选错。
+                  // 用"名字 + 参数个数"匹配，仍不唯一时再按参数类型宽容匹配。
+                  val candidates =
+                    objWrap.javaClass.methods
+                      .filter { it.name == methodName && it.parameterCount == callArgs.size }
+                  val method =
+                    candidates.firstOrNull { m ->
+                      m.parameterTypes.withIndex().all { (i, t) -> acceptsArg(t, callArgs[i]) }
+                    } ?: candidates.firstOrNull()
+                      ?: throw JSError(
+                        "no method '$methodName' with ${callArgs.size} argument(s) " +
+                          "on ${objWrap.javaClass.name}",
+                      )
+                  method.isAccessible = true
+                  method.invoke(objWrap, *callArgs)
+                }
               }
-            }
-          },
-        )
+            },
+          )
+        } finally {
+          init.close()
+        }
         ctx1
       }
 
