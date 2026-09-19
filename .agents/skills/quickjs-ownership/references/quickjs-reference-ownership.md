@@ -142,23 +142,31 @@ return map;
 - 数组走 `Object[]`，规则同上。
 - **函数是唯一的例外**：`JSFunction` 是可调用的活对象，展开成数据没有意义，所以仍然造包装、
   持一票、要 `close()`。`jsToJavaObject` 里 `JS_IsFunction` 单独一个分支就是为它。
-- promise 同理不展开：它要等 `then` 回调，返回值是个 `Deferred`。
+- promise 同理不展开：它要等 `then` 回调，落在这个位置的值是个 `Deferred` —— 上游
+  `_jsToDart` 是 `completer.future`（Dart 的 `Future` 对应 Kotlin 的 `Deferred`），
+  两边是同一件事。
 - ⚠️ **别删 cache 里那些 JNI local ref**。`a['a'] = a` 时递归交还的 `jVal` 就是 `map`
   自己，对它 `DeleteLocalRef` 等于把要返回的引用一并销毁 —— 表现是**静默变成 null**
   （不抛异常、不崩溃，值就没了）。2026-09-20 实测：环形对象整个转成 null，
   而普通对象一切正常，非常容易误判成"展开没写对"。
-  判据：递归**之后** `cachedRefExists(cache, v)` 为真就别删 —— 进 cache 的**不止容器**，
-  **函数包装也在里面**；标量 / 字符串不进 cache，照删，别让 local ref 白涨。
-- ⚠️ **promise 的 `then` 必须给「独占」包装，绝不能走共享 cache**。同一个
-  `Promise.prototype.then` 会被数组里每个 promise 取到（`[Promise.reject,
-  Promise.resolve, new Promise]`），而 Kotlin 的 `wrapJSPromiseAsync` 拿到它就当是
-  自己的、调用完立刻 `close()`。若共用 cache 里的**同一个**包装，第一个 promise 一
-  `close`，后面的 promise 命中 cache 拿到的就是**已关闭**的包装 → 症状是
-  `TypeError: not a function`（2026-09-20 实测：同一用例重跑 3 次挂 2 次；之所以
-  偶发，是因为已析构的 `JSValue` 内存还没被覆写时，看着仍像函数）。
-  修法：`jsToJavaOwnedFunction()` 造一个**不登记进 cache** 的包装，由 Kotlin 独占
-  并负责归还；顺带它的 local ref 每轮都能当场 `DeleteLocalRef`（不再白涨）。
-  **判据**：谁 `close()`，谁就必须是那一个包装的唯一主人 —— 这两件事必须成对出现。
+  判据：递归**之后** `cachedRefExists(cache, v)` 为真就别删 —— 进 cache 的只有**容器**
+  （数组、普通对象，以及 promise 那个 `Deferred`）；**函数包装不进** cache（理由见下一条），
+  标量 / 字符串也不进 —— 这两类照删，别让 local ref 白涨。
+- ⚠️ **函数包装不进 cache —— 这条是 2026-09-20 用一次真实 bug 换来的**。
+  上游 `_jsToDart` 的函数分支是直接 `return _JSFunction(ctx, val)`，只有数组和普通对象
+  两支才写 `cache[valptr] = ret`。本工程上一版（ff531fe）给函数也写了
+  `cache[ptr] = wrapper`，看着像「顺手保留身份」，实际是把「谁负责 `free()`」变成了悬案：
+  同一个 `Promise.prototype.then` 会被数组里每个 promise 取到，而 Kotlin 的
+  `wrapJSPromiseAsync` 拿到它就当是自己的、调用完立刻 `close()` —— 第一个 promise
+  一 `close`，后面的 promise 命中 cache 拿到的就是**已关闭**的包装 → 症状是
+  `TypeError: not a function`（同一用例重跑 3 次挂 2 次；之所以偶发，是因为已析构的
+  `JSValue` 内存还没被覆写时，看着仍像函数）。
+  当时的修法是加个 `jsToJavaOwnedFunction()` 只为 `then` 绕开 cache —— 那是**治标**：
+  根因就是多写的那行登记，删掉它，`then` 天然独占，那个函数也就不需要了。
+  **代价**：同一个函数出现在两个位置会得到两个 `JSFunction`（上游同样如此），换来一条
+  干净规则 —— **每个函数包装都是独占的一票，谁拿到谁还**。
+  **判据**：谁 `close()`，谁就必须是那唯一的主人。只要存在「某个能被 `close()` 的包装
+  可能被共享」，这共享就是错的。
 - ⚠️ **`cache` 必须由整棵图共用同一张表**。本工程用指针传，空指针表示"最外层自己开一张"。
   按值传的话递归拿到的是副本，新登记的条目回不到上层：环还能靠"登记早于复制"侥幸命中，
   但**共享子对象**（`a.b = c; a.d = c`）会被转成两份不同的副本，身份当场断掉。
@@ -184,9 +192,9 @@ promise 必须排除在表外……而这些在 `_jsToDart` 的模型里**一个
 本工程的 `jsToJava` 现在对齐这个模型，上游 `flutter_qjs_test.dart` 的
 `expect(wrapA['a'], wrapA, reason: 'recursive object')` 断言的正是这件事。
 
-已知的一处细节差异（与身份无关）：上游 `_jsToDart` 的函数分支**不写回** `cache`，
-所以一次遍历里同一个函数会出现两个 `_JSFunction`；本工程把函数也写回 cache（一次遍历内复用同一个
-`JSFunction`）。只影响一次遍历内的复用，不影响正确性。
+函数分支两边也一致：**都不写回 `cache`**（上游直接 `return _JSFunction(ctx, val)`，
+本工程的 `jsToJavaObject` 同理）。于是同一个函数出现在两个位置时，两边都得到两个包装 ——
+这是**故意**的：包装是独占的一票，谁拿到谁还，谁也不能替别人 `close()`。
 
 另一处：`javaToJsImpl` 用于断环的 cache **必须是 `IdentityHashMap`**。
 普通 `HashMap` 会对**键**调 `hashCode()`/`equals()`，而自引用 Map（`a["a"] = a`）
@@ -388,7 +396,8 @@ if (!buf) JS_FreeValue(ctx, JS_GetException(ctx));
 1. native 侧两个释放函数；Kotlin 侧只有一个 `releaseValue`。
 2. `definePropertyValue` 释放 `k`、不释放 `v`；两个包装都 delete。
 3. 唯一的 `jsToJava` 分发点；递归点全部走它。
-4. 普通对象整图展开（`cache[ptr]` 要在**填之前**登记）；java→js 的 cache 用 `IdentityHashMap`。
+4. 普通对象整图展开（`cache[ptr]` 要在**填之前**登记）；**函数不进 `cache`**（包装独占，
+   谁拿到谁还）；promise 展开成 `Deferred`（上游是 `Future`）；java→js 的 cache 用 `IdentityHashMap`。
 5. `Cleaner` 的清理动作只捕获值，加一次性 CAS 守卫。
 6. `collectLeaks()` 先记录再归还；`refs` 用强引用身份集。
 7. 验证方式：把**上游**的 `assert` 还原（删掉你临时加的 `fprintf` / `abort` 诊断）后

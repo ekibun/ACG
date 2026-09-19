@@ -371,31 +371,6 @@ static bool cachedRefExists(const std::unordered_map<void*, jobject>& cache,
 }
 
 /**
- * 为**函数**单独造一个不属于任何 `cache` 的包装。
- *
- * 给 promise 的 `then` 用。同一个 `Promise.prototype.then` 会被数组里每个
- * promise 取到，而 Kotlin 的 `wrapJSPromiseAsync` 拿到它、调用完就
- * `close()`。若走共享 cache，第一个 promise 一 `close`，后面命中 cache 的
- * promise 拿到的就是**已关闭**的包装 —— `jsCall` 读的是已析构的 `JSValue`，报
- * `TypeError: not a function`。实测（2026-09-20）：`[Promise.reject,
- * Promise.resolve, new Promise]` 重跑 3 次挂 2
- * 次；之所以偶发，是因为已析构内存里原本那份 `JSValue`
- * 还没被覆写时，看着仍像函数。
- *
- * 返回 `nullptr` 表示 `v` 不是函数（调用方按「没有可调用的 then」处理）。
- * 返回的包装持一票，由调用方（Kotlin）归还。
- */
-static jobject jsToJavaOwnedFunction(JNIEnv* env, JSContext* ctx, JSValue v,
-                                     JSRuntimeOpaque* opaque) {
-  if (!JS_IsFunction(ctx, v)) return nullptr;
-  jclass clazz = env->FindClass("soko/ekibun/quickjs/JSFunction");
-  jmethodID init = env->GetMethodID(
-      clazz, "<init>", "(JLsoko/ekibun/quickjs/QuickJS$Context;)V");
-  return env->NewObject(clazz, init, (jlong) new JSValue(JS_DupValue(ctx, v)),
-                        opaque->thiz);
-}
-
-/**
  * [jsToJava] 的对象 / 函数分支。单独拆出来的原因是上面那条标量快路径不该夹带
  * 任何 Java 上行调用，而只有这里才需要 `cache`。
  */
@@ -430,31 +405,47 @@ static jobject jsToJavaObject(JNIEnv* env, JSContext* ctx, JSValue obj,
   auto ptr = JS_VALUE_GET_PTR(obj);
   if (cache.find(ptr) != cache.end()) return cache[ptr];
   if (JS_IsFunction(ctx, obj)) {
-    // 函数是全图里**唯一**保留的包装：它是可调用的活对象，展开成数据没有意义。
-    // 这一票新引用由调用方（Kotlin 的 `JSFunction`）持有，`free()` 时归还。
+    // 函数是全图里**唯一**保留的包装：它是可调用的活对象，展开成数据没有意义。这一票新引用由拿到它的人负责
+    // `free()` 归还。
+    //
+    // 函数**不**登记进 `cache` —— 对齐上游 `_jsToDart`：它的函数分支直接
+    // `return _JSFunction(ctx, val)`，只有数组和普通对象两支才写
+    // `cache[valptr]`。于是同一个函数出现在两个位置时是**各造一个独占包装**，谁拿到谁还。
+    //
+    // 登记进 cache
+    // 会反过来制造共享：同一个函数只造一个包装，而它随时可能被某个拿到的人
+    // `close()` 掉（Promise 分支的 `then` 就是这样），另一个位置再命中 cache
+    // 得到的便是**已关闭**的包装 —— 读已析构的
+    // `JSValue`，不报错、只失效。实测（2026-09-20）：`[Promise.reject,
+    // Promise.resolve, new Promise]` 每个 promise 的 `then` 都是同一个
+    // `Promise.prototype.then`，重跑 3 次挂 2 次，报 `TypeError: not a
+    // function`；偶发是因为已析构内存还没被覆写时看着仍像函数。
     jclass clazz = env->FindClass("soko/ekibun/quickjs/JSFunction");
     jmethodID init = env->GetMethodID(
         clazz, "<init>", "(JLsoko/ekibun/quickjs/QuickJS$Context;)V");
-    auto wrapper = env->NewObject(
+    return env->NewObject(
         clazz, init, (jlong) new JSValue(JS_DupValue(ctx, obj)), opaque->thiz);
-    cache[ptr] = wrapper;
-    return wrapper;
   } else if (JS_IsError(ctx, obj)) {
     return jsToThrowable(env, ctx, obj);
   } else if (JS_IsPromise(ctx, obj)) {
-    // promise 不展开成数据：它要等 `then` 回调，返回值本身是个 Deferred。这里只
-    // 保证一次遍历内同一个 promise 给同一个 Deferred。
+    // promise 不展开成数据：它要等 `then` 回调，落在这个位置的值是个 `Deferred`
+    // —— 对齐上游 `_jsToDart` 的 `completer.future`（Dart 的 `Future` 对应
+    // Kotlin 的 `Deferred`）。这里只保证一次遍历内同一个 promise 给同一个
+    // Deferred。
     jclass clazz = env->GetObjectClass(opaque->thiz);
     jmethodID wrap = env->GetMethodID(
         clazz, "wrapJSPromiseAsync",
         "(JLsoko/ekibun/quickjs/JSFunction;)Lkotlinx/coroutines/Deferred;");
     auto thenJs = JS_GetPropertyStr(ctx, obj, "then");
-    // `then` 走**独占**的包装，不登记进共享 cache。同一个
-    // `Promise.prototype.then` 会被数组里每个 promise 取到，而 Kotlin 的
-    // `wrapJSPromiseAsync` 拿到它就当自己的、调用完立刻 `close()`；共用 cache
-    // 的话第一个 promise 一 close，后面命中 cache 的 promise
-    // 就拿到已关闭的包装。详见 [jsToJavaOwnedFunction]。
-    auto thenJava = jsToJavaOwnedFunction(env, ctx, thenJs, opaque);
+    // 只把**函数**递过去：`then` 不是函数（或是个 thenable 对象）时给
+    // `nullptr`，Kotlin 那边按「promise 没有可调用的 then」处理。
+    //
+    // 不能无条件 `jsToJava`：它会把非函数的 `then` 展开成 `Map`，穿过 JNI
+    // 塞进声明为 `JSFunction` 的形参里，Kotlin 一侧再 `close()` 就是对着 `Map`
+    // 调不存在的方法。
+    jobject thenJava = JS_IsFunction(ctx, thenJs)
+                           ? jsToJava(env, ctx, thenJs, &cache)
+                           : nullptr;
     JS_FreeValue(ctx, thenJs);
     auto ret = env->CallObjectMethod(opaque->thiz, wrap,
                                      (jlong) new JSValue(JS_DupValue(ctx, obj)),
