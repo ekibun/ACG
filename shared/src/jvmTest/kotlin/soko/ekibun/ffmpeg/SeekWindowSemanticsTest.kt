@@ -48,8 +48,9 @@ class SeekWindowSemanticsTest {
    * 复刻 `stream_seek` + `read_thread` 里 `seek_min` / `seek_max` 的算法
    * （ffplay.c:1526-1537 / 3092-3121）。
    *
-   * `rel == 0`（我们的拖动进度条就是这种）时窗口**必须无界** —— `INT64_MIN`/`INT64_MAX`。
-   * 这正是 [LONG_MIN_WINDOW] / [LONG_MAX_WINDOW] 要表达的常量。
+   * `rel == 0`（我们的拖动进度条就是这种）时窗口**必须无界** —— C 侧的
+   * `INT64_MIN`/`INT64_MAX`，在 Kotlin 侧就是 `Long.MIN_VALUE` / `Long.MAX_VALUE`
+   * （见下面的 `streamSeekWindow`）。
    */
   private data class SeekWindow(
     val minTs: Long,
@@ -161,26 +162,28 @@ class SeekWindowSemanticsTest {
   }
 
   /**
-   * 核心回归：**回退分支下 min_ts/max_ts 根本不影响落点**。
+   * 核心回归：**回退分支下 min_ts/max_ts 不改落点，只改方向位**。
    *
-   * 对 [tightLowerWindowPicksForward] / [unboundedWindowAlwaysFallsBackToBackward]
-   * 这两个窗口，`avformat_seek_file` 最终都只是把同一个 `ts` 交给
-   * `av_seek_frame`，demuxer 自然落同一个关键帧。
-   * 换句话说：**mp4/mov 上不存在"靠窗口让 seek 更精确"这条路**。
+   * `avformat_seek_file` 的回退分支把同一个 `ts` 交给 `av_seek_frame`（见
+   * [fallbackSeekTarget]），窗口唯一的痕迹是 `dir`。所以下面两个极端窗口落到
+   * `av_seek_frame` 的目标时间戳**相同**、方向位不同 —— 换句话说：
+   * **mp4/mov 上不存在"靠窗口让 seek 更精确"这条路**。
    */
   @Test
   fun windowCannotMakeFallbackSeekAccurate() {
     val ts = 42_000_000L
-    // 两个极端的窗口，落到 av_seek_frame 的目标时间戳完全相同
-    val targets =
+    // 断言必须带上 dir：只比 ts 两边恒等，这条用例就等于什么都没验。
+    val results =
       listOf(
         Long.MIN_VALUE to Long.MAX_VALUE,
         ts to Long.MAX_VALUE,
-      ).map { (minTs, maxTs) -> fallbackSeekTarget(ts, minTs, maxTs) }
-    assertEquals(listOf(ts, ts), targets)
+      ).map { (minTs, maxTs) ->
+        fallbackSeekTarget(ts, minTs, maxTs) to fallbackDir(ts, minTs, maxTs)
+      }
+    assertEquals(listOf(ts to AVSEEK_FLAG_BACKWARD, ts to 0), results)
   }
 
-  /** 回退分支把 min/max 丢掉后，真正传给 `av_seek_frame` 的只剩 `ts`。 */
+  /** 回退分支把 min/max 丢掉后，真正传给 `av_seek_frame` 的只剩 `ts`（方向另算）。 */
   private fun fallbackSeekTarget(
     ts: Long,
     minTs: Long,
@@ -286,7 +289,9 @@ class SeekWindowSemanticsTest {
 
   @Test
   fun backwardFlagValueMatchesFfmpegHeader() {
-    // 锁定枚举值，改名/挪位时立刻炸
+    // 钉住的是**本文件 companion 里那份拷贝**的数字（对照 libavformat/avformat.h）。
+    // 它拦不住 `AvFormat.AVSEEK_FLAG_*` 那边改错值 —— 两份拷贝之间的一致性靠人看，
+    // 别把这条用例当成"哪边改错都会炸"的保险。
     assertEquals(1, AVSEEK_FLAG_BACKWARD)
     assertEquals(2, AVSEEK_FLAG_BYTE)
     assertEquals(4, AVSEEK_FLAG_ANY)

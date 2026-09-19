@@ -16,11 +16,9 @@ dependencies {
   implementation(libs.compose.uiToolingPreview)
 }
 
-// 注意 `TargetFormat` 是 compose.desktop 那套：Windows 是 Msi/Exe，
-// 没有 Nucleus 用的 Nsis。
 val buildJni =
   tasks.register<Exec>("buildJni") {
-    description = "Build native libs (ffmpeg/quickjs) for the desktop JVM"
+    description = "Build native libs (webview/ffmpeg/quickjs) for the desktop JVM"
     group = "build"
     workingDir = rootDir.resolve("cxx")
 

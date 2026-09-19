@@ -125,10 +125,13 @@ jobject jsToJava(JNIEnv *env, JSContext *ctx, JSValue obj,
 ```
 peekWrapper(ptr) -> Any?            // 已有的包装，没有则 null
 registerWrapper(ptr, wrapper)       // 登记刚造出来的包装
-reuseWrapper(wrapper, dupHandle)    // 命中：把调用方那新的一票并进它，返回同一个包装
-                                    // （引用计数仍按常规的 releaseValue 账本平衡）
+reuseWrapper(wrapper, dupHandle)    // 命中：releaseValue(dupHandle) 还掉 native 多给的那份，
+                                    // 再 dup() 给调用方单独记一票，返回同一个包装
 ```
 
+- **每轮 `jsToJava` 转换都给调用方一票，命中已有包装时也不例外**（就是上面那个 `dup()`）。
+  漏掉它**不会报错**：调用方 `free()` 减的是**别人的**票，谁先还谁就把别人手里的包装一并销毁
+  （use-after-free）；而「干脆不还」则变成每轮在 `refs` 上挂一笔。2026-09-19 修的就是这一处。
 - 包装被释放时**要撤掉登记**（`forgetWrapper`），否则被复用的 native 指针会映射到一个已销毁的对象上。
 - **不要把 promise 放进这张表**：它的包装由 `then` 回调驱动，而那个回调在调用结束后就退休了，
   重放缓存条目会得到一个 null 的 `then`。promise 只交给调用内的 `cache`。

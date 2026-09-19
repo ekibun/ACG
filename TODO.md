@@ -18,17 +18,43 @@
 
 ### A1. 清理代码里过时/错误的 AI 注释
 
-- **现状**：代码里大量注释是 AI 写的且已被证伪。已知样本：
-  `必须 jbr-11`、`Tao 后端是唯一选择`、`HttpIO.offset += ret 是重复累加`、
-  `RequestInterceptor 拦不到子资源` 相关的反编译结论，以及
-  `ffmpeg/AvFormat.kt:26` 的"`AVPixelFormat` 只有 0..13"（本地 `libavutil/pixfmt.h` 里
-  25 = `AV_PIX_FMT_ARGB` 是合法值，真正原因是通道序不同；2026-09-16 复核）。
-- **为什么现在没做**：属于独立的一次清扫，与文档改动不能混在一起。
-- **完成判据**：上述样本逐处修正或删除；全仓复查一遍同类注释。
-- **完成后必须做的收尾**（**动手前要先经用户明确确认**）：删掉 `AGENTS.md` **§4 末条**
+- **现状**（2026-09-19）：全仓复查已做完（82 个文件 / 2560 行注释，取证见本机
+  `.workbuddy/comment-review.md`），**已改 30 处**：
+  - 点名样本：`必须 jbr-11`、`HttpIO.offset += ret 是重复累加` 在当前树里**已不存在**；
+    `Tao 后端是唯一选择`、`RequestInterceptor 拦不到子资源` 这两条属历史陈述，
+    已随下一条**整段删掉**。
+  - **对"已移除依赖"的引用 7 处全删**（用户口径：「仓库里没有的东西，注释里就别提」）：
+    `Nucleus` / `Tao` / `dev.nucleusframework:composewebview` / `Nsis` 早就不在任何构建配置里
+    （`git log -S` 可追：`0a75461` 引入 → `f113a56` 换成自研宿主），注释里"以前用的是 X"
+    只会让人以为仓库里还有。涉及 `cxx/webview/webview.cpp` 文件头、
+    `desktopApp/build.gradle.kts`、`shared/build.gradle.kts`、`AcgWebView.kt`、
+    `BackgroundWebView.kt`、`AcgWebView.jvm.kt`、`NativeWebViewHostTest.kt`；
+    现状描述保留（例：`webview.cpp` 文件头直接讲钩子接在 `add_WebResourceRequested` +
+    `AddWebResourceRequestedFilter(L"*", ALL)` 上，不再解释"为什么不用 compose-webview"）。
+  - 事实错误 18 处全部改掉：`ffmpeg/AvFormat.kt` 的"`AVPixelFormat` 只有 0..13"
+    （本地 `libavutil/pixfmt.h` 里 ARGB=25、RGBA=26、BGRA=28 都是合法值，真正原因是
+    通道序不同）、`quickjs/QuickJS.kt` 两处、`cxx/webview/webview.cpp` 六处、
+    桌面 WebView 的 `AcgWebView.jvm.kt` / `NativeWebView.jvm.kt` 共三处、
+    `SeekWindowSemanticsTest` 三处（含一条**恒真断言**已改成真比 `dir`）、
+    构建与配置四处（`build.gradle.kts`、`.editorconfig`、`desktopApp/build.gradle.kts`、
+    `cxx/quickjs/quickjs.cpp`）。
+  - 其中一处**不只是注释错**：`QuickJS.Context.reuseWrapper` 漏了 `dup()`（复用的包装
+    没给调用方记票 → 谁先 `free()` 谁就把别人的包装一起销毁）。已修，并同步订正 skill
+    `quickjs-ownership` 的契约描述。
+- **还没做的**：剩 **10 处「过度断言」**（方向大体不误，但有反例或绝对化，本轮未动）：
+  `webview.cpp:36-38`（"事件回调一律不直接干活，唯一例外…"）、`:1293`（"必须不在 COM 回调里调"）、
+  `:866`（"永远到不了宿主" → 准确说法是"落在**页面上**的到不了"）、`:847`（"唯一解"）、
+  `:103`（"从模块加载算起" → 实为首次调用时起算）、`ffmpeg.cpp:209`（说 `opaque` 是
+  "FFmpeg 保留" → 上游写明是给用户的）、`SeekWindowSemanticsTest.kt:26`（"整个丢弃" →
+  上游首次失败会拿窗口重试一次）、`NativeWebViewHostTest.kt:28/:37/:347`（"三件/三个用例" →
+  现有 5 个）、`:311`（"跨线程失败"）、`HttpSeekSemanticsTest.kt:10-15`
+  （"没法在单测里构造真实响应" → 同仓已有真起 `HttpServer` 的用例）。
+- **完成判据**：上面 10 处改完，A1 结案。
+- **结案后必须做的收尾**（**动手前要先经用户明确确认**）：删掉 `AGENTS.md` **§4 末条**
   （"代码注释可能已过时甚至被证伪…读到先当线索、不当结论"）—— 一条长期成立的"别信注释"规则
   本身是坏味道，会训练 agent 忽略有用信号。
-  用户 2026-09-16 晚明确：**注释现在还不完全可信，这条规则先留着**，等他确认后再删。
+  用户 2026-09-16 晚明确：**注释现在还不完全可信，这条规则先留着**，等他确认后再删；
+  2026-09-19 复查后同样建议留（还剩上面 10 处确凿偏差）。
 
 ## B. 已知缺陷，待修
 
@@ -48,6 +74,18 @@
 - **为什么现在没做**：需要先定位真因，不能用改产品代码去迁就的方式打补丁。
 - **完成判据**：定位到具体竞态并修掉；连续多次全量 `:shared:jvmTest` 稳定绿。
 - **注意**：重跑变绿**不等于**修好。
+- **2026-09-19 又见一次，是另一种表现**（同一批用例、同一条命令，紧挨着跑两次结果相反）：
+  第一次**进程级 abort** —— 先打印 `Object leaks:`，泄漏物是一个 `Promise { }`
+  （`1a6ecbba6c8    1   0*  …  Promise {  }`），随即
+  `Assertion failed: list_empty(&rt->gc_obj_list), file .../quickjs.c, line 2464`，
+  `:shared:jvmTest` 以 exit 3 结束（"finished with non-zero exit value 3"），
+  测试结果目录里只有 `InitJsTest` 的半份 XML（`tests=4 skip=1`）；
+  第二次（`--rerun-tasks` 原样重跑）**59/59 全绿**。
+  日志留在本机：`.workbuddy/log/gate10-jvmtest.txt`（崩）与 `gate11-jvmtest-retry.txt`（绿）。
+  这个 assert 与 `init.js` 文件头记的那个**是同一个**（quickjs.c:2464）—— 只要进程里还有
+  没释放的 JS 对象，`JS_FreeRuntime` 就直接 abort，不会报错。当次改动只有注释，可排除。
+  另注意第一次跑时 `InitJsTest` 是 `tests=4 skip=1`，第二次是 `tests=5 skip=0`：
+  **用例数会随环境浮动**，别拿单次 XML 当基线。
 
 ### B3. 测试报错 / 日志存在非英文输出
 
@@ -67,6 +105,30 @@
 - **完成判据**：上述 11 处全部去掉；`commonMain` 里搜 `java\.` / `android\.` 结果均为 0。
 - **完成后必须做的收尾**：删掉 `AGENTS.md` §4 里那句"现状…仍有直接引用…见 `TODO.md` B4"
   的指针（届时规则已无例外），并删掉本条。
+
+### B5. `JsEngine` 收到 JS 参数后不归还
+
+- **现状**：`webviewAsync` 的 `header` / `onInterceptRequest`、`fetchAsync` 的 `options`
+  各持一票 JS 引用，**都不归还**，每次调用因此在 `Context.refs` 上留 1~2 笔。
+  `QuickJS.Context.reuseWrapper` 补上 `dup()` 之后，"由被调用方归还"本身已经安全，
+  不还的唯一理由只剩 `onInterceptRequest` 要活到 WebView 任务结束。
+- **为什么现在没做**：归还时机得放在 `async` 块的 `finally`，而 Deferred 被取消时那个回调
+  可能还在飞 —— 是时序改动，与注释清扫分开做。
+- **完成判据**：这三处按正确时机归还；`:shared:jvmTest` 全绿且没有新的 `reference leak` 报告。
+
+### B6. `ViewOptions::script` 是死字段
+
+- **现状**：`cxx/webview/webview.cpp` 的 `ViewOptions::script` 既没有赋值点也没有读取点
+  （后台视图用的是 `View::script`，见 `nativeRun`；`configureView` 只读 `opt.url`）。
+- **完成判据**：删掉它，或明确它要给谁用。
+
+### B7. 桌面端 `allowNewWindow` 未接
+
+- **现状**：`WebViewConfig.allowNewWindow` 只对 Android 生效（`setSupportMultipleWindows`）；
+  桌面宿主的 `nativeCreateView` 没有这个参数，`ViewOptions::allowNewWindow` 恒为默认 `false`。
+  用户 2026-09-19 拍板**两端都先取 `false`** —— 所以当前行为是对的，只是这个旋钮在桌面端是死的
+  （`AcgWebView.kt` 的 KDoc 已注明）。
+- **完成判据**：真要桌面端也能弹新窗口时，给 `nativeCreateView` 加参数打通；否则保持现状。
 
 ## C. 事实未实测，文档里暂无据
 

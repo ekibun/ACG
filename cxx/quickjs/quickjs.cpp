@@ -52,8 +52,9 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
   auto opaque = new JSRuntimeOpaque{
       javaVm,     env->NewWeakGlobalRef(ctx),       0,    memory_limit,
       timeout_ms, std::chrono::steady_clock::now(), false};
-  // Without an explicit limit a deep JS recursion walks off the *host* thread
-  // stack and takes the whole process down (a JVM thread stack is only ~1MB).
+  // QJS itself defaults to a 1MB stack budget (JS_DEFAULT_STACK_SIZE), the same
+  // order as a JVM thread stack (~1MB) -- deep JS recursion can still walk off
+  // the *host* thread stack and take the whole process down.
   // The budget must stay well below the hosting thread stack: stack_limit is
   // computed as stack_top - stack_size, and stack_top already sits inside the
   // JNI frame. 256KB leaves room for the JNI/Java frames above it.

@@ -55,7 +55,7 @@
 
 宿主若自己认出了同名技能（把 `SKILL.md` 的 `description` 当触发条件），用技能名触发即可；
 认不出也不影响功能 —— **两边指向同一份文件**。本机的编译环境与本地文件清单记在
-`.workbuddy/memory/MEMORY.md`（gitignore，不入库）。
+`.workbuddy/memory/`（gitignore，不入库）：`MEMORY.md` 是索引，`host-env.md` 是环境与宿主坑的详解。
 
 ## 加一个新技能
 

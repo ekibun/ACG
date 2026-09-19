@@ -220,8 +220,10 @@ object QuickJS {
       /**
        * 释放一票。归零时销毁。
        *
-       * 重复调用是安全的：归零之后再调只会抛异常提示，而不会重复释放 native
-       * 句柄 —— 这是此前 `delete` 与 `jsFreeValue` 混用导致双重释放的地方。
+       * 重复调用是安全的：[free] 与 [release] 都先看 `destroyed`，归零之后再调
+       * 直接返回（**不抛异常**），不会重复释放 native 句柄 —— 这是此前
+       * `delete` 与 `jsFreeValue` 混用导致双重释放的地方。
+       * 会抛 `IllegalStateException` 的是 [dup]：已经还完了还想要一票，没得给。
        */
       override fun free() {
         if (destroyed) return
@@ -315,14 +317,17 @@ object QuickJS {
     }
 
     /**
-     * 复用已有包装：把它**当作新的一票**返回给调用方。
+     * 复用已有包装：把它**当作新的一票**返回给调用方（`dup()`）。
      *
-     * native 侧在命中 [peekWrapper] 时，会先 `new JSValue(JS_DupValue(...))` 造一个
-     * 新句柄再交给这里 —— 那个句柄代表调用方手上的新引用，必须落到包装自己的
-     * 引用计数上，否则引用会失衡（少计一票 → 提前释放 → use-after-free）。
+     * 每轮 `jsToJava` 转换都算调用方借到一票，命中已有包装时也不例外；否则
+     * 「刚造出来的包装要还、复用的包装不用还」这条不一致的规则，会让归还的人
+     * 还掉别人的票（提前释放 → use-after-free）。native 侧（`jsToJavaObject`）
+     * 为此先造一个 `new JSValue(JS_DupValue(...))` 再交给这里。
      *
-     * 这里用 `releaseValue(新句柄)` 把 native 的 `JS_DupValue` 值回来，同时
-     * `dup()` 让包装的票数与之一致：走的是同一套 releaseValue 账本，不会多一笔少一笔。
+     * 那一票在 native 上多出来的引用由 `releaseValue(新句柄)` 立即还掉，包装自己
+     * 仍然只持有**一份** native 引用 —— [release] 在票数归零时释放的正是它。
+     * 与 flutter_qjs 的约定一致：转换结果归调用方持有、用完要 `free()`；
+     * 想再留一份就自己 `dup()`。
      */
     @Keep
     private fun reuseWrapper(
@@ -330,7 +335,7 @@ object QuickJS {
       dupHandle: Long,
     ): Any {
       releaseValue(dupHandle)
-      return wrapper
+      return (wrapper as JSValue).dup()
     }
 
     /**

@@ -9,16 +9,14 @@ import androidx.compose.ui.Modifier
 
 // 可见 WebView 的跨端抽象。
 //
-// 之前这块用的是预编译的 `dev.nucleusframework:composewebview`，现在两端都是自己实现：
+// 两端都是自己实现：
 //
 // | | 实现 | cookie 存储 |
 // | --- | --- | --- |
 // | 桌面 (Windows) | 自研 C++ shim（`cxx/webview/webview.cpp`）里的 WebView2「嵌入视图」 | 和后台 WebView **同一个 user data folder** |
 // | Android | `android.webkit.WebView` + `AndroidView` | 系统单一 `CookieManager` |
 //
-// 换掉那个库有两个原因：一是它的请求钩子只接在导航上、拦不到子资源
-// （详见 `BackgroundWebView.kt` 的文件头）；二是它自带一套 `DesktopCookieManager`，
-// 可见页和后台页的 cookie 是分开的。现在两端的可见页与后台页共用同一份 cookie 存储。
+// 两端的可见页与后台页共用同一份 cookie 存储。
 //
 // 桌面端只有 Windows 有实现（WebView2）；其它平台 AcgWebView 会退化成一个提示框。
 
@@ -53,7 +51,14 @@ class WebViewConfig {
   /** 是否允许 F12 开发者工具与右键菜单。调试页面时很有用，发布可以关掉。 */
   var enableDevtools: Boolean = false
 
-  /** 是否允许页面自己弹新窗口。 */
+  /**
+   * 是否允许页面自己弹新窗口。**两端当前都取 `false`**。
+   *
+   * 实际生效的只有 Android（`setSupportMultipleWindows`）。桌面宿主的
+   * `nativeCreateView` 根本没有这个参数，`ViewOptions::allowNewWindow`
+   * （`cxx/webview/webview.cpp`）恒为默认 `false` —— 想让桌面端认它得先给
+   * native 加参数（见 TODO）。
+   */
   var allowNewWindow: Boolean = false
 
   /** 页面缩放。1.0 = 100%。 */

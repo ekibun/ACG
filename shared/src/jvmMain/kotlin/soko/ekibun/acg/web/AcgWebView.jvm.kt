@@ -36,7 +36,7 @@ import java.awt.event.FocusEvent
  * 4. 之后尺寸一律以组件客户区为准（`nativeViewFitToParent`）。
  *
  * 因此**窗口后端必须是 AWT 的**（compose.desktop 的 `application { Window(...) }`
- * 就是），JAWT 才有东西可取。以前用的 Nucleus Tao 后端压根不加载 AWT，这套走不通。
+ * 就是），JAWT 才有东西可取。
  *
  * 用的是**和后台 WebView 同一个 environment**（同一份 user data folder `NativeWebView.userDataDir`），
  * 因此可见页与后台页共享 cookie / 登录态。
@@ -172,9 +172,11 @@ private class WebViewCanvas(
   /**
    * 键盘焦点走进 AWT 组件时，转交给原生窗口。
    *
-   * 这只是**兜底**：鼠标点击直接落在 WebView2 的跨进程子窗口上，AWT 收不到任何鼠标
-   * 事件，所以「点一下页面就能打字」靠的是原生侧的 DOM 桥（页面里 `mousedown` →
-   * `postMessage('acg:focus')` → `MoveFocus`，见 `cxx/webview/webview.cpp`）。
+   * 这只是**兜底**：落在页面里的鼠标点击到不了 AWT（WebView2 的子窗口是跨进程的），
+   * 「点一下页面就能打字」靠的是原生侧的激活链 —— 输入队列在 `nativeViewAttach` 里
+   * 接到 AWT 线程 → 点击激活 `SunAwtFrame` → AWT 把焦点派回 Canvas（宿主）→ 宿主窗口
+   * 收到 `WM_SETFOCUS` → `requestWebViewFocus`（见 `cxx/webview/webview.cpp` 的
+   * `wndProc`；原来的 DOM 桥 2026-09-15 已整套删除）。
    * 这条监听管的是另一半：AWT 自己把焦点给了这个组件（比如窗口激活、Tab 走过来）时
    * 也得把焦点送进 WebView，别停在 Canvas 上。
    */
@@ -236,9 +238,9 @@ private class PlatformView(
   override suspend fun evaluate(script: String): String? = NativeWebView.evaluateScript(handle, script)
 
   /**
-   * 把焦点交给原生窗口，键盘事件才会进去。
+   * 把焦点交给原生窗口，键盘事件才会进去（native 的 `nativeViewFocus`）。
    *
-   * 通常在页面里点一下就自动完成了（DOM 桥），这个接口留给上层在
+   * 通常在页面里点一下就由上面那条激活链自动完成了，这个接口留给上层在
    * 「窗口重新激活 / 主动聚焦」这类场景下手动调。
    */
   fun requestFocus() = NativeWebView.focusView(handle)

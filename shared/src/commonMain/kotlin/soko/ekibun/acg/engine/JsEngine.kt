@@ -205,10 +205,11 @@ class JsEngine {
    * 2. 结果多包一层 [WEBVIEW_KIND_KEY]，好让 JS wrapper 区分「命中拦截」与
    *    「脚本返回值」—— 两者都可能是任意对象，不加标记无从判别。
    *
-   * `header` 与 `onInterceptRequest` 到达这里时各持一票 JS 引用。按本文件现有
-   * 惯例**不在这里归还**（[fetchAsync] 的 `options` 同样不还）：`Context.reuseWrapper`
-   * 复用已有包装时并不加票，谁先 `close()` 谁就会把别人手里的包装一并销毁，所以
-   * 「由被调用方归还」在当前语义下并不安全。代价是每次调用留下一个 JS 引用。
+   * `header` 与 `onInterceptRequest` 到达这里时各持一票 JS 引用（每轮 `jsToJava`
+   * 转换都会拿到独立的一票，复用已有包装时也一样，见 `Context.reuseWrapper`）。
+   * 本函数**不归还它们**：归还本身是安全的（票分开算），但 `onInterceptRequest`
+   * 要活到 WebView 任务结束，早还就会让回调打在已经释放的包装上。代价是每次调用
+   * 留下一到两票 —— 收尾见 TODO「JsEngine 不归还 JS 参数」。
    */
   @Keep
   private fun webviewAsync(
@@ -262,8 +263,8 @@ class JsEngine {
    * 搞崩，但会把错误打到 console 上，别让它无声无息。
    *
    * 回调返回的 JS 对象在 Kotlin 侧是 [JSObject] 包装（它实现了 `Map`，所以
-   * `as? Map` 判断照样成立），每读一个属性都是一轮 native 转换。**包装各持一票
-   * JS 引用，读完必须归还** —— 与 `QuickJSTest.jsInvokableReceivesThisValAndArgs`
+   * `as? Map` 判断照样成立），每读一个属性都是一轮 native 转换。**每轮转换都归
+   * 调用方一票，拿到就得还** —— 与 `QuickJSTest.jsInvokableReceivesThisValAndArgs`
    * 对回调里 `thisVal` 的处理一致；不还的话每拦一次请求就在 `Context.refs` 上挂一笔。
    *
    * 调用时机：本函数跑在 WebView 的回调线程上，此时脚本正挂起等 `webviewAsync`

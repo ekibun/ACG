@@ -1,0 +1,9 @@
+# `.githooks/pre-commit` 里的「本机依赖配置」区**不入库**：
+# `git add` 时走 clean filter，把区里的行换成一行占位（脚本 `.githooks/strip-local-config.sh`，
+# 入库、可审）。于是每个人填在本机的绝对路径不会进仓库，`git status` 也不会再显示那几行改动。
+#
+# ⚠️ filter 的**定义**在 `.git/config`（本机私有、不入库），新 clone / 换机器要跑一次：
+#       git config filter.localconfig.clean 'sh .githooks/strip-local-config.sh'
+#   没配的后果：clean 不跑 → 你填的路径会被提交出去（pre-commit 会黄字警告一次）。
+#   （不设 smudge：仓库里存的就是「空区」版本，checkout 出来本来就该是空的。）
+.githooks/pre-commit filter=localconfig

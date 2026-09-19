@@ -1,17 +1,12 @@
 /*
  * webview.cpp —— 自研的 Windows WebView2 原生宿主
  *
- * 为什么不用现成的库：预编译的 compose-webview 有两处满足不了需求 ——
+ * 请求钩子直接接在引擎的 `add_WebResourceRequested` +
+ * `AddWebResourceRequestedFilter(L"*", ALL)` 上：含全部子资源，也拿得到
+ * `Range` 这类请求头。
  *
- *   1. 请求钩子接在**导航**上（反编译 1.0.3 确认：Windows 那份 native 只注册了
- *      `ICoreWebView2NavigationStartingEventHandler`），所以
- * `RequestInterceptor` 看不到子资源、也拿不到 `Range`
- * 这类请求头。引擎本身完全支持，只要自己接 `add_WebResourceRequested` +
- * `AddWebResourceRequestedFilter(L"*", ALL)`。
- *   2. 它自带一套 `DesktopCookieManager`，可见页和后台页的 cookie 是分的。
- *
- * 本文件是那层自己写的 shim。两种用法共用**同一个 environment**（因此同一份
- * user data folder、同一个浏览器进程、**同一份 cookie**）：
+ * 两种用法共用**同一个 environment**（因此同一份 user data folder、
+ * 同一个浏览器进程、**同一份 cookie**）：
  *
  *   后台任务（background task）
  *     隐藏顶层窗口 + 拦截 + 注入脚本 + 一次性取结果。对齐 Android 侧
@@ -78,7 +73,8 @@ using Microsoft::WRL::ComPtr;
 //   ACG_WEBVIEW_DEBUG=1        → 日志走 stderr（控制台能直接看到）
 //   ACG_WEBVIEW_LOG=<路径>     → 日志**追加**到那个文件
 //
-// 两个都开就两份都写。为什么要文件：这是个 native DLL，在 GUI 程序里 stderr
+// 只写其中一份：给了 ACG_WEBVIEW_LOG 就写文件，否则写 stderr（见下面
+// `WV_LOG`）。为什么要文件：这是个 native DLL，在 GUI 程序里 stderr
 // 没人接；而且 JVM 侧 `System.load` 进来的库和宿主各有各的 CRT，stderr
 // 不一定是同一个句柄，日志很容易「写了但看不到」。
 // ---------------------------------------------------------------------------
@@ -1166,7 +1162,8 @@ static bool runSync(const Fn& fn, int timeoutMs) {
 // ---------------------------------------------------------------------------
 // 通知 JVM
 // ---------------------------------------------------------------------------
-/** 事件类型，必须和 Kotlin 侧 `NativeWebViewEvent` 的常量一一对应。 */
+/** 事件类型，必须和 Kotlin 侧
+ * `NativeWebView.EVENT_*`（`NativeWebView.jvm.kt`）一一对应。 */
 enum ViewEvent {
   kViewReady = 1,    // 控制器就绪
   kViewLoading = 2,  // a = "1"/"0"
@@ -1780,8 +1777,9 @@ class ProcessFailedHandler final
     postTask([hwnd, kind, reason, exitCode] {
       std::shared_ptr<View> view = findView(hwnd);
       if (!view) return;
-      // 注意：`%ls` 在 "C" locale 下过不去非 ASCII，中文到了 native 日志里会
-      // 直接被截断，所以日志这一行只打数字，中文留给给 JVM 的那份消息。
+      // 注意：`%ls` 在 "C" locale 下过不去非 ASCII，中文经宽字符走 native 日志
+      // 会被截断 —— 所以这里的数字用 `%d`，后面那句中文用 narrow 的 `%s` 原样
+      // 写字节（不经过宽字符转换）；给 JVM 的那份消息才走宽字符。
       WV_LOG("view %p: process failed kind=%d reason=%d exit=%d%s", hwnd,
              static_cast<int>(kind), static_cast<int>(reason),
              static_cast<int>(exitCode),
@@ -1824,7 +1822,9 @@ class ProcessFailedHandler final
 struct ViewOptions {
   jlong token = 0;
   std::wstring userAgent;
-  std::wstring script;  // 可见视图的初始 URL（可空 → about:blank）
+  std::wstring script;  // 死字段：既没有赋值点也没有读取点（`opt.script`
+                        // 全文件只此一行）
+  // 初始 URL；空 → 不导航（停在 about:blank）
   std::wstring url;
   std::vector<std::wstring> headers;
   bool enableDevtools = false;
@@ -2080,7 +2080,8 @@ static void configureView(const std::shared_ptr<View>& view,
             SUCCEEDED(webview2->NavigateWithWebResourceRequest(request.Get()));
       }
     }
-    // 可见视图记得初始 URL，供 ResolveNavigation 之类使用（目前不额外做）。
+    // 没有 ICoreWebView2_2（或那个带头的请求没建出来）就退回普通 Navigate ——
+    // 这条路带不了自定义 header。
     if (!navigated) navigated = SUCCEEDED(webview->Navigate(opt.url.c_str()));
     if (!navigated)
       notifyViewEvent(view->hwnd, kViewFailed, L"导航调用失败", L"");
@@ -2143,12 +2144,13 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     // ---- 键盘焦点 ----
     //
-    // 注意这里**没有** `WM_PARENTNOTIFY` / `WM_LBUTTONDOWN`
-    // 之类的「点击→抢焦点」： WebView2 的窗口是跨进程两层的（host →
+    // 落**在页面里**的点击到不了这里：WebView2 的窗口是跨进程两层的（host →
     // Chrome_WidgetWin_0 → Chrome_WidgetWin_1 →
     // Chrome_RenderWidgetHostHWND），点击落在最里层，而那些消息**只到直接父窗口**
-    // （Chrome_WidgetWin_0），永远到不了我们。探针里真实点击之后宿主一条都没收到。
-    // 那点击是怎么走到这儿的？靠激活流程：输入队列在 [nativeViewAttach]
+    // （Chrome_WidgetWin_0）。探针里真实点击页面之后宿主一条都没收到。
+    // 落在宿主**自己**身上的点击是收得到的（页面没铺满、露出来的那点边），
+    // 见下面 `WM_MOUSEACTIVATE` 与 `WM_LBUTTONDOWN` 那一组 case。
+    // 那页面里的点击是怎么走到这儿的？靠激活流程：输入队列在 [nativeViewAttach]
     // 里就接到了 AWT 线程 → 点击激活 `SunAwtFrame` → AWT 把焦点派回
     // Canvas（宿主）→ 下面这条 `WM_SETFOCUS`。2026-09-15 把 DOM
     // 桥整个删掉之后实测键盘仍然正常，就是这条链

@@ -77,11 +77,12 @@ public object NativeWebView {
   private val nextToken = AtomicLong(1)
 
   /**
-   * 还活着的视图句柄。
+   * 还活着的视图句柄：可见视图（[createView]）与后台任务（[run]）共用。
    *
-   * 销毁会从两条路进来（`PlatformView.dispose()` 与组合层自己的 `onDispose`），
-   * native 侧的销毁虽然也是幂等的，但句柄在窗口销毁后可能被系统回收成别的窗口 ——
-   * 这里拦一道，保证每个句柄只下发一次销毁。
+   * [destroyView] 与 [cancel] 都先从这里摘句柄，摘不到就直接返回 —— 重复下发
+   * （组合层 `onDispose`、测试、取消路径都可能各来一次）时不会重复销毁。
+   * native 侧的销毁本身幂等，但句柄在窗口销毁后可能被系统回收成别的窗口，
+   * 所以这里拦一道。
    */
   private val liveViews: MutableSet<Long> = ConcurrentHashMap.newKeySet()
 

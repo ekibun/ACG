@@ -124,7 +124,14 @@ class QuickJSTest {
         a["a"] = a
         val wrapped = assertIs<JSObject>(callAsync(wrap, a))
         try {
-          assertTrue(wrapped["a"] === wrapped, "recursive reference must map back to the same object")
+          // 命中已有包装时也会为这一轮转换多记一票（reuseWrapper 的 dup()），
+          // 所以取回来的「自己」也算一份持有，要和 wrapped 各还一次。
+          val self = assertIs<JSObject>(wrapped["a"])
+          try {
+            assertTrue(self === wrapped, "recursive reference must map back to the same object")
+          } finally {
+            self.close()
+          }
         } finally {
           // jsToJava 出来的 JSObject 也持有 JS 引用，必须显式释放
           wrapped.close()

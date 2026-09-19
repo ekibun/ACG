@@ -32,8 +32,9 @@ max_line_length = 120
 # 做法出自 compose-rules 的 ktlint 接入文档，比整条规则关掉精确得多。
 ktlint_function_naming_ignore_when_annotated_with = Composable
 
-# 项目故意用 `main.kt` / `jni.kt` / `X.android.kt` / `X.jvm.kt` 这类文件名
-# （见 AGENTS.md 的平台实现文件命名），不是「文件名必须与类名一致」。
+# 项目故意用 `main.kt` / `jni.kt` / `X.android.kt` / `X.jvm.kt` 这类文件名，
+# 不是「文件名必须与类名一致」（口径见 `.agents/skills/coding-style/references/kotlin.md`
+# 「本项目」一节）。
 ktlint_standard_filename = disabled
 
 [*.{c,cc,cpp,cxx,h,hpp}]

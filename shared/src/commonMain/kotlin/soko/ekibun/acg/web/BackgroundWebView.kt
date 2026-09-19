@@ -14,10 +14,7 @@ import androidx.compose.runtime.Composable
 // | Android | 命令式建一个无头 `android.webkit.WebView` | `WebViewClient.shouldInterceptRequest`，含全部子资源 |
 // | 桌面 (Windows) | 自研 C++ 宿主（`cxx/webview/webview.cpp`）里 1×1 的隐藏窗口 | `add_WebResourceRequested` + `AddWebResourceRequestedFilter("*", ALL)`，含全部子资源 |
 //
-// 桌面端以前用的是预编译的 `dev.nucleusframework:composewebview`，它的
-// `RequestInterceptor` 只接在 `addNavigateListener`（= 主框架导航）上，子资源一律
-// 拦不到，于是「靠拦媒体分片（m3u8/ts）拿真实地址」这类写法在桌面上永远失效。
-// 现在钩子接到了引擎的 `WebResourceRequested` 上，两端能力对齐。
+// 钩子一律接在引擎的 `WebResourceRequested` 上，两端能力对齐。
 //
 // cookie 也是统一的：桌面端可见页与后台页共用同一个 WebView2 environment
 // （同一份 user data folder），Android 端共用系统 `CookieManager`。在这一页登录过，

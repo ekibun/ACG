@@ -12,7 +12,9 @@
 #   仓库里已按 100755 记录执行位，克隆下来一般就带着；若在 Linux / macOS 上丢了，
 #   `chmod +x .githooks/pre-commit` —— git 对**没有执行位的 hook 是静默跳过**的。
 #
-# 本机依赖（缺了会**明确报错**，不会静默放行）：
+# 本机依赖（缺了会**明确报错**，不会静默放行）。两种给法，任选：
+#   - 环境变量（推荐）：source `.workbuddy/env.ps1` / `env.sh`，或自己设用户级环境变量。
+#   - 填下面「本机依赖配置」区：写在文件里、不入库，每次提交自动生效。
 #   - 暂存区里有 `.kt` / `.kts` → 要能跑 `./gradlew`，即 `JAVA_HOME` 或 PATH 上有 java，
 #     且 `uname` / `xargs` / `sed` / `tr` / `cygpath` 可用（见下面的 PATH 修补）。
 #     `gradlew` 不会自己去找 JDK，命令行下必须给一份。
@@ -29,6 +31,35 @@
 #   所以：不要用 `grep` / `awk` 去筛文件名，用 shell 自己的 `case`。
 
 set -u
+
+# —— 本机依赖配置（这一区**不入库**，见 `.gitattributes`）——
+# 填法：直接写赋值语句，一律用 `VAR=${VAR:-值}` 的形式 —— **不覆盖**外面已经设好的环境变量，
+# 只在外层没给时兜底。仓库里这一区是空的（只有两行标记 + 一行占位），谁 clone 下来自己填。
+# `git add` 时 `.gitattributes` 挂的 clean filter（`strip-local-config.sh`）会把区里的行剥掉，
+# 所以不用怕把绝对路径推进仓库；`git status` 也不会因为改了这里而变红。
+#
+# 例（本机 2026-09 实测的两个，路径自己改）：
+#   export JAVA_HOME=${JAVA_HOME:-'C:\Users\<你>\.jdks\jbr_dcevm-11.0.16'}
+#   ACG_CLANG_FORMAT=${ACG_CLANG_FORMAT:-'C:/Users/<你>/.workbuddy/binaries/python/envs/default/Scripts/clang-format.exe'}
+#
+# 不填也行：hook 找不到依赖会**明确报错**、不会静默放行（见文件头「本机依赖」）。
+# 更省事的是 source `.workbuddy/env.ps1`（PowerShell）/ `env.sh`（bash）—— 那个一次装好全部
+# 变量；这一区只是「不想每次都 source」时的兜底。**两行标记别删**，剥离靠它定位。
+# === LOCAL-CONFIG-BEGIN ===
+# （本机依赖行填在这里；`git add` 时会被本脚本自动剥离）
+# === LOCAL-CONFIG-END ===
+
+# 上面这一区靠 clean filter 剥离。filter **没配**的话，你填的路径就会被提交出去 ——
+# 那是「不报错、只失效」，所以这里查一次：区里填了东西而 filter 没配 → 黄字警告。
+# ⚠️ 取脚本所在目录**只能用参数展开**：此刻 PATH 修补还没跑，`dirname` 可能根本不在 PATH 上
+#   （就是文件头那次 `grep` 静默失效的同一个坑）。
+self_dir=${0%/*}
+[ "$self_dir" = "$0" ] && self_dir=.
+if ! git config --get filter.localconfig.clean >/dev/null 2>&1 &&
+  sh "$self_dir/strip-local-config.sh" --filled "$0" 2>/dev/null; then
+  echo "[pre-commit] ⚠ 本机依赖区填了内容，但 clean filter 没配 → 这些行**会被提交出去**。" >&2
+  echo "             跑一次：git config filter.localconfig.clean 'sh .githooks/strip-local-config.sh'" >&2
+fi
 
 # —— PATH 修补 ——
 # 实测（Git for Windows 2.55，从非 MSYS 终端提交）：git 传给 hook 的 PATH 里有 Git 的

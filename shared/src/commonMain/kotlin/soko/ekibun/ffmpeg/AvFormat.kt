@@ -26,9 +26,10 @@ open class AvFormat(
 
     /*
      * AVSampleFormat / AVPixelFormat 常量。
-     * 直接照抄 FFmpeg 枚举值，避免各平台实现里散落 "0"/"25" 这类魔术数字
-     * （视频侧原来把 videoFormat 写成 25，而 AVPixelFormat 只有 0..13，
-     * sws_getContext 会因此走到 unknown 分支）。
+     * 直接照抄 FFmpeg 枚举值，避免各平台实现里散落 "0"/"26" 这类魔术数字。
+     * 别凭「枚举只到 13」这类印象改这里：pixfmt.h 里 ARGB=25、RGBA=26、BGRA=28
+     * 都是合法值，写错不会报错，只会让拿到帧的平台按别的通道序解释 ——
+     * 症状是「能播但颜色不对」（R/B 互换），不是取不到帧。
      */
     const val AV_SAMPLE_FMT_NONE = -1
     const val AV_SAMPLE_FMT_U8 = 0

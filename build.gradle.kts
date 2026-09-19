@@ -16,7 +16,7 @@ val composeRulesKtlint = libs.compose.rules.ktlint
 // 格式化 / lint 覆盖**含根项目在内**的全部自有项目 —— 用 `allprojects` 而不是 `subprojects`：
 // 根 `build.gradle.kts` 与 `settings.gradle.kts` 也是我们的代码，写成 `subprojects` 会把它们
 // 漏掉，于是这两个文件既不参与 `ktlintCheck` 也不会被 `ktlintFormat` 修（2026-09-17 实测，
-// 曾因此留了 4 空格缩进没人管；TODO F5）。
+// 曾因此留了 4 空格缩进没人管）。
 // submodule 与 `cxx/webview/sdk` 不在 Gradle 工程里，天然排除。
 allprojects {
   apply(plugin = "org.jlleitschuh.gradle.ktlint")

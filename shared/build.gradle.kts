@@ -53,8 +53,8 @@ kotlin {
       implementation(libs.androidx.lifecycle.viewmodelCompose)
       implementation(libs.androidx.lifecycle.runtimeCompose)
       implementation(libs.ktor.client.core)
-      // 跨端 WebView 不再用预编译的 composewebview：Android 端直接用
-      // android.webkit.WebView，桌面端走自研的 cxx/webview（见 soko.ekibun.acg.web）。
+      // 跨端 WebView 两端都自己实现：Android 用 android.webkit.WebView，
+      // 桌面用自研的 cxx/webview（见 soko.ekibun.acg.web）。
     }
     jvmMain.dependencies {
       implementation(libs.ktor.client.java)

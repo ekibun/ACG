@@ -28,8 +28,7 @@ import kotlin.test.fail
  * 真的页面喂给真的 WebView2，锁住三件**只有真的跑起来才会坏**的事：
  *
  * 1. **子资源在拦截回调里看得见**（`<script src>`），且 `isForMainFrame == false`、
- *    `method` / `headers` 都是真值 —— 这条正是当初换掉 `composewebview` 的原因：
- *    那个库的 `RequestInterceptor` 只接在主框架导航上，子资源永远拦不到。
+ *    `method` / `headers` 都是真值。
  * 2. **脚本注入拿得回结果**，且 DOM 里确实有子资源产生的副作用。
  * 3. **cookie 在不同任务之间是共享的** —— 两次任务走的是同一个 environment
  *    （同一份 user data folder）。可见页与后台页共用同一份存储靠的就是这个机制。

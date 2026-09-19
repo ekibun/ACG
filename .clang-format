@@ -8,7 +8,7 @@
 # 口径出处：`.agents/skills/coding-style/SKILL.md`「缩进」一节 + `references/cpp.md`。
 #
 # 用法：  clang-format -i <file>...
-# 本机怎么装 clang-format 见 `.workbuddy/memory/MEMORY.md`（本机专属，不入库）。
+# 本机怎么装 clang-format 见 `.workbuddy/memory/host-env.md`（本机专属，不入库）。
 ---
 Language: Cpp
 BasedOnStyle: Google

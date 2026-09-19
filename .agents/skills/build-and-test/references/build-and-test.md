@@ -49,7 +49,7 @@ clang-format -i cxx/webview/webview.cpp       # C++；改哪个点哪个，就�
 
 规则正本是根目录的 `.editorconfig`（Kotlin）与 `.clang-format`（C++，Google 基线，只偏离
 「行尾统一 LF」一处），两边的取值必须一致。`clang-format` **不在 PATH 上**，
-本机那份的绝对路径见 `.workbuddy/memory/MEMORY.md`（本机专属、不入库）。
+本机那份的绝对路径见 `.workbuddy/memory/host-env.md`（本机专属、不入库）。
 
 **执行点（git hook）**：`.githooks/pre-commit` 在 `git commit` 当场拦一次 ——
 暂存区里有 `.kt` / `.kts` 就跑 `ktlintCheck --continue`，有 `cxx/{webview,quickjs,ffmpeg}/` 下的
