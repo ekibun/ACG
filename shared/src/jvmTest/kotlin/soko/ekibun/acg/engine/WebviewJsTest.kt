@@ -7,7 +7,6 @@ import kotlinx.coroutines.withTimeout
 import soko.ekibun.quickjs.JSError
 import soko.ekibun.quickjs.JSFunction
 import soko.ekibun.quickjs.JSInvokable
-import soko.ekibun.quickjs.JSObject
 import soko.ekibun.quickjs.QuickJS
 import java.io.File
 import java.nio.charset.Charset
@@ -31,7 +30,7 @@ import kotlin.test.assertTrue
  * 3. `onInterceptRequest` 回调真的能被 Kotlin 侧调用并拿回对象 —— 这段是
  *    `JsEngine.invokeInterceptor` 的另一半契约，不测就只在真机上才暴露。
  *
- * 桩对 JS 实参的处置与真实实现一致（见 `JsEngine.webviewAsync`）：收到的实参归
+ * 桩对 JS 实参的处置与真实实现一致（见 `JsEngine.webviewAsync`）：收到的回调实参归
  * 被调用方所有，等它交回的那个 Deferred 收场时归还。两个方向都不能偏 —— 不还的话
  * 每个调过 `webview(...)` 的用例都会在 stderr 留一条 `QuickJS reference leak`，
  * 早还则让 `onInterceptRequest` 打在已经释放的包装上。
@@ -81,7 +80,7 @@ class WebviewJsTest {
           // argv[0]=obj(null) argv[1]=name argv[2]=url argv[3]=header
           // argv[4]=script argv[5]=onInterceptRequest
           "webviewAsync" -> {
-            val header = argv.getOrNull(3) as? JSObject
+            // header 已经是整图展开出来的纯数据 Map，没有引用要还；只剩回调要留着
             val callback = argv.getOrNull(5) as? JSFunction
             val ret =
               respond(argv.getOrNull(2) as? String ?: "", argv.getOrNull(4) as? String, callback)
@@ -89,12 +88,8 @@ class WebviewJsTest {
             // 再归还，与 `JsEngine.webviewAsync` 同一条规矩。
             val deferred = ret as? Deferred<*>
             if (deferred != null) {
-              deferred.invokeOnCompletion {
-                header?.close()
-                callback?.close()
-              }
+              deferred.invokeOnCompletion { callback?.close() }
             } else {
-              header?.close()
               callback?.close()
             }
             ret

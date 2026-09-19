@@ -122,20 +122,11 @@ class QuickJSTest {
         // a['a'] = a —— 依赖 javaToJsImpl 的 cache 才不会在转换时无限递归
         val a = HashMap<String, Any?>()
         a["a"] = a
-        val wrapped = assertIs<JSObject>(callAsync(wrap, a))
-        try {
-          // 命中已有包装时也会为这一轮转换多记一票（reuseWrapper 的 dup()），
-          // 所以取回来的「自己」也算一份持有，要和 wrapped 各还一次。
-          val self = assertIs<JSObject>(wrapped["a"])
-          try {
-            assertTrue(self === wrapped, "recursive reference must map back to the same object")
-          } finally {
-            self.close()
-          }
-        } finally {
-          // jsToJava 出来的 JSObject 也持有 JS 引用，必须显式释放
-          wrapped.close()
-        }
+        // 整图展开后普通对象就是纯数据 Map，没有引用要还。`a['a'] === a` 能成立
+        // 靠的是「填之前先把自己登记进 cache」—— 递归回自身时命中的正是那个 Map。
+        val wrapped = assertIs<Map<*, *>>(callAsync(wrap, a))
+        val self = assertIs<Map<*, *>>(wrapped["a"])
+        assertTrue(self === wrapped, "recursive reference must map back to the same object")
       } finally {
         wrap.close()
       }
@@ -226,13 +217,9 @@ class QuickJSTest {
         val ret = call.invoke(func, "arg", thisVal = mapOf("name" to "this"))
         assertEquals("ok", ret)
         assertEquals("arg", seenArgs[0][0])
-        val thisVal = assertIs<JSObject>(seenThis[0])
-        try {
-          assertEquals("this", thisVal["name"])
-        } finally {
-          // callback 里 jsToJava 交出来的 JSObject 同样要归还
-          thisVal.close()
-        }
+        // 回调里 jsToJava 交出来的普通对象同样是整图展开的纯数据
+        val thisVal = assertIs<Map<*, *>>(seenThis[0])
+        assertEquals("this", thisVal["name"])
       } finally {
         call.close()
       }
@@ -374,18 +361,14 @@ class QuickJSTest {
         obj["b"] = true
         obj["bytes"] = byteArrayOf(9, 8, 7)
         obj["list"] = listOf(1, 2, 3)
-        val wrapped = assertIs<JSObject>(callAsync(wrap, obj))
-        try {
-          assertEquals(42L, wrapped["n"])
-          assertEquals(1.5, wrapped["d"])
-          assertEquals("text", wrapped["s"])
-          assertEquals(true, wrapped["b"])
-          assertContentEquals(byteArrayOf(9, 8, 7), wrapped["bytes"] as ByteArray)
-          assertEquals(listOf(1L, 2L, 3L), (wrapped["list"] as Array<*>).toList())
-        } finally {
-          // jsToJava 出来的 JSObject 也持有一票，必须显式归还
-          wrapped.close()
-        }
+        // 普通对象整图展开成 Map；只有函数还会是包装
+        val wrapped = assertIs<Map<*, *>>(callAsync(wrap, obj))
+        assertEquals(42L, wrapped["n"])
+        assertEquals(1.5, wrapped["d"])
+        assertEquals("text", wrapped["s"])
+        assertEquals(true, wrapped["b"])
+        assertContentEquals(byteArrayOf(9, 8, 7), wrapped["bytes"] as ByteArray)
+        assertEquals(listOf(1L, 2L, 3L), (wrapped["list"] as Array<*>).toList())
       } finally {
         wrap.close()
       }
@@ -409,17 +392,9 @@ class QuickJSTest {
       )
       val eventual = ctx.evaluate("import('evalModule')", name = "<import>")
       val mod = assertIs<Deferred<Any?>>(eventual)
-      val awaited = assertIs<JSObject>(runBlocking { mod.await() })
-      try {
-        val default = assertIs<JSObject>(awaited["default"])
-        try {
-          assertEquals("test module", default["data"])
-        } finally {
-          default.close()
-        }
-      } finally {
-        awaited.close()
-      }
+      val awaited = assertIs<Map<*, *>>(runBlocking { mod.await() })
+      val default = assertIs<Map<*, *>>(awaited["default"])
+      assertEquals("test module", default["data"])
     } finally {
       ctx.closeAndCheckLeaks()
     }
@@ -446,26 +421,18 @@ class QuickJSTest {
     }
   }
 
-  /** JSObject 应像 Map 一样工作 */
+  /** 整图展开出来的普通对象就是 `Map`，两端各转一圈后读法不变 */
   @Test
-  fun jsObjectBehavesLikeMap() {
+  fun expandedObjectBehavesLikeMap() {
     val ctx = context()
     try {
       val wrap = assertIs<JSFunction>(ctx.evaluate("async (o) => o", name = "<w>"))
       try {
-        val obj = assertIs<JSObject>(ctx.evaluate("({a: 1, b: 'two'})"))
-        try {
-          val wrapped = assertIs<JSObject>(callAsync(wrap, obj))
-          try {
-            assertEquals(setOf("a", "b"), wrapped.keys)
-            assertEquals(1L, wrapped["a"])
-            assertEquals("two", wrapped["b"])
-          } finally {
-            wrapped.close()
-          }
-        } finally {
-          obj.close()
-        }
+        val obj = assertIs<Map<*, *>>(ctx.evaluate("({a: 1, b: 'two'})"))
+        val wrapped = assertIs<Map<*, *>>(callAsync(wrap, obj))
+        assertEquals(setOf("a", "b"), wrapped.keys)
+        assertEquals(1L, wrapped["a"])
+        assertEquals("two", wrapped["b"])
       } finally {
         wrap.close()
       }
@@ -491,10 +458,12 @@ class QuickJSTest {
   @Test
   fun unclosedValuesAreSweptByCloseAndCheckLeaks() {
     val ctx = context()
+    // 故意不 close()：函数是整图展开之后**唯一**还持票的东西 —— 普通对象现在直接
+    // 展开成纯数据的 Map，拿它们造泄漏已经造不出来了。
     repeat(64) {
-      ctx.evaluate("({a: 1, b: [1,2,3]})", name = "<leak>")
+      ctx.evaluate("(() => 1)", name = "<leak>")
     }
-    // 64 个对象都没归还 → closeAndCheckLeaks 必须报出来
+    // 64 个函数都没归还 → closeAndCheckLeaks 必须报出来
     val err = assertFailsWith<JSError> { ctx.closeAndCheckLeaks() }
     assertTrue(
       err.message?.startsWith("reference leak:") == true,

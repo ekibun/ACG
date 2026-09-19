@@ -44,14 +44,21 @@ void jsDestroyHandle(jlong obj) { delete (JSValue *) obj; }
 把两者合成一个 `jsFreeValue` 正是让 `JS_DefinePropertyValue` 不可能写对的原因 ——
 释放包装顺带把引用计数也减了，于是任何"只想退休自己的包装"的调用点都会静默偷走一次引用。
 
+（上游 flutter_qjs 的 `cxx/ffi.cpp` 恰恰就是**一个** `jsFreeValue(ctx, v, int32_t free)`，
+第三参为 `1` 时顺带 `delete v`。两种拆法本身都能用，但要让**调用点的口径一致** ——
+混着来就是上面那个坑。本工程选的是拆成两个。）
+
 Kotlin 侧**只暴露一个**释放出口，让调用点没有选择余地：
 
 ```kotlin
 internal fun releaseValue(handle: Long) {
   if (handle == 0L) return
-  if (closed) return
-  jsReleaseValue(ptr, handle)
-  jsDestroyHandle(handle)
+  // ⚠️ 别照抄成裸调两个 native 函数：`closed` 的判断在 onJsThreadQuietly 里面，
+  // 整段还要回 JS 线程（理由与取舍见规则 7）。仓库现状是下面这样。
+  onJsThreadQuietly {
+    jsReleaseValue(ptr, handle)
+    jsDestroyHandle(handle)
+  }
 }
 ```
 
@@ -114,37 +121,74 @@ jobject jsToJava(JNIEnv *env, JSContext *ctx, JSValue obj,
 
 ---
 
-## 规则 4 —— 对象身份要用**持久**登记表，而不是每次调用的 cache
+## 规则 4 —— 普通对象**整图展开**成纯数据；函数是唯一保留的包装
 
-`jsToJava` 里的 `cache[ptr] = wrapper` 是**单次调用的局部变量**，只能给"一次遍历之内"的身份。
-如果 API 是 `obj["a"]` 这种"每次访问都是一次全新转换"，那么 `a["a"] === a`
-就需要一张活得比调用更久的表，键为 `JS_VALUE_GET_PTR(obj)`。
+`jsToJavaObject` 对普通对象**不造包装**，而是递归填一个 `java.util.LinkedHashMap`：
 
-把它放在 Kotlin 侧（一个 `HashMap<Long, Any>`），由 native 回调：
-
-```
-peekWrapper(ptr) -> Any?            // 已有的包装，没有则 null
-registerWrapper(ptr, wrapper)       // 登记刚造出来的包装
-reuseWrapper(wrapper, dupHandle)    // 命中：releaseValue(dupHandle) 还掉 native 多给的那份，
-                                    // 再 dup() 给调用方单独记一票，返回同一个包装
+```cpp
+auto map = env->NewObject(env->FindClass("java/util/LinkedHashMap"), ...);
+cache[ptr] = map;                      // ⚠️ 必须在**填之前**登记
+for (每个自有属性) {                     // JS_GetOwnPropertyNames + JS_GetProperty
+  map->put(jsToJava(jsKey, cache), jsToJava(jsVal, cache));
+}
+return map;
 ```
 
-- **每轮 `jsToJava` 转换都给调用方一票，命中已有包装时也不例外**（就是上面那个 `dup()`）。
-  漏掉它**不会报错**：调用方 `free()` 减的是**别人的**票，谁先还谁就把别人手里的包装一并销毁
-  （use-after-free）；而「干脆不还」则变成每轮在 `refs` 上挂一笔。2026-09-19 修的就是这一处。
-- 包装被释放时**要撤掉登记**（`forgetWrapper`），否则被复用的 native 指针会映射到一个已销毁的对象上。
-- **不要把 promise 放进这张表**：它的包装由 `then` 回调驱动，而那个回调在调用结束后就退休了，
-  重放缓存条目会得到一个 null 的 `then`。promise 只交给调用内的 `cache`。
+- **`cache[ptr] = map` 必须在填之前**：递归回自身时命中的正是那个**还在填的** `map`，
+  于是 `a['a'] === a` 天然成立。填完再登记就晚了 —— 环上会无限递归。
+- `cache` 是**每次调用新建**的局部变量（`jsToJava` 的默认形参 + `jsToJavaEntry`），
+  只在一次遍历内有效。这不是权宜之计：产物既然是纯数据，就**不存在**"跨调用的对象身份"。
+- 展开出来的东西与 JS 侧**脱钩**：改 `Map` 不会影响 JS，也没有 `close()` / 引用计数这回事。
+- 数组走 `Object[]`，规则同上。
+- **函数是唯一的例外**：`JSFunction` 是可调用的活对象，展开成数据没有意义，所以仍然造包装、
+  持一票、要 `close()`。`jsToJavaObject` 里 `JS_IsFunction` 单独一个分支就是为它。
+- promise 同理不展开：它要等 `then` 回调，返回值是个 `Deferred`。
+- ⚠️ **别删 cache 里那些 JNI local ref**。`a['a'] = a` 时递归交还的 `jVal` 就是 `map`
+  自己，对它 `DeleteLocalRef` 等于把要返回的引用一并销毁 —— 表现是**静默变成 null**
+  （不抛异常、不崩溃，值就没了）。2026-09-20 实测：环形对象整个转成 null，
+  而普通对象一切正常，非常容易误判成"展开没写对"。
+  判据：递归**之后** `cachedRefExists(cache, v)` 为真就别删 —— 进 cache 的**不止容器**，
+  **函数包装也在里面**；标量 / 字符串不进 cache，照删，别让 local ref 白涨。
+- ⚠️ **promise 的 `then` 必须给「独占」包装，绝不能走共享 cache**。同一个
+  `Promise.prototype.then` 会被数组里每个 promise 取到（`[Promise.reject,
+  Promise.resolve, new Promise]`），而 Kotlin 的 `wrapJSPromiseAsync` 拿到它就当是
+  自己的、调用完立刻 `close()`。若共用 cache 里的**同一个**包装，第一个 promise 一
+  `close`，后面的 promise 命中 cache 拿到的就是**已关闭**的包装 → 症状是
+  `TypeError: not a function`（2026-09-20 实测：同一用例重跑 3 次挂 2 次；之所以
+  偶发，是因为已析构的 `JSValue` 内存还没被覆写时，看着仍像函数）。
+  修法：`jsToJavaOwnedFunction()` 造一个**不登记进 cache** 的包装，由 Kotlin 独占
+  并负责归还；顺带它的 local ref 每轮都能当场 `DeleteLocalRef`（不再白涨）。
+  **判据**：谁 `close()`，谁就必须是那一个包装的唯一主人 —— 这两件事必须成对出现。
+- ⚠️ **`cache` 必须由整棵图共用同一张表**。本工程用指针传，空指针表示"最外层自己开一张"。
+  按值传的话递归拿到的是副本，新登记的条目回不到上层：环还能靠"登记早于复制"侥幸命中，
+  但**共享子对象**（`a.b = c; a.d = c`）会被转成两份不同的副本，身份当场断掉。
+  上游 `_jsToDart` 传的是同一个 `Map` 对象，也是这个道理。
 
-### 与 flutter_qjs 的转换模型差异（这点很坑人）
+### 别走回头路：曾经那张「持久登记表」
 
-`flutter_qjs` 的 `_jsToDart` 是**一次把整个对象图**转成原生 Dart `Map`/`List`，
-`cache[valptr] = ret` 只是那一次转换里的局部变量。所以它的 `a['a'] === a` 靠 per-pass cache 就成立。
+2026-09-19 之前这里写的是「对象身份要用持久登记表」—— Kotlin 侧维护 `HashMap<Long, Any>`，
+native 回调 `peekWrapper` / `registerWrapper` / `reuseWrapper`，为的是让 `obj["a"]` 这种
+**惰性代理**模型下的跨调用身份成立。改用整图展开之后，那一整套被整体删掉了。
 
-本工程不同：`obj["a"]` 每次都是**一轮独立的 `jsToJava`**，native 的 cache 是每次新建的局部变量。
-**不要因为"flutter_qjs 用一个局部 cache 就做到了"而推断我们也行** —— 两个模型不一样。
+删它的理由不是"能省则省"，而是它**必然引入**一组自己造出来的坑：每轮转换都得给调用方记一票
+（`reuseWrapper` 里的 `dup()`）、包装销毁时要撤登记（否则指针复用后映射到已销毁对象）、
+promise 必须排除在表外……而这些在 `_jsToDart` 的模型里**一个都不存在**。
 
-另外：`javaToJsImpl` 用于断环的 cache **必须是 `IdentityHashMap`**。
+**判据**：如果你发现自己在给"同一个 JS 对象 → 同一个 Java 包装"维护一张活过单次调用的表，
+先问一句「产物为什么不是纯数据」。
+
+### 与 flutter_qjs 的转换模型（现在两边一致）
+
+`flutter_qjs` 的 `_jsToDart` 就是**一次把整个对象图**转成原生 Dart `Map`/`List`，
+`cache[valptr] = ret` 只在那一次转换里有效 —— 所以 `a['a'] === a` 靠 per-pass cache 就成立。
+本工程的 `jsToJava` 现在对齐这个模型，上游 `flutter_qjs_test.dart` 的
+`expect(wrapA['a'], wrapA, reason: 'recursive object')` 断言的正是这件事。
+
+已知的一处细节差异（与身份无关）：上游 `_jsToDart` 的函数分支**不写回** `cache`，
+所以一次遍历里同一个函数会出现两个 `_JSFunction`；本工程把函数也写回 cache（一次遍历内复用同一个
+`JSFunction`）。只影响一次遍历内的复用，不影响正确性。
+
+另一处：`javaToJsImpl` 用于断环的 cache **必须是 `IdentityHashMap`**。
 普通 `HashMap` 会对**键**调 `hashCode()`/`equals()`，而自引用 Map（`a["a"] = a`）
 在算哈希时无限递归 → `StackOverflowError`。
 
@@ -213,7 +257,8 @@ internal fun collectLeaks(): List<String> {
 ⚠️ **别拿测试 XML 里 `reference leak` 的出现次数当泄漏数**：`JSError` 的 `init` 里就有
 `printStackTrace()`，凡 `assertFailsWith<JSError>` 的用例都会往 `<system-err>` 留一份。
 本仓有两条**故意**泄漏的用例（`QuickJSTest.referenceLeak` 的 1 个 `JSFunction`、
-`unclosedValuesAreSweptByCloseAndCheckLeaks` 的 64 个 `JSObject`），所以基线恒为 **2**。
+`unclosedValuesAreSweptByCloseAndCheckLeaks` 的 64 个 `JSFunction`），所以基线恒为 **2**。
+（那 64 条**必须**用函数造：普通对象整图展开之后是纯数据、没有票可漏，拿它造不出泄漏。）
 真正的意外信号是 **`close()` 路径**打印的 `QuickJS reference leak`（`QuickJS.kt`），它必须是 0。
 
 `close()` 里还有两个坑：
@@ -238,18 +283,21 @@ QuickJS 是**单线程**的：引用计数是裸 `int`、GC 链表与 Shape 哈�
 
 | 入口 | 用哪个 | 关闭之后 |
 |---|---|---|
-| 会**返回**东西的调用（`jsCallImpl`、`jsToJava`、`getPropertyValue`、`evaluate`…） | `runOnDispatcher` | 抛 `IllegalStateException` |
+| 会**返回**东西的调用（`jsCallImpl`、`toJava`、`evaluate`…） | `runOnDispatcher` | 抛 `IllegalStateException` |
 | 只**归还 / 撤登记**的收尾动作（`releaseValue`、`release()`） | `onJsThreadQuietly` | 静默跳过 |
 
-- **返回值与转换结果也要留在 dispatcher 上**：`jsToJava` 会遍历对象图、查常驻包装表，
-  全都在碰这个 runtime。只把 `jsCallImpl` 收回 dispatcher、把 `jsToJava` 丢在调用方线程上，
-  就是历史上那个偶发崩溃的根因（`jsCall` → `jsToJava` 与 `executePendingJob` / GC 并发）。
+- **返回值与转换结果也要留在 dispatcher 上**：`jsToJava` 要递归遍历整个对象图，全都在碰
+  这个 runtime。只把调用收回 dispatcher、把转换丢在调用方线程上，就是历史上那个偶发崩溃的
+  根因（调用 → 转换 与 `executePendingJob` / GC 并发）。`JSFunction.invoke` 因此把两步
+  包在同一个 `runOnDispatcher` 里 —— 调用与转换之间不再有线程切换的缝。
 - `releaseValue` / `release()` 的调用方可以是**任意线程**（`close()` 出现在 `finally` 里）；
   非 JS 线程时它们要 `runBlocking` 一次调度 —— **UI 线程 `close()` 会等一次调度，这是明确
   接受的取舍**，别改成「异步投递、投递完就返回」（runtime 可能已经被销毁）。
 - 计数与「已销毁」标记也必须原子（`AtomicInteger` / `AtomicBoolean` + `compareAndSet`）：
-  `dup()` 由 native 回调在 JS 线程上调，`free()` 可能来自任意线程；普通 `Int` / `Boolean`
-  会丢更新，少一次 `dup` 是提前释放，少一次 `free` 就是 `gc_obj_list` 断言。
+  `free()` 可能来自**任意线程**（`JsEngine` 把 JS 实参交给 `job.invokeOnCompletion` 归还，
+  那条回调跑在协程调度线程上），而关闭时的两阶段清理又会在 JS 线程上再 `release()` 一次。
+  普通 `Int` / `Boolean` 会丢更新 —— 少一次计量就是提前释放（use-after-free），
+  少一次归还就是 `gc_obj_list` 断言。
 - 判据不是「重跑变绿」，而是**跨线程并发进 JS 的次数归零** —— 那就要插桩计数。
   注意 Kotlin 侧的 `System.err.println` **不出现在控制台**：Gradle 默认不转发测试进程的
   stdout/stderr，要去 `shared/build/test-results/jvmTest/*.xml` 的 `<system-err>` 里数
@@ -340,7 +388,7 @@ if (!buf) JS_FreeValue(ctx, JS_GetException(ctx));
 1. native 侧两个释放函数；Kotlin 侧只有一个 `releaseValue`。
 2. `definePropertyValue` 释放 `k`、不释放 `v`；两个包装都 delete。
 3. 唯一的 `jsToJava` 分发点；递归点全部走它。
-4. 持久的 `ptr -> wrapper` 登记表；java→js 的 cache 用 `IdentityHashMap`。
+4. 普通对象整图展开（`cache[ptr]` 要在**填之前**登记）；java→js 的 cache 用 `IdentityHashMap`。
 5. `Cleaner` 的清理动作只捕获值，加一次性 CAS 守卫。
 6. `collectLeaks()` 先记录再归还；`refs` 用强引用身份集。
 7. 验证方式：把**上游**的 `assert` 还原（删掉你临时加的 `fprintf` / `abort` 诊断）后

@@ -84,19 +84,6 @@ object QuickJS {
   ): Int
 
   @JvmStatic
-  private external fun getPropertyValue(
-    ctx: Long,
-    obj: Long,
-    k: Long,
-  ): Long
-
-  @JvmStatic
-  private external fun getObjectKeys(
-    ctx: Long,
-    obj: Long,
-  ): Array<Any>
-
-  @JvmStatic
   private external fun jsDupValue(
     ctx: Long,
     obj: Long,
@@ -192,6 +179,9 @@ object QuickJS {
      * 之所以要显式计数：native 把「释放 JS 引用」和「销毁包装」拆成了两个操作，
      * 而包装可能被多个 JS 操作复用（每次配对一次 `jsDupValue`）。只靠 GC 时机
      * 归还会让 QuickJS 在 `JS_FreeRuntime` 时断言 `gc_obj_list` 非空并 abort。
+     *
+     * 普通 JS 对象**不走这条路径** —— `jsToJava` 把它们整图展开成 `Map`（对齐
+     * flutter_qjs 的 `_jsToDart`），所以本类目前唯一的子类是 [JSFunction]。
      */
     open class JSValue internal constructor(
       val ptr: Long,
@@ -199,10 +189,10 @@ object QuickJS {
     ) : JSRef,
       JSRefLeakable,
       AutoCloseable {
-      // 计数与「已销毁」标记都是原子的：`dup()` 会被 native 回调在 JS 线程上调用
-      // （`reuseWrapper`），而 `free()` / `close()` 可能来自任意线程。普通
-      // Int / Boolean 会丢更新 —— 少一次 dup 是提前释放（use-after-free），
-      // 少一次 free 就是 `JS_FreeRuntime` 的 gc_obj_list 断言 abort。
+      // 计数与「已销毁」标记都是原子的：`free()` / `close()` 可能来自任意线程
+      // （测试线程、WebView 回调线程），而归还动作被投递到 JS 线程上。
+      // 普通 Int / Boolean 会丢更新 —— 少一次计量就是提前释放（use-after-free），
+      // 少一次归还就是 `JS_FreeRuntime` 的 gc_obj_list 断言 abort。
       private val _refCount = AtomicInteger(1)
 
       override val refCount: Int get() = _refCount.get()
@@ -243,41 +233,17 @@ object QuickJS {
       /**
        * 真正把引用还给 runtime。
        *
-       * 登记表（`refs` / `wrapperCache`）与 native 调用都收敛到 JS 线程上：调用方可能
-       * 在任意线程 `close()`（测试线程、WebView 回调线程），而这两张表只在 JS 线程上
-       * 被 native 回调改。`compareAndSet` 保证只有一个调用者真的去归还。
+       * 登记表（`refs`）与 native 调用都收敛到 JS 线程上：调用方可能在任意线程
+       * `close()`（测试线程、WebView 回调线程），而这张表只在 JS 线程上被改。
+       * `compareAndSet` 保证只有一个调用者真的去归还。
        */
       internal fun release() {
         if (!destroyedFlag.compareAndSet(false, true)) return
         ctx.onJsThreadQuietly {
           ctx.unregister(this)
-          // 同时撤掉「指针 → 包装」登记：指针可能被 QuickJS 复用，
-          // 留着会让后续转换命中一个已经销毁的包装。
-          ctx.forgetWrapper(this)
           ctx.releaseValue(ptr)
         }
       }
-
-      protected fun jsCall(
-        vararg argv: Any?,
-        thisVal: Any?,
-      ): Any? =
-        ctx.runOnDispatcher {
-          // 转换结果也必须留在 JS 线程上：`jsToJava` 要遍历转换出来的对象图、查常驻
-          // 包装表，全都在碰这个 runtime。丢在调用方线程就等于和 dispatcher 上的
-          // `executePendingJob` / GC 并发进同一个 runtime。
-          jsToJava(ctx.ptr, ctx.jsCallImpl(this, *argv, thisVal = thisVal))
-        }
-
-      protected fun getPropertyValue(k: Any): Any? =
-        ctx.runOnDispatcher {
-          jsToJava(ctx.ptr, getPropertyValue(ctx.ptr, ptr, ctx.javaToJs(k)))
-        }
-
-      protected fun getObjectKeys(): Array<Any> =
-        ctx.runOnDispatcher {
-          getObjectKeys(ctx.ptr, ptr)
-        }
     }
 
     /**
@@ -294,66 +260,6 @@ object QuickJS {
      * [Cleaner] 负责的是下面 [cleaner] 注释里说明的另一种情况。
      */
     private val refs = Collections.newSetFromMap(IdentityHashMap<JSValue, Boolean>())
-
-    /**
-     * native 指针 → 包装对象的**持久**登记表。
-     *
-     * 与 [refs] 的分工：[refs] 按**对象身份**登记「谁还欠着引用」，用于关闭前清算；
-     * 本表按 **native 指针**登记「这个 JS 对象已经有哪个包装」，用于保证
-     * **同一个 JS 对象总是转换成同一个包装**。
-     *
-     * 为什么必须持久：native 侧 `jsToJava` 里那个 `cache` 是**每次调用新建的局部变量**，
-     * 只能保证「一次转换遍历内」同一个对象映射到同一个包装。而 Kotlin 侧的属性访问
-     * 每次都是一轮独立的 `jsToJava`（`obj["a"]` 两次就是两轮），所以 `a["a"] === a`
-     * 这种**跨调用**的身份必须靠本表维持 —— 这正是 flutter_qjs 在 `_jsToDart` 里
-     * `cache[valptr] = ret` 想要、但只在其「整图一次性转换」模型下才够用的语义。
-     *
-     * 用普通 [HashMap]（键是 Long，没有 hashCode 递归问题），不用身份表。
-     */
-    private val wrapperCache = HashMap<Long, Any>()
-
-    /** 包装对象被归还时，同步撤掉登记，避免指针复用后映射到已销毁的对象。 */
-    private fun forgetWrapper(value: JSValue) {
-      wrapperCache.entries.removeIf { it.value === value }
-    }
-
-    // ── 下面三个方法仅供 native 侧（`quickjs.cpp` 的 `jsToJava`）回调 ──────────
-    // 它们命名刻意保持简单，避免 native 侧签名写错。
-
-    /** 取该指针已有的包装；没有则返回 null。 */
-    @Keep
-    private fun peekWrapper(ptr: Long): Any? = wrapperCache[ptr]
-
-    /** 为新包装建立「指针 → 包装」映射。 */
-    @Keep
-    private fun registerWrapper(
-      ptr: Long,
-      wrapper: Any,
-    ) {
-      wrapperCache[ptr] = wrapper
-    }
-
-    /**
-     * 复用已有包装：把它**当作新的一票**返回给调用方（`dup()`）。
-     *
-     * 每轮 `jsToJava` 转换都算调用方借到一票，命中已有包装时也不例外；否则
-     * 「刚造出来的包装要还、复用的包装不用还」这条不一致的规则，会让归还的人
-     * 还掉别人的票（提前释放 → use-after-free）。native 侧（`jsToJavaObject`）
-     * 为此先造一个 `new JSValue(JS_DupValue(...))` 再交给这里。
-     *
-     * 那一票在 native 上多出来的引用由 `releaseValue(新句柄)` 立即还掉，包装自己
-     * 仍然只持有**一份** native 引用 —— [release] 在票数归零时释放的正是它。
-     * 与 flutter_qjs 的约定一致：转换结果归调用方持有、用完要 `free()`；
-     * 想再留一份就自己 `dup()`。
-     */
-    @Keep
-    private fun reuseWrapper(
-      wrapper: Any,
-      dupHandle: Long,
-    ): Any {
-      releaseValue(dupHandle)
-      return (wrapper as JSValue).dup()
-    }
 
     /**
      * 替代已废弃的 `Object.finalize()` 的兜底清扫。
@@ -393,7 +299,7 @@ object QuickJS {
     @Volatile
     private var closed = false
 
-    private fun <T> runOnDispatcher(block: () -> T): T {
+    internal fun <T> runOnDispatcher(block: () -> T): T {
       // 关闭后 ptr 指向的 runtime 已被销毁，任何访问都是 use-after-free
       if (closed) throw IllegalStateException("QuickJS context is closed")
       if (Thread.currentThread() == dispatcherThread) return block()
@@ -466,6 +372,16 @@ object QuickJS {
 
     private fun javaToJs(obj: Any?): Long = javaToJsImpl(obj)
 
+    /**
+     * 把 native 句柄转成 Java 值，供 [JSFunction] 调用。
+     *
+     * native 入口 `QuickJS.jsToJava` 是 `QuickJS` 这个 object 的私有成员，只有嵌在
+     * 它里面的 `Context`（以及 `Context` 里的 `JSValue`）够得着。`JSFunction` 是顶层
+     * 类、只是 `JSValue` 的子类 —— Kotlin 的 `private` 不跨继承传递，所以这里开一扇
+     * `internal` 的门，而不是把 `jsToJava` 本身放出去。
+     */
+    internal fun toJava(handle: Long): Any? = jsToJava(ptr, handle)
+
     @Keep
     private fun wrapJSPromiseAsync(
       obj: Long,
@@ -473,7 +389,9 @@ object QuickJS {
     ): Deferred<Any?> {
       val ret = CompletableDeferred<Any?>()
       // 两个包装都是 native 交出来的新引用，由这里负责归还：
-      // - `then` 是 jsToJava 在 Promise 分支里为 "then" 属性新建的 JSFunction
+      // - `then` 是 native 用 `jsToJavaOwnedFunction` 为 "then" 属性**独占**造的
+      //   JSFunction（**不**走共享 cache —— 同一个 `Promise.prototype.then` 会被
+      //   数组里每个 promise 取到，共享的话第一个 close 掉、后面的就成了已关闭包装）
       // - `thisVal` 是本函数第一个参数携带的 promise 自身（JS_DupValue 过的）
       // 漏掉任何一个，它就会一直挂在 refs 上，让关闭时的清算抛泄漏。
       //
@@ -534,7 +452,7 @@ object QuickJS {
         jsThrowError(ptr, javaToJs(e))
       }
 
-    private fun jsCallImpl(
+    internal fun jsCallImpl(
       obj: JSValue,
       vararg argv: Any?,
       thisVal: Any? = null,
@@ -729,7 +647,6 @@ object QuickJS {
           val leaked = collectLeaks()
           closed = true
           destroyRuntimeOnce()
-          wrapperCache.clear()
           if (leaked.isNotEmpty()) {
             System.err.println("QuickJS reference leak:\n" + leaked.joinToString("\n"))
           }
@@ -784,7 +701,6 @@ object QuickJS {
           val leaked = collectLeaks()
           closed = true
           destroyRuntimeOnce()
-          wrapperCache.clear()
           if (leaked.isNotEmpty()) {
             throw JSError(
               "reference leak:\n    REFS\tTYPE\tPTR\n" + leaked.joinToString("\n"),

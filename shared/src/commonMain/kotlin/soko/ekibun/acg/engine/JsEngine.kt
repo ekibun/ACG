@@ -22,8 +22,8 @@ import soko.ekibun.acg.web.loadBackgroundWebView
 import soko.ekibun.quickjs.JSError
 import soko.ekibun.quickjs.JSFunction
 import soko.ekibun.quickjs.JSInvokable
-import soko.ekibun.quickjs.JSObject
 import soko.ekibun.quickjs.QuickJS
+import soko.ekibun.quickjs.freeRecursive
 import java.nio.charset.Charset
 
 class JsEngine {
@@ -199,12 +199,13 @@ class JsEngine {
   /**
    * 插件 JS 的 `fetch(...)` 落到这里（`init.js` 的 `__fetch__`）。
    *
-   * `options` 是 native 交给本函数的一票 JS 引用：请求构造完就没用了，随返回的
-   * [Deferred] 一起归还 —— 时机与理由同 [webviewAsync]。
+   * `options` 已经不是一票 JS 引用了：`jsToJava` 把它整图展开成纯数据的
+   * `Map`，连嵌套对象也在 native 侧就地还掉了引用，所以这里**没有东西可还**。
+   * 只有 `options` 里嵌了函数（fetch 选项里不会有）才需要额外 `freeRecursive`。
    */
   @Keep
-  private fun fetchAsync(options: JSObject): Deferred<Any?> {
-    return CoroutineScope(Dispatchers.IO).asyncReleasing(options) {
+  private fun fetchAsync(options: Map<Any, Any?>): Deferred<Any?> {
+    return CoroutineScope(Dispatchers.IO).asyncReleasing {
       val response = Http.request(options)
       assert(response.isActive)
       return@asyncReleasing mapOf(
@@ -228,20 +229,20 @@ class JsEngine {
    * 2. 结果多包一层 [WEBVIEW_KIND_KEY]，好让 JS wrapper 区分「命中拦截」与
    *    「脚本返回值」—— 两者都可能是任意对象，不加标记无从判别。
    *
-   * `header` 与 `onInterceptRequest` 到达这里时各持一票 JS 引用（每轮 `jsToJava`
-   * 转换都会拿到独立的一票，复用已有包装时也一样，见 `Context.reuseWrapper`）。
-   * 两票都随返回的那个 [Deferred] 归还：`header` 在任务构造完就没用了，而
-   * `onInterceptRequest` 要活到 WebView 任务结束（早还就会让回调打在已经释放的
-   * 包装上）—— 两者都交给 [asyncReleasing]。
+   * `onInterceptRequest` 是全图里**唯一**要归还的东西：函数仍以 [JSFunction]
+   * 包装存在、持着一票，而且它要活到 WebView 任务结束（早还就会让回调打在已经
+   * 释放的包装上），所以交给 [asyncReleasing]。
+   *
+   * `header` 不用归还 —— 它和 `options` 一样，已经被整图展开成纯数据的 `Map`。
    */
   @Keep
   private fun webviewAsync(
     url: String,
-    header: JSObject?,
+    header: Map<Any, Any?>?,
     script: String?,
     onInterceptRequest: JSFunction?,
   ): Deferred<Any?> =
-    CoroutineScope(Dispatchers.IO).asyncReleasing(header, onInterceptRequest) {
+    CoroutineScope(Dispatchers.IO).asyncReleasing(onInterceptRequest) {
       val task =
         WebViewTask(
           url = url,
@@ -285,10 +286,10 @@ class JsEngine {
    * 返回 null 表示放行。JS 回调抛错也按放行处理 —— 一次回调出错不该把整次加载
    * 搞崩，但会把错误打到 console 上，别让它无声无息。
    *
-   * 回调返回的 JS 对象在 Kotlin 侧是 [JSObject] 包装（它实现了 `Map`，所以
-   * `as? Map` 判断照样成立），每读一个属性都是一轮 native 转换。**每轮转换都归
-   * 调用方一票，拿到就得还** —— 与 `QuickJSTest.jsInvokableReceivesThisValAndArgs`
-   * 对回调里 `thisVal` 的处理一致；不还的话每拦一次请求就在 `Context.refs` 上挂一笔。
+   * 回调返回的 JS 对象在 Kotlin 侧已经被 `jsToJava` 整图展开成 `Map` / `Array`
+   * 那样的纯数据，`as? Map` 判断天然成立。数据本身没有票可还，但展开出来的图里
+   * 可能嵌着函数包装（它们各持一票），所以收尾用 `freeRecursive()` 穿透容器去还
+   * —— 不还的话每拦一次请求就在 `Context.refs` 上挂一笔。
    *
    * 调用时机：本函数跑在 WebView 的回调线程上，此时脚本正挂起等 `webviewAsync`
    * 的结果，QuickJS 派发线程是空闲的，所以这里的 `fn.invoke` / `close`
@@ -317,20 +318,16 @@ class JsEngine {
       val map = ret as? Map<*, *> ?: return null
       val interceptedUrl = map["url"] as? String ?: return null
       val headers = map["headers"] as? Map<*, *>
-      try {
-        return WebViewInterception(
-          url = interceptedUrl,
-          headers =
-            headers
-              ?.entries
-              ?.associate { it.key.toString() to it.value.toString() }
-              ?: emptyMap(),
-        )
-      } finally {
-        (headers as? AutoCloseable)?.close()
-      }
+      return WebViewInterception(
+        url = interceptedUrl,
+        headers =
+          headers
+            ?.entries
+            ?.associate { it.key.toString() to it.value.toString() }
+            ?: emptyMap(),
+      )
     } finally {
-      (ret as? AutoCloseable)?.close()
+      ret.freeRecursive()
     }
   }
 }
