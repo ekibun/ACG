@@ -313,6 +313,70 @@ QuickJS 是**单线程**的：引用计数是裸 `int`、GC 链表与 Shape 哈�
 
 ---
 
+## 规则 8 —— 改 Kotlin 类结构前，先确认 JNI 符号名会不会变
+
+`Java_<包>_<类>_<方法>` 里的 `<类>` 取决于 `external` 声明**生成在哪个类上**，而 Kotlin 的
+生成规则有一条反直觉的地方：
+
+- **`companion object` 里 `@JvmStatic external` 的 native 实现，生成在「外围类」上**，
+  不是 `X$Companion`。**决定性的是 `@JvmStatic`，不是 `companion object` 本身** —— JNI 符号
+  里的类名取自 native 的**声明类**，而 `@JvmStatic` 的作用正是把 companion 成员提升成外围类的
+  static 方法。companion 里**不带** `@JvmStatic` 的 `external` 会声明在 `X$Companion` 上，
+  符号相应变成 `Java_..._X_00024Companion_*`（`00024` 就是 `$`）。所以「加 companion 不影响
+  符号」这句话必须带 `@JvmStatic` 这个限定词才成立。
+  2026-09-20 实测：把 `object QuickJS { class Context }` 改成
+  `class QuickJS(...) + companion object` 之后，`QuickJS.class` 里仍是 **25 个 ACC_NATIVE**、
+  `QuickJS$Companion.class` 里 **0 个** —— 于是 cpp 侧 `Java_soko_ekibun_quickjs_QuickJS_*`
+  那 **25 个符号**一处都不用改（Kotlin 25 ↔ cpp 25，双向差集为空）。
+- 判定工具：**`javap`**。本机 `java`/`javap` 都不在 PATH，但**两份 JBR 里 AS 自带的那份带 `javap`**
+  （实测 JBR 21.0.10），用绝对路径调：
+
+  ```bash
+  "C:\Program Files\Android\Android Studio\jbr\bin\javap.exe" -p -s <class 文件>
+  ```
+
+  `-p` 连 private 一起列，`-s` 打出 JVM descriptor（正是 JNI 符号尾部那一段）。
+  ⚠️ **别拿 `env.ps1` 里那个 `JAVA_HOME`（`~/.jdks/jbr_dcevm-11.0.16`）去找 `javap` ——
+  那份 `bin/` 下没有 `javap.exe`**。两份 JBR 是互补的：11 那份有 `include/jni.h`（编 native 要），
+  AS 那份有 `javap`（查符号要）。**别为了 javap 去换 `JAVA_HOME`**，见 `host-env.md`。
+  改完结构先跑它复核，不要靠推断。
+
+**但 cpp 里硬编码的类名必须跟着改** —— 这类地方编译器不会提醒，漏改的症状是运行期
+`NoSuchMethodError` / `ClassNotFoundException`，不是编译错误：
+
+| 位置 | 形式 | 例子 |
+|---|---|---|
+| `GetMethodID(clazz, "<init>", ...)` | **嵌套类用 `$` 分隔** | `(JLsoko/ekibun/quickjs/QuickJS$Context;)V` → `(JLsoko/ekibun/quickjs/QuickJS;)V` |
+| `FindClass("...")` | 斜杠分隔 | `soko/ekibun/quickjs/JSFunction` |
+
+其余对 Java 方法的查找（`loadModule` / `handleJSInvokable` / `wrapJSPromiseAsync`）都走
+`GetObjectClass(opaque->thiz)`，与类名无关。
+
+**判据**：动过类结构（改名、嵌套提顶层、加 companion）之后，
+`grep -n 'soko/ekibun/quickjs/' cxx/quickjs/quickjs.cpp` 对一遍，
+再跑 `javap` 复核 native 落点（见上）。
+
+**独立复核：Kotlin ↔ cpp 双向对表**。native 声明与实际导出必须一一对应，两个方向都要看：
+
+- 只在 Kotlin 侧 → cpp 缺实现，症状是运行期 `UnsatisfiedLinkError`；
+- 只在 cpp 侧 → 导出悬空（改名后的残骸），编译期完全无感。
+
+做法：`javap` 报出的 native 名单，与 cpp 里 `Java_soko_ekibun_quickjs_<类>_<方法>` 求双向差集，
+两侧都为空才算过。cpp 侧一行够用：
+
+```bash
+grep -o 'Java_soko_ekibun_quickjs_[A-Za-z0-9_]*' cxx/quickjs/quickjs.cpp | sort -u
+```
+
+2026-09-20 实测（javap 与手写 class 解析器两法互证，数字一致）：`QuickJS` 25 ↔ 25、
+`Highlight` 2 ↔ 2，两向差集皆空；`QuickJS$Companion` 里 **0 个** native。
+
+**JNI 面不止 QuickJS 一个**：`soko/ekibun/quickjs/Highlight.class` 也声明了 2 个 native
+（`isIdentFirst` / `isIdentNext`）。cpp 侧 `Java_soko_ekibun_quickjs_*` 共 **27** 个符号
+= QuickJS 25 + Highlight 2。查符号、改类结构时别只盯 QuickJS。
+
+---
+
 ## 调试手法
 
 ### 追一个 native abort
