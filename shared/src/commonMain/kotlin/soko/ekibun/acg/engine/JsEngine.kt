@@ -72,8 +72,8 @@ class JsEngine {
     }
   }
 
-  private var quickjsDelegate: QuickJS.Context? = null
-  private val quickjs: QuickJS.Context
+  private var quickjsDelegate: QuickJS? = null
+  private val quickjs: QuickJS
     get() =
       quickjsDelegate ?: run {
         val moduleHandler = { module: String ->
@@ -92,7 +92,7 @@ class JsEngine {
           }
         }
         val ctx1 =
-          QuickJS.Context(
+          QuickJS(
             moduleHandler = moduleHandler,
           )
         quickjsDelegate = ctx1
@@ -183,7 +183,7 @@ class JsEngine {
    * 起一个 [Deferred]，并在它收场时（成功 / 失败 / 取消）归还接手的 JS 实参。
    *
    * 不能用 `async` 体里的 `finally`：Deferred 被取消、协程体根本没跑起来时，
-   * `finally` 不会执行，那一票就永远挂在 `Context.refs` 上了（关闭时才由
+   * `finally` 不会执行，那一票就永远挂在 `QuickJS` 的登记表上了（关闭时才由
    * `collectLeaks` 兜掉并报一条 `reference leak`）。`invokeOnCompletion`
    * 三种收场都覆盖。
    */
@@ -289,7 +289,7 @@ class JsEngine {
    * 回调返回的 JS 对象在 Kotlin 侧已经被 `jsToJava` 整图展开成 `Map` / `Array`
    * 那样的纯数据，`as? Map` 判断天然成立。数据本身没有票可还，但展开出来的图里
    * 可能嵌着函数包装（它们各持一票），所以收尾用 `freeRecursive()` 穿透容器去还
-   * —— 不还的话每拦一次请求就在 `Context.refs` 上挂一笔。
+   * —— 不还的话每拦一次请求就在 `QuickJS` 的登记表上挂一笔。
    *
    * 调用时机：本函数跑在 WebView 的回调线程上，此时脚本正挂起等 `webviewAsync`
    * 的结果，QuickJS 派发线程是空闲的，所以这里的 `fn.invoke` / `close`

@@ -421,8 +421,8 @@ static jobject jsToJavaObject(JNIEnv* env, JSContext* ctx, JSValue obj,
     // `Promise.prototype.then`，重跑 3 次挂 2 次，报 `TypeError: not a
     // function`；偶发是因为已析构内存还没被覆写时看着仍像函数。
     jclass clazz = env->FindClass("soko/ekibun/quickjs/JSFunction");
-    jmethodID init = env->GetMethodID(
-        clazz, "<init>", "(JLsoko/ekibun/quickjs/QuickJS$Context;)V");
+    jmethodID init =
+        env->GetMethodID(clazz, "<init>", "(JLsoko/ekibun/quickjs/QuickJS;)V");
     return env->NewObject(
         clazz, init, (jlong) new JSValue(JS_DupValue(ctx, obj)), opaque->thiz);
   } else if (JS_IsError(ctx, obj)) {

@@ -20,7 +20,7 @@ class AvFrame(
     external fun closeNative(ptr: Long)
 
     /**
-     * 与 QuickJS.JSValue 一致：用 Cleaner 而不是 finalize()。
+     * 与 JSRef 一致：用 Cleaner 而不是 finalize()。
      * finalize() 在 JDK9+ 已废弃，且回收时机不可控；清理动作只捕获 ptr
      * 这一个值，绝不捕获 AvFrame 自身，否则对象永远无法被回收。
      */

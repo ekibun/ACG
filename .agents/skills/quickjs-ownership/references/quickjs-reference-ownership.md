@@ -274,8 +274,8 @@ internal fun collectLeaks(): List<String> {
 - 清理必须在 `closed = true` **之前**跑，因为 `releaseValue` 在 closed 之后会拒绝工作 ——
   否则整轮归还是空操作，残留反而撑到 `JS_FreeRuntime` 去 abort。
 - `refs` 必须是**强引用**身份集
-  （`Collections.newSetFromMap(IdentityHashMap<JSValue, Boolean>())`）。
-  用 `WeakHashMap<Long, JSValue>`（键是 native 指针）会同时踩两个雷：
+  （`Collections.newSetFromMap(IdentityHashMap<JSRef, Boolean>())`）。
+  用 `WeakHashMap<Long, JSRef>`（键是 native 指针）会同时踩两个雷：
   指针复用会覆盖条目、条目会被 GC 静默清掉，于是清理时根本找不到泄漏的那一个。
 
 ---

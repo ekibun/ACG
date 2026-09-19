@@ -27,7 +27,7 @@ import kotlin.test.assertTrue
  * - 模块加载（moduleHandler）
  */
 class QuickJSTest {
-  private fun context(moduleHandler: ((String) -> String?)? = null) = QuickJS.Context(moduleHandler)
+  private fun context(moduleHandler: ((String) -> String?)? = null) = QuickJS(moduleHandler)
 
   /**
    * `async (a) => a` 在 JS 侧返回 Promise，桥接层会转成 Deferred，
@@ -448,7 +448,7 @@ class QuickJSTest {
    * 不成立。`JS_FreeRuntime` 结尾有 `assert(list_empty(&rt->gc_obj_list))`，只要还有
    * 活引用就会 abort，整个进程死掉、测试连报告都发不出来。
    *
-   * [QuickJS.Context.closeAndCheckLeaks] 的正确行为是两件事一起做：
+   * [QuickJS.closeAndCheckLeaks] 的正确行为是两件事一起做：
    * 1. 把仍在册的对象**报告**出来（这就是「泄漏」的可断言形式）；
    * 2. 在销毁 runtime 之前把它们逐个**归还**，从而避开 C 层断言。
    *
@@ -473,7 +473,7 @@ class QuickJSTest {
     ctx.closeAndCheckLeaks()
   }
 
-  /** close 之后的 Context 不应再被使用（当前实现会抛错，属于可接受行为） */
+  /** close 之后的 QuickJS 不应再被使用（当前实现会抛错，属于可接受行为） */
   @Test
   fun closedContextIsInert() {
     val ctx = context()
@@ -485,7 +485,7 @@ class QuickJSTest {
   /** flutter_qjs: 'infinite loop' —— timeout 必须把死循环变成可捕获的 JS 错误 */
   @Test
   fun timeoutInterruptsInfiniteLoop() {
-    val ctx = QuickJS.Context(timeout = 1000)
+    val ctx = QuickJS(timeout = 1000)
     try {
       assertEquals(1L, ctx.evaluate("1"))
       val err = assertFailsWith<JSError> { ctx.evaluate("while(true) {}") }
@@ -501,7 +501,7 @@ class QuickJSTest {
   /** flutter_qjs: 'memory leak' —— memoryLimit 触发 out of memory */
   @Test
   fun memoryLimitIsEnforced() {
-    val ctx = QuickJS.Context(memoryLimit = 1_000_000)
+    val ctx = QuickJS(memoryLimit = 1_000_000)
     try {
       val err = assertFailsWith<JSError> { ctx.evaluate("new Array(1000000).fill(0)") }
       assertTrue(

@@ -107,7 +107,7 @@ class WebviewJsTest {
    * 一旦有人再往里加动态 `import()`，这条用例会立刻变成进程 abort（见 init.js 的注释）。
    */
   private fun loadInit(
-    ctx: QuickJS.Context,
+    ctx: QuickJS,
     javaStub: JSInvokable,
   ) {
     val factory = assertIs<JSFunction>(ctx.evaluate(initSource(), name = "<init.js>"))
@@ -130,7 +130,7 @@ class WebviewJsTest {
    * 超时至少把「卡死」变成一条失败，而不是让构建挂到天荒地老。
    */
   private fun evalAsync(
-    ctx: QuickJS.Context,
+    ctx: QuickJS,
     body: String,
   ): Any? =
     runBlocking {
@@ -142,7 +142,7 @@ class WebviewJsTest {
 
   @Test
   fun webviewIsExposedAsGlobal() {
-    val ctx = QuickJS.Context()
+    val ctx = QuickJS()
     try {
       loadInit(ctx, javaStub { _, _, _ -> null })
       assertEquals("function", ctx.evaluate("typeof webview"))
@@ -154,7 +154,7 @@ class WebviewJsTest {
   /** 命中拦截：结果就是 { url, headers }，脚本拿去自己 fetch。 */
   @Test
   fun interceptResultIsUnwrapped() {
-    val ctx = QuickJS.Context()
+    val ctx = QuickJS()
     try {
       loadInit(
         ctx,
@@ -189,7 +189,7 @@ class WebviewJsTest {
   /** 脚本返回值是 JSON 字符串 → 解析成对象交回。 */
   @Test
   fun scriptResultIsParsed() {
-    val ctx = QuickJS.Context()
+    val ctx = QuickJS()
     try {
       var seenScript: String? = null
       loadInit(
@@ -215,7 +215,7 @@ class WebviewJsTest {
    */
   @Test
   fun emptyScriptResultIsUndefined() {
-    val ctx = QuickJS.Context()
+    val ctx = QuickJS()
     try {
       loadInit(
         ctx,
@@ -234,7 +234,7 @@ class WebviewJsTest {
   /** 不是 JSON 的返回值原样给出，别把裸文本吞掉。 */
   @Test
   fun nonJsonScriptResultIsReturnedAsIs() {
-    val ctx = QuickJS.Context()
+    val ctx = QuickJS()
     try {
       loadInit(
         ctx,
@@ -251,7 +251,7 @@ class WebviewJsTest {
   /** 失败（超时 / 没有后端）必须 reject，而不是回一个让脚本误判的空值。 */
   @Test
   fun failureRejects() {
-    val ctx = QuickJS.Context()
+    val ctx = QuickJS()
     try {
       loadInit(
         ctx,
@@ -290,7 +290,7 @@ class WebviewJsTest {
    */
   @Test
   fun interceptCallbackCanBeInvokedFromKotlin() {
-    val ctx = QuickJS.Context()
+    val ctx = QuickJS()
     try {
       val started = CompletableDeferred<JSFunction>()
       val finish = CompletableDeferred<Any?>()

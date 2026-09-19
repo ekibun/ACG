@@ -47,7 +47,7 @@ class InitJsTest {
    * `ctx.evaluate` 取到。
    */
   private fun loadInit(
-    ctx: QuickJS.Context,
+    ctx: QuickJS,
     javaStub: JSInvokable,
   ) {
     val factory = assertIs<JSFunction>(ctx.evaluate(initSource(), name = "<init.js>"))
@@ -100,7 +100,7 @@ class InitJsTest {
 
   @Test
   fun formDataAppendAndGetAll() {
-    val ctx = QuickJS.Context()
+    val ctx = QuickJS()
     try {
       loadInit(ctx, stubInvokable())
       // 每个方法都在 _java 之外的纯 JS 里，直接整段验证
@@ -136,7 +136,7 @@ class InitJsTest {
 
   @Test
   fun encodeUriPadsHexBytes() {
-    val ctx = QuickJS.Context()
+    val ctx = QuickJS()
     try {
       loadInit(ctx, stubInvokable())
       // \n (0x0a) 必须编成 %0A；不补零的话会得到 %A
@@ -154,7 +154,7 @@ class InitJsTest {
 
   @Test
   fun textEncoderRoundTrip() {
-    val ctx = QuickJS.Context()
+    val ctx = QuickJS()
     try {
       loadInit(ctx, stubInvokable())
       val out =
@@ -171,7 +171,7 @@ class InitJsTest {
 
   @Test
   fun responseJsonWorks() {
-    val ctx = QuickJS.Context()
+    val ctx = QuickJS()
     try {
       loadInit(ctx, stubInvokable())
       // Response.text() 走 _java decode，json() 再 JSON.parse —— 串起整条链

@@ -1,7 +1,7 @@
 ---
 name: quickjs-ownership
 description: >-
-  本项目 QuickJS 桥（soko.ekibun.quickjs / cxx/quickjs）的引用计数与所有权规则：JSValue 何时被消费、
+  本项目 QuickJS 桥（soko.ekibun.quickjs / cxx/quickjs）的引用计数与所有权规则：JSRef 何时被消费、
   何时要 dup、何时要 free，jsToJava 为什么是唯一的分发点，JS_DefinePropertyValue 的隐式消费，
   tag = -1 为什么是正常对象而不是异常，以及泄漏怎么转成异常。
   Use when 要改 JS_FreeValue / JS_DupValue / JS_DefinePropertyValue、新增 JS 与 Kotlin 之间的类型映射，

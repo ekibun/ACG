@@ -6,12 +6,12 @@ package soko.ekibun.quickjs
  * 函数是**唯一**还以包装形式存在的 JS 对象 —— 普通对象由 `jsToJava` 整图展开成
  * `Map`（对齐 flutter_qjs 的 `_jsToDart`），因为函数是可调用的活对象，展开没有意义。
  *
- * [invoke] 的实现就在这里：调用只对函数有意义，所以它不属于 [QuickJS.Context.JSValue]。
+ * [invoke] 的实现就在这里：调用只对函数有意义，所以它不属于 [JSRef]。
  */
 class JSFunction(
   ptr: Long,
-  ctx: QuickJS.Context,
-) : QuickJS.Context.JSValue(ptr, ctx),
+  ctx: QuickJS,
+) : JSRef(ptr, ctx),
   JSInvokable {
   override fun invoke(
     vararg argv: Any?,
