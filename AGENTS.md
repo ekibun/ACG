@@ -67,7 +67,7 @@ native（`cxx/`：WebView2 宿主、QuickJS 桥、FFmpeg 解封装+解码+播放
 - 改 `soko.ekibun.acg.engine` 下的类名
 - 在 `init.js` 里用 `import()` / `require()`
 - 动了 submodule（规则见 §4）
-- 偶发测试失败（`QuickJSTest > objectWithVariousTagsRoundTrips`）
+- 在 JS 线程之外碰 `JSRuntime`（症状是偶发崩、重跑就变绿）
 
 ---
 

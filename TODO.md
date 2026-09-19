@@ -68,46 +68,6 @@
   之后 skill `build-and-test` 的 `references/dll-sync.md` 与该条一起简化为"三处全自动"。
 - **影响**：漏拷的症状是"改动没生效、连日志都没有"，最容易被误判成代码问题。
 
-### B2. `QuickJSTest > objectWithVariousTagsRoundTrips` 偶发失败
-
-- **现状**：疑似多线程/时序竞态，怀疑桥接层 per-context 线程安全（具体竞态未定位）。
-- **为什么现在没做**：需要先定位真因，不能用改产品代码去迁就的方式打补丁。
-- **完成判据**：定位到具体竞态并修掉；连续多次全量 `:shared:jvmTest` 稳定绿。
-- **注意**：重跑变绿**不等于**修好。
-- **2026-09-19 又见一次，是另一种表现**（同一批用例、同一条命令，紧挨着跑两次结果相反）：
-  第一次**进程级 abort** —— 先打印 `Object leaks:`，泄漏物是一个 `Promise { }`
-  （`1a6ecbba6c8    1   0*  …  Promise {  }`），随即
-  `Assertion failed: list_empty(&rt->gc_obj_list), file .../quickjs.c, line 2464`，
-  `:shared:jvmTest` 以 exit 3 结束（"finished with non-zero exit value 3"），
-  测试结果目录里只有 `InitJsTest` 的半份 XML（`tests=4 skip=1`）；
-  第二次（`--rerun-tasks` 原样重跑）**59/59 全绿**。
-  当次日志是临时件（`log/` 下），2026-09-19 已按该目录「用完清空」的约定删除；结论即上文。
-  这个 assert 与 `init.js` 文件头记的那个**是同一个**（quickjs.c:2464）—— 只要进程里还有
-  没释放的 JS 对象，`JS_FreeRuntime` 就直接 abort，不会报错。当次改动只有注释，可排除。
-  另注意第一次跑时 `InitJsTest` 是 `tests=4 skip=1`，第二次是 `tests=5 skip=0`：
-  **用例数会随环境浮动**，别拿单次 XML 当基线。
-- **2026-09-19 下午（F4 注释统一那批）换了个崩点，命中率还很高**：本轮**只改注释**
-  （已用 `.workbuddy/comment-audit/check-code-identical.py` 机械证明：10 个代码文件剥掉注释后
-  代码骨架**逐 token 相同**，见该目录 `code-identical-check.txt`）。全量 `:shared:jvmTest`
-  跑了 4 次 —— **崩 3 次、绿 1 次**。
-  崩的形态与上面那条不同：不是 `JS_FreeRuntime` 的泄漏断言，而是
-  `EXCEPTION_ACCESS_VIOLATION`；三次的故障帧 **pc 偏移各不相同**
-  （`quickjs.dll+0x227c2` ×2、`+0x17dfb`），访问地址也从「读 `0x18`」变成「写 `0x8`」。
-  但三次的 **Java 栈完全一致**：`WebviewJsTest.loadInit` → `JSInvokable.invoke` →
-  `JSFunction.invoke` → `QuickJS$Context$JSValue.jsCall` → `QuickJS.jsToJava`，
-  只是落在不同用例上（`interceptCallbackCanBeInvokedFromKotlin` /
-  `interceptResultIsUnwrapped` / `nonJsonScriptResultIsReturnedAsIs`）。
-  **决定性对照**：同一条命令单独跑 `--tests "soko.ekibun.acg.engine.WebviewJsTest"`
-  是 **7/7 全绿**（含前两个"崩过"的用例）。
-  ⇒ 指向**用例顺序 / 跨用例残留导致的堆破坏**（pc 每次都变、访问方向也变，是 use-after-free
-  的典型特征），不是某个用例自身写错。
-  证据原件（`log/` 下的门禁输出、`shared/hs_err_pid*.log`）都是临时件，
-  2026-09-19 已清理；复现用上面那条全量命令即可，不需要其他材料。
-- **一条线索（证据不足，别急着动）**：崩点路径 `jsToJava` 恰好经过 `f50f52a` 给
-  `QuickJS.Context.reuseWrapper` 补 `dup()` 的那个复用分支。但**同一次提交之后**的全量测试
-  当时是 59/59 绿的，所以不能据此断定是它引入的。要动先做对照实验（在 `f50f52a^` 上重复跑全量），
-  **别直接把 `dup()` 撤掉**。
-
 ### B3. 测试报错 / 日志存在非英文输出
 
 - **现状**：未审计。Windows 控制台按代码页解码，中文输出会变乱码，误导排查。
@@ -115,27 +75,18 @@
 
 ### B4. `commonMain` 里存在平台符号（违反根 AGENTS.md §4 的硬规则）
 
-- **现状**：约定是 `commonMain` 不许出现 `java.*` / `android.*`。**7 个文件 11 处**（2026-09-16 复核）：
-  `quickjs/QuickJS.kt`、`ffmpeg/{AvFrame,AvCodec,AvFormat,FFPlayer}.kt`、`acg/engine/JsEngine.kt`
-  直接 import `java.*`；另有 `QuickJS.kt:327` 的内联 `java.util.concurrent.atomic.AtomicBoolean`
-  与 `acg/player/HttpIO.kt:47` 的内联 `catch (_: java.io.IOException)`。
+- **现状**：约定是 `commonMain` 不许出现 `java.*` / `android.*`。**7 个文件 12 处**
+  （2026-09-19 复核；`QuickJS.kt` 的那次线程安全修复加了 `AtomicBoolean` / `AtomicInteger`
+  两个 import，于是从 11 涨到 12）：`quickjs/QuickJS.kt`、
+  `ffmpeg/{AvFrame,AvCodec,AvFormat,FFPlayer}.kt`、`acg/engine/JsEngine.kt` 直接 import `java.*`；
+  另有 `acg/player/HttpIO.kt:52` 的内联 `catch (_: java.io.IOException)`。
   也就是说 `soko.ekibun.{quickjs,ffmpeg}` 事实上是按 JVM-only 写的。
 - **方向已定**（用户 2026-09-16 晚）：**不给这两个包开例外** —— 规则保持，把这些 Java 语义
   逐处提到外面（`expect` 一个最小原语、两端各 `actual`），`commonMain` 里最终不剩平台符号。
 - **为什么现在没做**：属于独立的一次重构，要和文档改动分开。
-- **完成判据**：上述 11 处全部去掉；`commonMain` 里搜 `java\.` / `android\.` 结果均为 0。
+- **完成判据**：上述 12 处全部去掉；`commonMain` 里搜 `java\.` / `android\.` 结果均为 0。
 - **完成后必须做的收尾**：删掉 `AGENTS.md` §4 里那句"现状…仍有直接引用…见 `TODO.md` B4"
   的指针（届时规则已无例外），并删掉本条。
-
-### B5. `JsEngine` 收到 JS 参数后不归还
-
-- **现状**：`webviewAsync` 的 `header` / `onInterceptRequest`、`fetchAsync` 的 `options`
-  各持一票 JS 引用，**都不归还**，每次调用因此在 `Context.refs` 上留 1~2 笔。
-  `QuickJS.Context.reuseWrapper` 补上 `dup()` 之后，"由被调用方归还"本身已经安全，
-  不还的唯一理由只剩 `onInterceptRequest` 要活到 WebView 任务结束。
-- **为什么现在没做**：归还时机得放在 `async` 块的 `finally`，而 Deferred 被取消时那个回调
-  可能还在飞 —— 是时序改动，与注释清扫分开做。
-- **完成判据**：这三处按正确时机归还；`:shared:jvmTest` 全绿且没有新的 `reference leak` 报告。
 
 ### B6. `ViewOptions::script` 是死字段
 

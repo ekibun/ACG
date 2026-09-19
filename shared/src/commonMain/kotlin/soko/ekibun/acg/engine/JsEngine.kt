@@ -179,12 +179,35 @@ class JsEngine {
     from: String?,
   ): String = String(input, Charset.forName(from ?: "utf-8"))
 
+  /**
+   * 起一个 [Deferred]，并在它收场时（成功 / 失败 / 取消）归还接手的 JS 实参。
+   *
+   * 不能用 `async` 体里的 `finally`：Deferred 被取消、协程体根本没跑起来时，
+   * `finally` 不会执行，那一票就永远挂在 `Context.refs` 上了（关闭时才由
+   * `collectLeaks` 兜掉并报一条 `reference leak`）。`invokeOnCompletion`
+   * 三种收场都覆盖。
+   */
+  private fun <T> CoroutineScope.asyncReleasing(
+    vararg values: AutoCloseable?,
+    block: suspend CoroutineScope.() -> T,
+  ): Deferred<T> {
+    val job = async(block = block)
+    job.invokeOnCompletion { values.forEach { it?.close() } }
+    return job
+  }
+
+  /**
+   * 插件 JS 的 `fetch(...)` 落到这里（`init.js` 的 `__fetch__`）。
+   *
+   * `options` 是 native 交给本函数的一票 JS 引用：请求构造完就没用了，随返回的
+   * [Deferred] 一起归还 —— 时机与理由同 [webviewAsync]。
+   */
   @Keep
   private fun fetchAsync(options: JSObject): Deferred<Any?> {
-    return CoroutineScope(Dispatchers.IO).async {
+    return CoroutineScope(Dispatchers.IO).asyncReleasing(options) {
       val response = Http.request(options)
       assert(response.isActive)
-      return@async mapOf(
+      return@asyncReleasing mapOf(
         "url" to response.request.url.toString(),
         "headers" to response.headers.toMap(),
         "ok" to response.status.isSuccess(),
@@ -207,9 +230,9 @@ class JsEngine {
    *
    * `header` 与 `onInterceptRequest` 到达这里时各持一票 JS 引用（每轮 `jsToJava`
    * 转换都会拿到独立的一票，复用已有包装时也一样，见 `Context.reuseWrapper`）。
-   * 本函数**不归还它们**：归还本身是安全的（票分开算），但 `onInterceptRequest`
-   * 要活到 WebView 任务结束，早还就会让回调打在已经释放的包装上。代价是每次调用
-   * 留下一到两票 —— 收尾见 TODO「JsEngine 不归还 JS 参数」。
+   * 两票都随返回的那个 [Deferred] 归还：`header` 在任务构造完就没用了，而
+   * `onInterceptRequest` 要活到 WebView 任务结束（早还就会让回调打在已经释放的
+   * 包装上）—— 两者都交给 [asyncReleasing]。
    */
   @Keep
   private fun webviewAsync(
@@ -218,7 +241,7 @@ class JsEngine {
     script: String?,
     onInterceptRequest: JSFunction?,
   ): Deferred<Any?> =
-    CoroutineScope(Dispatchers.IO).async {
+    CoroutineScope(Dispatchers.IO).asyncReleasing(header, onInterceptRequest) {
       val task =
         WebViewTask(
           url = url,

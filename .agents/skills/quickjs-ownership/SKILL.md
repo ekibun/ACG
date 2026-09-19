@@ -14,12 +14,15 @@ agent_created: true
 完整规则在 [`references/quickjs-reference-ownership.md`](./references/quickjs-reference-ownership.md)。
 **动 `JS_FreeValue` / `JS_DupValue` 之前先读它**，按符号查，不要整篇读。
 
-三条最容易踩死、漏了就一定改错的（细节见手册）：
+四条最容易踩死、漏了就一定改错的（细节见手册）：
 
 - `JS_DefinePropertyValue` 内部**无条件**消费 `val` 的引用，调用方**不要**再减一次。
 - `jsToJava` 是**唯一**的对象/标量分发点，递归点必须走它。历史上把对象分支移出去过一次，
   症状是「数组元素全是 null」「promise 没有 then」。
 - `tag = -1` 是**正常的对象**（`JS_TAG_OBJECT = -1`），不是异常。
+- 所有 native 访问都必须落在 **JS 线程**上（过 `runOnDispatcher` / `onJsThreadQuietly`）。
+  QuickJS 单线程，两个线程同时进同一个 `JSRuntime` 的症状是**偶发崩、重跑就变绿** ——
+  看着像环境问题，其实是真实竞态。手册里的规则 7。
 
 另外：`import()` / `require()` 一律不许用 —— 本桥的模块加载路径会把进程 `abort()`，
 能力全部内联进 `init.js`（位置见根 [`AGENTS.md`](../../../AGENTS.md) §3）。

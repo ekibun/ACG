@@ -13,6 +13,8 @@ import java.lang.ref.Cleaner
 import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 object QuickJS {
   init {
@@ -197,14 +199,17 @@ object QuickJS {
     ) : JSRef,
       JSRefLeakable,
       AutoCloseable {
-      private var _refCount: Int = 1
+      // 计数与「已销毁」标记都是原子的：`dup()` 会被 native 回调在 JS 线程上调用
+      // （`reuseWrapper`），而 `free()` / `close()` 可能来自任意线程。普通
+      // Int / Boolean 会丢更新 —— 少一次 dup 是提前释放（use-after-free），
+      // 少一次 free 就是 `JS_FreeRuntime` 的 gc_obj_list 断言 abort。
+      private val _refCount = AtomicInteger(1)
 
-      override val refCount: Int get() = _refCount
+      override val refCount: Int get() = _refCount.get()
 
-      @Volatile
-      private var destroyed = false
+      private val destroyedFlag = AtomicBoolean(false)
 
-      override val released: Boolean get() = destroyed
+      override val released: Boolean get() = destroyedFlag.get()
 
       init {
         @Suppress("LeakingThis")
@@ -212,23 +217,22 @@ object QuickJS {
       }
 
       override fun dup(): JSRef {
-        if (destroyed) throw IllegalStateException("JSValue already released")
-        _refCount++
+        if (destroyedFlag.get()) throw IllegalStateException("JSValue already released")
+        _refCount.incrementAndGet()
         return this
       }
 
       /**
        * 释放一票。归零时销毁。
        *
-       * 重复调用是安全的：[free] 与 [release] 都先看 `destroyed`，归零之后再调
+       * 重复调用是安全的：[free] 与 [release] 都先看 `destroyedFlag`，归零之后再调
        * 直接返回（**不抛异常**），不会重复释放 native 句柄 —— 这是此前
        * `delete` 与 `jsFreeValue` 混用导致双重释放的地方。
        * 会抛 `IllegalStateException` 的是 [dup]：已经还完了还想要一票，没得给。
        */
       override fun free() {
-        if (destroyed) return
-        _refCount--
-        if (_refCount <= 0) release()
+        if (destroyedFlag.get()) return
+        if (_refCount.decrementAndGet() <= 0) release()
       }
 
       /** [free] 的别名，实现 [AutoCloseable] 以便 `use {}`。重复调用安全。 */
@@ -236,21 +240,34 @@ object QuickJS {
 
       override fun describe(): String = "${javaClass.simpleName}(refs=$refCount, ptr=$ptr)"
 
-      /** 真正把引用还给 runtime。必须在 JS 线程上下文内调用。 */
+      /**
+       * 真正把引用还给 runtime。
+       *
+       * 登记表（`refs` / `wrapperCache`）与 native 调用都收敛到 JS 线程上：调用方可能
+       * 在任意线程 `close()`（测试线程、WebView 回调线程），而这两张表只在 JS 线程上
+       * 被 native 回调改。`compareAndSet` 保证只有一个调用者真的去归还。
+       */
       internal fun release() {
-        if (destroyed) return
-        destroyed = true
-        ctx.unregister(this)
-        // 同时撤掉「指针 → 包装」登记：指针可能被 QuickJS 复用，
-        // 留着会让后续转换命中一个已经销毁的包装。
-        ctx.forgetWrapper(this)
-        ctx.releaseValue(ptr)
+        if (!destroyedFlag.compareAndSet(false, true)) return
+        ctx.onJsThreadQuietly {
+          ctx.unregister(this)
+          // 同时撤掉「指针 → 包装」登记：指针可能被 QuickJS 复用，
+          // 留着会让后续转换命中一个已经销毁的包装。
+          ctx.forgetWrapper(this)
+          ctx.releaseValue(ptr)
+        }
       }
 
       protected fun jsCall(
         vararg argv: Any?,
         thisVal: Any?,
-      ): Any? = jsToJava(ctx.ptr, ctx.jsCallImpl(this, *argv, thisVal = thisVal))
+      ): Any? =
+        ctx.runOnDispatcher {
+          // 转换结果也必须留在 JS 线程上：`jsToJava` 要遍历转换出来的对象图、查常驻
+          // 包装表，全都在碰这个 runtime。丢在调用方线程就等于和 dispatcher 上的
+          // `executePendingJob` / GC 并发进同一个 runtime。
+          jsToJava(ctx.ptr, ctx.jsCallImpl(this, *argv, thisVal = thisVal))
+        }
 
       protected fun getPropertyValue(k: Any): Any? =
         ctx.runOnDispatcher {
@@ -384,14 +401,26 @@ object QuickJS {
     }
 
     /**
+     * 把「归还引用 / 撤销登记」放到 JS 线程上跑。
+     *
+     * 与 [runOnDispatcher] 的区别是**关闭之后静默跳过**而不是抛异常：runtime 已经销毁，
+     * 没有什么可归还的；而归还多发生在 `finally` 里，在那里抛会盖掉真正的异常，也会把
+     * 「归还比关闭晚」这种正常时序变成崩溃。
+     */
+    private fun onJsThreadQuietly(block: () -> Unit) {
+      if (closed) return
+      val run = { if (!closed) block() }
+      val onJsThread = Thread.currentThread() == dispatcherThread
+      if (onJsThread) run() else runBlocking(dispatcher) { run() }
+    }
+
+    /**
      * 承载 `ptr` 的小盒子：让 Cleaner 的清理动作不必引用 Context 自身，
      * 同时把「销毁 runtime」变成一次性的。
      */
     private class Reachable {
       @Volatile var ptr: Long = 0
-      private val armed =
-        java.util.concurrent.atomic
-          .AtomicBoolean(true)
+      private val armed = AtomicBoolean(true)
 
       /** 返回要销毁的指针；已被销毁过则返回 null。 */
       fun disarm(): Long? = if (armed.compareAndSet(true, false)) ptr else null
@@ -534,12 +563,15 @@ object QuickJS {
      * 这是唯一的释放出口 —— 对应 native 侧 `jsReleaseValue` + `jsDestroyHandle`
      * 两步。`javaToJsImpl` / `evaluate` / `jsNewPromise` 等都从这里返回句柄，
      * 所以调用点只需关心「用完了就还」，不必各自区分两种释放语义。
+     *
+     * 调用方可以是任意线程：这两步都要碰 runtime，本方法自己把它们投递到 JS 线程。
      */
     internal fun releaseValue(handle: Long) {
       if (handle == 0L) return
-      if (closed) return
-      jsReleaseValue(ptr, handle)
-      jsDestroyHandle(handle)
+      onJsThreadQuietly {
+        jsReleaseValue(ptr, handle)
+        jsDestroyHandle(handle)
+      }
     }
 
     /**

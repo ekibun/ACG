@@ -122,18 +122,34 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
         }};
     int e = JS_NewClass(rt, opaque->javaClassID, &def);
     if (e < 0) {
+      // 类没注册成：这个 runtime 起不来，opaque 连它的 weak global ref
+      // 一起收掉， 别把失败路径漏成一份常驻内存。
+      JS_SetRuntimeOpaque(rt, nullptr);
       JS_FreeRuntime(rt);
+      env->DeleteWeakGlobalRef(opaque->thiz);
+      delete opaque;
       return 0;
     }
   }
   return (jlong)JS_NewContext(rt);
 }
 extern "C" JNIEXPORT void JNICALL
-Java_soko_ekibun_quickjs_QuickJS_destroyContext(JNIEnv*, jclass, jlong ctx) {
+Java_soko_ekibun_quickjs_QuickJS_destroyContext(JNIEnv* env, jclass,
+                                                jlong ctx) {
   JSRuntime* rt = JS_GetRuntime((JSContext*)ctx);
+  auto opaque = (JSRuntimeOpaque*)JS_GetRuntimeOpaque(rt);
+  // 顺序有讲究：JS_FreeContext / JS_FreeRuntime 期间会跑 JavaObject
+  // 的类析构回调， 它得读到 opaque（javaVm + javaClassID）才能把挂着的 Java
+  // 全局引用删掉。 以前这里先把 opaque 置成 nullptr，那些 global ref
+  // 就被析构回调里那句 `if (opaque == nullptr) return;` 直接放过了 —— 漏的是
+  // jobject 全局引用表。
   JS_FreeContext((JSContext*)ctx);
-  JS_SetRuntimeOpaque(rt, nullptr);
   JS_FreeRuntime(rt);
+  if (opaque != nullptr) {
+    // thiz 是 initContext 里 NewWeakGlobalRef 建的，得自己删；opaque 本体同理。
+    env->DeleteWeakGlobalRef(opaque->thiz);
+    delete opaque;
+  }
 }
 extern "C" JNIEXPORT jlong JNICALL
 Java_soko_ekibun_quickjs_QuickJS_jsNewError(JNIEnv*, jclass, jlong ctx) {
@@ -453,6 +469,10 @@ extern "C" JNIEXPORT jobject JNICALL Java_soko_ekibun_quickjs_QuickJS_jsToJava(
   // 而不是借出），所以在这里放掉。包装本身不受影响 —— 调用方可能还握着它，它的
   // 生命周期之后归显式管理。
   jsReleaseValue(ctx, obj);
+  // 这个句柄也是本次调用的一次性产物：Kotlin 拿到转换结果之后不会再碰它
+  // （包装的 ptr 是 jsToJavaObject 里另造的那一份）。只放引用不销毁包装，
+  // 每转换一次就漏 16 字节 —— 「两步」里被漏掉的那一步。
+  jsDestroyHandle(obj);
   return ret;
 }
 extern "C" JNIEXPORT jlong JNICALL

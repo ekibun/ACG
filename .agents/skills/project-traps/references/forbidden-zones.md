@@ -18,6 +18,7 @@
 - **可见页窗口必须是 AWT 的** `application { Window(...) }` —— 宿主靠 JAWT 从 AWT 组件取 HWND 挂子窗口。
   AWT 是重型组件、永远画在 Compose 之上，所以 `AcgWebView` 的 `content` 覆盖层在 Windows 上会被盖住。
 - **通用**：不要顺手重构无关代码、不要顺手统一命名/格式、不要把 alpha 依赖降级。
-- 测试偶发失败先重跑确认不是环境问题，再定性；已知 `QuickJSTest > objectWithVariousTagsRoundTrips`
-  是真实竞态、已标 **待修**（状态见 `TODO.md` B2，症状清单见 [silent-failures.md](./silent-failures.md)）——
-  不要只靠重跑掩盖，也别用改产品代码去迁就的方式打补丁。
+- 测试偶发失败先重跑确认不是环境问题，再定性 —— **别只靠重跑掩盖**。历史上
+  `QuickJSTest > objectWithVariousTagsRoundTrips` 就是真实竞态（两个线程并发进同一个
+  `JSRuntime`），已按「native 访问只能在 JS 线程上」修掉；症状清单见
+  [silent-failures.md](./silent-failures.md)。

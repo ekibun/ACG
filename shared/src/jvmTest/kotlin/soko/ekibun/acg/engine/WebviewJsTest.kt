@@ -7,6 +7,7 @@ import kotlinx.coroutines.withTimeout
 import soko.ekibun.quickjs.JSError
 import soko.ekibun.quickjs.JSFunction
 import soko.ekibun.quickjs.JSInvokable
+import soko.ekibun.quickjs.JSObject
 import soko.ekibun.quickjs.QuickJS
 import java.io.File
 import java.nio.charset.Charset
@@ -30,11 +31,10 @@ import kotlin.test.assertTrue
  * 3. `onInterceptRequest` 回调真的能被 Kotlin 侧调用并拿回对象 —— 这段是
  *    `JsEngine.invokeInterceptor` 的另一半契约，不测就只在真机上才暴露。
  *
- * 跑的时候每个调过 `webview(...)` 的用例都会在 stderr 打印一条
- * `QuickJS reference leak: JSObject`：那是脚本传进来的 `header` 对象在 Kotlin 侧
- * 留下的包装。**属于 `JsEngine` 已记录的既有约定**（`fetchAsync` 的 `options`
- * 同样不归还，理由见 `Context.reuseWrapper` —— 复用已有包装时不加票，主动归还
- * 会把别人手里的包装一起销毁），不是本 wrapper 引入的问题，故用例里不做清理。
+ * 桩对 JS 实参的处置与真实实现一致（见 `JsEngine.webviewAsync`）：收到的实参归
+ * 被调用方所有，等它交回的那个 Deferred 收场时归还。两个方向都不能偏 —— 不还的话
+ * 每个调过 `webview(...)` 的用例都会在 stderr 留一条 `QuickJS reference leak`，
+ * 早还则让 `onInterceptRequest` 打在已经释放的包装上。
  */
 class WebviewJsTest {
   /** 从源码目录读，保证验的就是正在编辑的那份文件。 */
@@ -80,12 +80,25 @@ class WebviewJsTest {
 
           // argv[0]=obj(null) argv[1]=name argv[2]=url argv[3]=header
           // argv[4]=script argv[5]=onInterceptRequest
-          "webviewAsync" ->
-            respond(
-              argv.getOrNull(2) as? String ?: "",
-              argv.getOrNull(4) as? String,
-              argv.getOrNull(5) as? JSFunction,
-            )
+          "webviewAsync" -> {
+            val header = argv.getOrNull(3) as? JSObject
+            val callback = argv.getOrNull(5) as? JSFunction
+            val ret =
+              respond(argv.getOrNull(2) as? String ?: "", argv.getOrNull(4) as? String, callback)
+            // 实参归被调用方所有：等它交回的那个 Deferred 收场（成功 / 失败 / 取消）
+            // 再归还，与 `JsEngine.webviewAsync` 同一条规矩。
+            val deferred = ret as? Deferred<*>
+            if (deferred != null) {
+              deferred.invokeOnCompletion {
+                header?.close()
+                callback?.close()
+              }
+            } else {
+              header?.close()
+              callback?.close()
+            }
+            ret
+          }
 
           else -> null
         }

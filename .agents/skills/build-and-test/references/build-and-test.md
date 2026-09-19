@@ -106,6 +106,9 @@ git 对**没有执行位的 hook 是静默跳过**的。
 ./gradlew :shared:jvmTest --tests "soko.ekibun.quickjs.QuickJSTest.objectWithVariousTagsRoundTrips"
 ```
 
+- **要重复跑（偶发问题、改过 native 之后复查）必须加 `--rerun`**。不加的话第 2 轮起任务是
+  `UP-TO-DATE`，XML 还是上一轮的残留 —— 写着"跑了 12 轮"，实际只跑了 1 轮。
+  写验收循环时把"任务真的执行了"也做成一条判据（`grep 'Task :shared:jvmTest UP-TO-DATE'`）。
 - `jvmTestProcessResources` 会把 `cxx/build/bin` 里的 dll 拷进测试资源 →
   **跑 jvmTest 前 native 必须是编好的**（见 [`dll-sync.md`](./dll-sync.md)）。
 - 偶发失败的处理见 skill `project-traps` 的

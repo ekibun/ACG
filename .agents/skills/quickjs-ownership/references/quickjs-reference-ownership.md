@@ -210,6 +210,12 @@ internal fun collectLeaks(): List<String> {
 **归还**是为了不让它升级成 `JS_FreeRuntime` 的 `abort()`。
 `close()` 打印；`closeAndCheckLeaks()` 抛 `JSError("reference leak:\n...")`。
 
+⚠️ **别拿测试 XML 里 `reference leak` 的出现次数当泄漏数**：`JSError` 的 `init` 里就有
+`printStackTrace()`，凡 `assertFailsWith<JSError>` 的用例都会往 `<system-err>` 留一份。
+本仓有两条**故意**泄漏的用例（`QuickJSTest.referenceLeak` 的 1 个 `JSFunction`、
+`unclosedValuesAreSweptByCloseAndCheckLeaks` 的 64 个 `JSObject`），所以基线恒为 **2**。
+真正的意外信号是 **`close()` 路径**打印的 `QuickJS reference leak`（`QuickJS.kt`），它必须是 0。
+
 `close()` 里还有两个坑：
 
 - 清理必须在 `closed = true` **之前**跑，因为 `releaseValue` 在 closed 之后会拒绝工作 ——
@@ -218,6 +224,36 @@ internal fun collectLeaks(): List<String> {
   （`Collections.newSetFromMap(IdentityHashMap<JSValue, Boolean>())`）。
   用 `WeakHashMap<Long, JSValue>`（键是 native 指针）会同时踩两个雷：
   指针复用会覆盖条目、条目会被 GC 静默清掉，于是清理时根本找不到泄漏的那一个。
+
+---
+
+## 规则 7 —— native 访问只能在 JS 线程上
+
+QuickJS 是**单线程**的：引用计数是裸 `int`、GC 链表与 Shape 哈希链都无锁。只要有两个线程
+同时进同一个 `JSRuntime` 就会丢更新 —— 要么提前释放（`EXCEPTION_ACCESS_VIOLATION`，
+崩在 `get_shape_prop` / `list_del` 这类地方），要么漏减（对象/Shape 卡在 `gc_obj_list`，
+`JS_FreeRuntime` 的断言 `abort()`）。**症状是偶发崩、重跑就变绿**，因此极易被误判成环境问题。
+
+`Context` 只有一个专用线程（`dispatcher`），两类入口分工不同：
+
+| 入口 | 用哪个 | 关闭之后 |
+|---|---|---|
+| 会**返回**东西的调用（`jsCallImpl`、`jsToJava`、`getPropertyValue`、`evaluate`…） | `runOnDispatcher` | 抛 `IllegalStateException` |
+| 只**归还 / 撤登记**的收尾动作（`releaseValue`、`release()`） | `onJsThreadQuietly` | 静默跳过 |
+
+- **返回值与转换结果也要留在 dispatcher 上**：`jsToJava` 会遍历对象图、查常驻包装表，
+  全都在碰这个 runtime。只把 `jsCallImpl` 收回 dispatcher、把 `jsToJava` 丢在调用方线程上，
+  就是历史上那个偶发崩溃的根因（`jsCall` → `jsToJava` 与 `executePendingJob` / GC 并发）。
+- `releaseValue` / `release()` 的调用方可以是**任意线程**（`close()` 出现在 `finally` 里）；
+  非 JS 线程时它们要 `runBlocking` 一次调度 —— **UI 线程 `close()` 会等一次调度，这是明确
+  接受的取舍**，别改成「异步投递、投递完就返回」（runtime 可能已经被销毁）。
+- 计数与「已销毁」标记也必须原子（`AtomicInteger` / `AtomicBoolean` + `compareAndSet`）：
+  `dup()` 由 native 回调在 JS 线程上调，`free()` 可能来自任意线程；普通 `Int` / `Boolean`
+  会丢更新，少一次 `dup` 是提前释放，少一次 `free` 就是 `gc_obj_list` 断言。
+- 判据不是「重跑变绿」，而是**跨线程并发进 JS 的次数归零** —— 那就要插桩计数。
+  注意 Kotlin 侧的 `System.err.println` **不出现在控制台**：Gradle 默认不转发测试进程的
+  stdout/stderr，要去 `shared/build/test-results/jvmTest/*.xml` 的 `<system-err>` 里数
+  （native 侧 `fprintf` 走的是另一条路，见下节）。
 
 ---
 
