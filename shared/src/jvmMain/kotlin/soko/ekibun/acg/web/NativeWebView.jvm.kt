@@ -518,7 +518,7 @@ public object NativeWebView {
     }
   }
 
-  // ---- native ----
+  // ---- native 方法（JNI 导出）----
   private external fun nativeStart(
     callback: Any,
     userDataDir: String,

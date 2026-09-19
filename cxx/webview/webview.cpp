@@ -1,42 +1,40 @@
-/*
- * webview.cpp —— 自研的 Windows WebView2 原生宿主
- *
- * 请求钩子直接接在引擎的 `add_WebResourceRequested` +
- * `AddWebResourceRequestedFilter(L"*", ALL)` 上：含全部子资源，也拿得到
- * `Range` 这类请求头。
- *
- * 两种用法共用**同一个 environment**（因此同一份 user data folder、
- * 同一个浏览器进程、**同一份 cookie**）：
- *
- *   后台任务（background task）
- *     隐藏顶层窗口 + 拦截 + 注入脚本 + 一次性取结果。对齐 Android 侧
- *     「用完即弃」的语义。
- *
- *   嵌入视图（embedded view / 可见 WebView）
- *     建一个独立 HWND（先是隐藏的顶层 `WS_POPUP`），由 `nativeViewAttach`
- *     经 JAWT 从 AWT 组件（`SwingPanel { Canvas() }` 里的 Canvas）取到父 HWND，
- *     `SetParent` + 改 `WS_CHILD` 挂进去，尺寸由 `fitViewToParent`
- * 按父窗口客户区对齐 —— 完全不依赖任何 UI 框架的原生互操作层。
- *
- * 结构（照 cxx/quickjs/quickjs.cpp 的路子，直接编成 SHARED 库、导出 JNI）：
- *
- *   1. 一条**专用的 WebView 线程**，`CoInitializeEx(APARTMENTTHREADED)`
- * 后建一个永不显示的顶层窗口当消息泵宿主，再在同一线程上建
- *      `ICoreWebView2Environment`。
- *
- *   2. WebView2 的 COM 对象是 STA、线程亲和的，只能在创建它的线程上调用；而窗口
- *      的消息也只会在创建它的线程上派发。JNI 是从随便哪条 JVM 线程进来的，所以
- *      一切「建窗口 / 调 COM」都经由 `postTask()` 投到 WebView 线程执行。
- *
- *   3. WebView2 的事件回调**一律不直接干活**，而是 `postTask` 出去再干 —— 在
- * COM 回调里 `Close()` controller 是文档明确不支持的（可能死锁）。唯一的例外是
- *      请求拦截回调，它必须**同步**给出结论（见 RequestHandler::Invoke）。
- *
- * WebView2Loader.dll 不引入 import lib，运行时按「已加载 → 本 DLL 同目录 →
- * 裸名字」 的顺序 `LoadLibrary`。JNI 库是被 `System.load`
- * 到临时目录的，那个目录不在任何默认搜索路径里，所以「本 DLL
- * 同目录」这一档是必需的。
- */
+// webview.cpp —— 自研的 Windows WebView2 原生宿主
+//
+// 请求钩子直接接在引擎的 `add_WebResourceRequested` +
+// `AddWebResourceRequestedFilter(L"*", ALL)` 上：含全部子资源，也拿得到
+// `Range` 这类请求头。
+//
+// 两种用法共用**同一个 environment**（因此同一份 user data folder、
+// 同一个浏览器进程、**同一份 cookie**）：
+//
+//   后台任务（background task）
+//     隐藏顶层窗口 + 拦截 + 注入脚本 + 一次性取结果。对齐 Android 侧
+//     「用完即弃」的语义。
+//
+//   嵌入视图（embedded view / 可见 WebView）
+//     建一个独立 HWND（先是隐藏的顶层 `WS_POPUP`），由 `nativeViewAttach`
+//     经 JAWT 从 AWT 组件（`SwingPanel { Canvas() }` 里的 Canvas）取到父 HWND，
+//     `SetParent` + 改 `WS_CHILD` 挂进去，尺寸由 `fitViewToParent`
+//     按父窗口客户区对齐 —— 完全不依赖任何 UI 框架的原生互操作层。
+//
+// 结构（照 cxx/quickjs/quickjs.cpp 的路子，直接编成 SHARED 库、导出 JNI）：
+//
+//   1. 一条**专用的 WebView 线程**，`CoInitializeEx(APARTMENTTHREADED)`
+//      后建一个永不显示的顶层窗口当消息泵宿主，再在同一线程上建
+//      `ICoreWebView2Environment`。
+//
+//   2. WebView2 的 COM 对象是 STA、线程亲和的，只能在创建它的线程上调用；而窗口
+//      的消息也只会在创建它的线程上派发。JNI 是从随便哪条 JVM 线程进来的，所以
+//      一切「建窗口 / 调 COM」都经由 `postTask()` 投到 WebView 线程执行。
+//
+//   3. WebView2 的事件回调**一律不直接干活**，而是 `postTask` 出去再干 —— 在
+//      COM 回调里 `Close()` controller 是文档明确不支持的（可能死锁）。
+//      唯一的例外是请求拦截回调，它必须**同步**给出结论
+//      （见 RequestHandler::Invoke）。
+//
+// WebView2Loader.dll 不引入 import lib，运行时按「已加载 → 本 DLL 同目录 →
+// 裸名字」的顺序 `LoadLibrary`。JNI 库是被 `System.load` 到临时目录的，
+// 那个目录不在任何默认搜索路径里，所以「本 DLL 同目录」这一档是必需的。
 
 #include <jni.h>
 #include <objbase.h>

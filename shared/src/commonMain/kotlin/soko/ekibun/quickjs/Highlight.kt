@@ -25,7 +25,7 @@ object Highlight {
             return 1
           }
         '\\' -> input.offset++
-        '\n' -> if (sep != '`') return -2 // err
+        '\n' -> if (sep != '`') return -2 // 出错
       }
     }
     return -1

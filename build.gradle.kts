@@ -1,6 +1,6 @@
 plugins {
-  // this is necessary to avoid the plugins to be loaded multiple times
-  // in each subproject's classloader
+  // 这里必须 `apply false`，否则插件会在每个子项目各自的 classloader 里
+  // 再加载一遍
   alias(libs.plugins.androidApplication) apply false
   alias(libs.plugins.androidMultiplatformLibrary) apply false
   alias(libs.plugins.composeMultiplatform) apply false

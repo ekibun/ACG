@@ -81,11 +81,32 @@
   `:shared:jvmTest` 以 exit 3 结束（"finished with non-zero exit value 3"），
   测试结果目录里只有 `InitJsTest` 的半份 XML（`tests=4 skip=1`）；
   第二次（`--rerun-tasks` 原样重跑）**59/59 全绿**。
-  日志留在本机：`.workbuddy/log/gate10-jvmtest.txt`（崩）与 `gate11-jvmtest-retry.txt`（绿）。
+  当次日志是临时件（`log/` 下），2026-09-19 已按该目录「用完清空」的约定删除；结论即上文。
   这个 assert 与 `init.js` 文件头记的那个**是同一个**（quickjs.c:2464）—— 只要进程里还有
   没释放的 JS 对象，`JS_FreeRuntime` 就直接 abort，不会报错。当次改动只有注释，可排除。
   另注意第一次跑时 `InitJsTest` 是 `tests=4 skip=1`，第二次是 `tests=5 skip=0`：
   **用例数会随环境浮动**，别拿单次 XML 当基线。
+- **2026-09-19 下午（F4 注释统一那批）换了个崩点，命中率还很高**：本轮**只改注释**
+  （已用 `.workbuddy/comment-audit/check-code-identical.py` 机械证明：10 个代码文件剥掉注释后
+  代码骨架**逐 token 相同**，见该目录 `code-identical-check.txt`）。全量 `:shared:jvmTest`
+  跑了 4 次 —— **崩 3 次、绿 1 次**。
+  崩的形态与上面那条不同：不是 `JS_FreeRuntime` 的泄漏断言，而是
+  `EXCEPTION_ACCESS_VIOLATION`；三次的故障帧 **pc 偏移各不相同**
+  （`quickjs.dll+0x227c2` ×2、`+0x17dfb`），访问地址也从「读 `0x18`」变成「写 `0x8`」。
+  但三次的 **Java 栈完全一致**：`WebviewJsTest.loadInit` → `JSInvokable.invoke` →
+  `JSFunction.invoke` → `QuickJS$Context$JSValue.jsCall` → `QuickJS.jsToJava`，
+  只是落在不同用例上（`interceptCallbackCanBeInvokedFromKotlin` /
+  `interceptResultIsUnwrapped` / `nonJsonScriptResultIsReturnedAsIs`）。
+  **决定性对照**：同一条命令单独跑 `--tests "soko.ekibun.acg.engine.WebviewJsTest"`
+  是 **7/7 全绿**（含前两个"崩过"的用例）。
+  ⇒ 指向**用例顺序 / 跨用例残留导致的堆破坏**（pc 每次都变、访问方向也变，是 use-after-free
+  的典型特征），不是某个用例自身写错。
+  证据原件（`log/` 下的门禁输出、`shared/hs_err_pid*.log`）都是临时件，
+  2026-09-19 已清理；复现用上面那条全量命令即可，不需要其他材料。
+- **一条线索（证据不足，别急着动）**：崩点路径 `jsToJava` 恰好经过 `f50f52a` 给
+  `QuickJS.Context.reuseWrapper` 补 `dup()` 的那个复用分支。但**同一次提交之后**的全量测试
+  当时是 59/59 绿的，所以不能据此断定是它引入的。要动先做对照实验（在 `f50f52a^` 上重复跑全量），
+  **别直接把 `dup()` 撤掉**。
 
 ### B3. 测试报错 / 日志存在非英文输出
 
@@ -203,21 +224,6 @@
 - **现状**：`shared/build.gradle.kts` 引入了 `viewmodel-compose`，但代码里没有 `ViewModel` / `StateFlow`
   / `collectAsState`。它会误导 agent 以为"项目选了 MVVM"。
 - **完成判据**：确认确实不需要就删掉依赖；需要就先用起来再留。
-
----
-
-## F. 风格基线的落地（`.agents/skills/coding-style/`）
-
-### F4. 存量注释统一到中文 + 统一格式
-
-- **现状**（同一份扫描）：自有代码注释行**含中文 1519、纯 ASCII 788**
-  （含 `*` / `*/` 这类块结构行，会略微高估 ASCII 一侧）。分布：`.kt` 982 / 480、
-  `.cpp` 515 / 302、`.kts` 22 / 6。最脏的是 `cxx/quickjs/quickjs.cpp`（2 中文 / 102 ASCII，近乎全英文）；
-  反向样本是 `cxx/webview/webview.cpp`（499 / 190，以中文为主）。
-- **为什么现在没做**：全仓翻译注释是一次独立清扫，且与 A1（清理**错误**注释）容易互相掩盖。
-- **完成判据**：范围内注释一律中文（标识符、术语、报错与日志原文保持英文），形式按
-  `.agents/skills/coding-style/references/comments.md`。
-- **建议与 A1 合并成同一次清扫**：先按 A1 删掉被证伪的注释，再按本条把剩下的译成中文并统一形式。
 
 ---
 

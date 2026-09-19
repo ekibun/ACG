@@ -124,7 +124,7 @@ class FFPlayer(
 
     val newPts = PTS(oldPts.streams, ts, base = ts)
     pts = newPts
-    // remove cache frame
+    // 清掉缓存的帧
     frames.clear()
     // flush codec：丢弃解码器内部的参考帧历史 / 重排缓冲。
     // 与 drain（sendPacket(NULL) 取残余尾帧）是两件事，不能互相替代。
@@ -137,7 +137,7 @@ class FFPlayer(
     // 落点靠下面的"丢帧收敛"补齐。
     if (pts != newPts) return@withContext
     super.seekTo(ts, stream, minTs, maxTs, flags)
-    // seek to next frame
+    // 跳到下一帧
     if (pts != newPts) return@withContext
     if (newPts.streams.containsKey(AVMediaType.VIDEO)) {
       resume(!pauseAtSeekTo)
@@ -193,11 +193,11 @@ class FFPlayer(
                   val muteOnNextFrame = {
                     codecType == AVMediaType.AUDIO && onNextFrame?.isActive == true
                   }
-                  // decode frame
+                  // 解码帧
                   if (!muteOnNextFrame()) playback?.postFrame(codecType, frame)
                   lastUpdate?.join()
                   if (!isPlaying()) return@updateJob
-                  // wait video
+                  // 等视频追上主时钟
                   if (codecType == AVMediaType.VIDEO && onNextFrame?.isActive != true) {
                     while (frame.timeStamp > pts.now(playback?.speedRatio ?: 1f)) {
                       delay(1.milliseconds)
@@ -207,20 +207,18 @@ class FFPlayer(
                   if (muteOnNextFrame()) return@updateJob
                   val timeStamp = playback?.flushFrame(codecType, frame) ?: -1
                   if (!isPlaying()) return@updateJob
-              /*
-               * seek 后的丢帧收敛（ffplay frame_drops_early）：
-               *   diff = dpts - master_clock;  主时钟 == resyncTo
-               *   |diff| < AV_NOSYNC_THRESHOLD && diff < 0  ->  解码后立刻丢
-               *
-               * 必须放在 flushFrame 之后：音频路径的 flushFrame 会把解码器的
-               * 重采样延迟（前导静音）折算出来，用它才能拿到真正要上屏的时间戳，
-               * 否则每帧都会被误判成超前主时钟而全部播出去。
-               *
-               * 只对视频做：音频丢帧会在数据流里留下缺口 -> 可听见的杂音；
-               * ffplay 的丢帧阈值事实上也只对视频生效。音频照样更新
-               * relate（下面 `pts.update(timeStamp)`），时钟因此能先跳到目标，
-               * 视频随后跟上来。
-               */
+                  // seek 后的丢帧收敛（ffplay frame_drops_early）：
+                  //   diff = dpts - master_clock;  主时钟 == resyncTo
+                  //   |diff| < AV_NOSYNC_THRESHOLD && diff < 0  ->  解码后立刻丢
+                  //
+                  // 必须放在 flushFrame 之后：音频路径的 flushFrame 会把解码器的
+                  // 重采样延迟（前导静音）折算出来，用它才能拿到真正要上屏的时间戳，
+                  // 否则每帧都会被误判成超前主时钟而全部播出去。
+                  //
+                  // 只对视频做：音频丢帧会在数据流里留下缺口 -> 可听见的杂音；
+                  // ffplay 的丢帧阈值事实上也只对视频生效。音频照样更新
+                  // relate（下面 `pts.update(timeStamp)`），时钟因此能先跳到目标，
+                  // 视频随后跟上来。
                   if (codecType == AVMediaType.VIDEO &&
                     resyncTo != null &&
                     timeStamp >= 0 &&
@@ -265,7 +263,7 @@ class FFPlayer(
             break
           }
           sendingPacket++
-          // for downloading
+          // 等下载（流还没就绪）
           if (pts.streams.isEmpty()) {
             sendingPacket--
             continue

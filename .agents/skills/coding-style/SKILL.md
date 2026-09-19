@@ -14,7 +14,8 @@ agent_created: true
 **这是目标基线，不是对现状的描述。** 缩进、通配符 import、尾随逗号这几项**已由工具执行**
 （正本是根 `.editorconfig` 与 `.clang-format`，跑 `ktlintFormat` / `clang-format -i` 即可），
 且 **2026-09-16 已对全仓跑过一次**（`webview.cpp` 的 4 空格遗留也是那次整篇重排掉的）；
-只剩**注释中英混杂**。所以**不要拿「周围代码就是这么写的」当理由沿用**：新代码按本基线写。
+注释的语言与形式 **2026-09-19 也已统一**（见
+[`references/comments.md`](./references/comments.md) 第五节）。所以**不要拿「周围代码就是这么写的」当理由沿用**：新代码按本基线写。
 格式化工具自身的两个坑 —— `ktlintFormat` 会误删/误加 import、compose-rules 的
 `preview-public-check` 对本项目是误报 —— 见 [`references/kotlin.md`](./references/kotlin.md)。
 

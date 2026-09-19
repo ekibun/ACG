@@ -121,16 +121,14 @@ class HttpIO(
   private fun getResponseBlocking(): Response? {
     var rsp = cachedRsp ?: getRange(offset)
     if (rsp.offset + rsp.available < offset) {
-      /*
-       * [////buffer////]   |
-       *                  offset
-       */
+      // [////buffer////]   |
+      //                  offset
       val newRsp = getRange(offset)
       if (newRsp.offset + newRsp.available > rsp.offset + rsp.available) {
         rsp.close()
         rsp = newRsp
       } else {
-        // not support content-range
+        // 服务器不支持 content-range
         newRsp.close()
       }
       // consume：把网络游标推进到 offset。数据没到就退出，让调用方稍后重试。
@@ -145,16 +143,12 @@ class HttpIO(
       }
       rsp.takeOut(offset - rsp.offset)
     } else if (rsp.offset <= offset) {
-      /*
-       * [///|///buffer///////]
-       *   offset
-       */
+      // [///|///buffer///////]
+      //   offset
       rsp.takeOut(offset - rsp.offset)
     } else {
-      /*
-       *   |    [////buffer////]
-       * offset
-       */
+      //   |    [////buffer////]
+      // offset
       rsp.close()
       cachedRsp = null
       return getResponseBlocking()

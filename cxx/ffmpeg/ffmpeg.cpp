@@ -197,19 +197,17 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvCodec_initNative(
   if (ctx) avcodec_free_context(&ctx);
   return 0;
 }
-/*
- * 解码产出必须按 FFmpeg 的收/发分离协议收集：
- *   - avcodec_send_packet() 返回 AVERROR(EAGAIN)
- * 表示"输入队列满"，此时必须先收帧；
- *   - avcodec_receive_frame() 必须循环调用，直到返回
- * AVERROR(EAGAIN)（需要更多输入） 或 AVERROR_EOF（已 drain 完）。 一个 packet
- * 在 B 帧/参考帧较多的编码下可能产出 0 帧（帧被解码器内部缓存）或多帧，
- * 所以这里返回的是 AvFrame 数组而不是单帧。
- *
- * 注意：AVCodecContext::opaque 是 FFmpeg 保留的用户数据字段，不能挪作帧缓存。
- * 每次 receive_frame 前都用一个临时 AVFrame，拿到帧就把所有权转交给 Java 侧
- * （由 AvFrame.closeNative -> av_frame_free 释放）。
- */
+// 解码产出必须按 FFmpeg 的收/发分离协议收集：
+//   - avcodec_send_packet() 返回 AVERROR(EAGAIN) 表示"输入队列满"，
+//     此时必须先收帧；
+//   - avcodec_receive_frame() 必须循环调用，直到返回 AVERROR(EAGAIN)
+//     （需要更多输入）或 AVERROR_EOF（已 drain 完）。
+// 一个 packet 在 B 帧/参考帧较多的编码下可能产出 0 帧（帧被解码器内部缓存）
+// 或多帧，所以这里返回的是 AvFrame 数组而不是单帧。
+//
+// 注意：AVCodecContext::opaque 是 FFmpeg 保留的用户数据字段，不能挪作帧缓存。
+// 每次 receive_frame 前都用一个临时 AVFrame，拿到帧就把所有权转交给 Java 侧
+// （由 AvFrame.closeNative -> av_frame_free 释放）。
 static jobjectArray newAvFrameArray(JNIEnv* env, jint size) {
   jclass cls = env->FindClass("soko/ekibun/ffmpeg/AvFrame");
   if (!cls) return nullptr;
@@ -286,19 +284,19 @@ extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_ffmpeg_AvFrame_closeNative(
 
 struct SWContext {
   double speedRatio = 1;
-  // audio
+  // 音频
   int64_t sampleRate = 0;
   int64_t channels = 0;
   int64_t audioFormat = AV_SAMPLE_FMT_NONE;
   uint8_t* audioBuffer = nullptr;
   int64_t audioBufferSize = 0;
-  // video
+  // 视频
   int64_t width = 0;
   int64_t height = 0;
   int64_t videoFormat = AV_SAMPLE_FMT_NONE;
   uint8_t* videoBuffer = nullptr;
   int64_t videoBufferSize = 0;
-  // opaque
+  // opaque：以下都是内部状态
   SwrContext* _swrCtx = nullptr;
   AVChannelLayout _srcChannelLayout;
   AVSampleFormat _srcAudioFormat = AV_SAMPLE_FMT_NONE;
@@ -379,9 +377,8 @@ int64_t postFrameVideo(SWContext* ctx, AVFrame* frame) {
     ctx->_swsCtx = sws_getContext(
         frame->width, frame->height, (AVPixelFormat)frame->format, ctx->width,
         ctx->height,
-        // Must match the pixel format used to size and fill ctx->_videoData
-        // above, otherwise sws_scale writes a different layout than the one
-        // the buffer was allocated for.
+        // 必须和上面给 ctx->_videoData 定尺寸、填数据时用的是同一个像素格式，
+        // 否则 sws_scale 写进来的布局与当初分配的缓冲区对不上。
         (AVPixelFormat)ctx->videoFormat, SWS_POINT, nullptr, nullptr, nullptr);
   }
   if (!ctx->_swsCtx) return -1;

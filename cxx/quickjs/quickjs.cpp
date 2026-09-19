@@ -17,24 +17,22 @@ struct JSRuntimeOpaque {
   JavaVM* javaVm;
   jobject thiz;
   JSClassID javaClassID;
-  // 0 means "no limit"; mirrors qjs' --memory-limit / --stack-size handling.
+  // 0 表示不限制：memoryLimit 为 0 就不调 JS_SetMemoryLimit。
   int64_t memoryLimit;
   int64_t timeoutMs;
   std::chrono::steady_clock::time_point evalStart;
   bool interrupted;
 };
 
-// Two *separate* operations, deliberately not fused:
+// 两件**分开**的事，故意不合成一件：
 //
-//   jsReleaseValue  -> drop one JS reference  (JS_FreeValue)
-//   jsDestroyHandle -> free the heap wrapper  (delete)
+//   jsReleaseValue  -> 放掉一票 JS 引用（JS_FreeValue）
+//   jsDestroyHandle -> 释放堆上的包装（delete）
 //
-// They were previously fused into one jsFreeValue(). That fusion is what made
-// `definePropertyValue` impossible to get right: freeing the wrapper also
-// decremented the JS refcount, so any call site that only wanted to release
-// its wrapper would silently steal a reference. Splitting them lets a handle be
-// reused across several JS operations (each pairing with jsDupValue) while the
-// wrapper is still destroyed exactly once.
+// 以前两者合成一个 jsFreeValue()，`definePropertyValue` 正是因此写不对：释放
+// 包装会顺带把 JS 引用计数减一，于是只想放掉自己包装的调用点会**悄悄偷走**
+// 别人的一票。拆开之后，同一个句柄可以在多次 JS 操作之间复用（每次配一次
+// jsDupValue），而包装仍然只销毁一次。
 void jsReleaseValue(jlong ctx, jlong obj) {
   if (obj == 0) return;
   JS_FreeValue((JSContext*)ctx, *((JSValue*)obj));
@@ -52,16 +50,14 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
   auto opaque = new JSRuntimeOpaque{
       javaVm,     env->NewWeakGlobalRef(ctx),       0,    memory_limit,
       timeout_ms, std::chrono::steady_clock::now(), false};
-  // QJS itself defaults to a 1MB stack budget (JS_DEFAULT_STACK_SIZE), the same
-  // order as a JVM thread stack (~1MB) -- deep JS recursion can still walk off
-  // the *host* thread stack and take the whole process down.
-  // The budget must stay well below the hosting thread stack: stack_limit is
-  // computed as stack_top - stack_size, and stack_top already sits inside the
-  // JNI frame. 256KB leaves room for the JNI/Java frames above it.
+  // QuickJS 自己默认给 1MB 的栈预算（JS_DEFAULT_STACK_SIZE），和 JVM 线程栈
+  // （约 1MB）同量级 —— 深递归真把**宿主**线程栈走穿，挂的是整个进程。
+  // 预算必须远低于宿主线程栈：stack_limit = stack_top - stack_size，而
+  // stack_top 已经落在 JNI 帧里了；256KB 是给上面那些 JNI/Java 帧留的余量。
   JS_SetMaxStackSize(rt, stack_size > 0 ? stack_size : 256 * 1024);
   if (memory_limit > 0) JS_SetMemoryLimit(rt, (size_t)memory_limit);
-  // Cooperative interrupt: JS_ExecutePendingJob / JS_Eval poll this callback,
-  // which is what turns `while(true){}` into "InternalError: interrupted".
+  // 协作式中断：JS_ExecutePendingJob / JS_Eval 会轮询这个回调，`while(true){}`
+  // 就是靠它变成 "InternalError: interrupted" 的。
   JS_SetInterruptHandler(
       rt,
       [](JSRuntime* rt, void*) -> int {
@@ -91,10 +87,9 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
             (jstring)env->CallObjectMethod(opaque->thiz, load, javaStr);
         env->DeleteLocalRef(javaStr);
         if (retJava == nullptr) {
-          // quickjs expects the loader to return NULL *with* a pending
-          // exception (see js_host_resolve_imported_module). Returning NULL
-          // bare makes JS_LoadModuleInternal report whatever stale exception
-          // happens to be sitting in the runtime instead.
+          // QuickJS 要求 loader 返回 NULL 时**必须**挂着一个待处理异常
+          // （见 js_host_resolve_imported_module）。光返回 NULL，就会由
+          // JS_LoadModuleInternal 去报运行期里恰好残留的那个旧异常。
           JS_ThrowReferenceError(ctx, "could not load module '%s'",
                                  module_name);
           return nullptr;
@@ -106,7 +101,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
         env->ReleaseStringUTFChars(retJava, str);
         env->DeleteLocalRef(retJava);
         if (JS_IsException(func_val)) return nullptr;
-        /* the module is already referenced, so we must free it */
+        // 模块已经被引用过了，这里把这个 JSValue 放掉。
         auto m = (JSModuleDef*)JS_VALUE_GET_PTR(func_val);
         JS_FreeValue(ctx, func_val);
         return m;
@@ -117,7 +112,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
   if (!JS_IsRegisteredClass(rt, opaque->javaClassID)) {
     JSClassDef def{
         "JavaObject",
-        // destructor
+        // 类析构回调：把挂在 JS 对象上的 Java 全局引用放掉
         [](JSRuntime* rt, JSValue obj) noexcept {
           auto opaque = (JSRuntimeOpaque*)JS_GetRuntimeOpaque(rt);
           if (opaque == nullptr) return;
@@ -167,9 +162,9 @@ Java_soko_ekibun_quickjs_QuickJS_jsNewFloat64(JNIEnv*, jclass, jlong ctx,
 extern "C" JNIEXPORT jlong JNICALL
 Java_soko_ekibun_quickjs_QuickJS_jsNewArrayBuffer(JNIEnv* env, jclass,
                                                   jlong ctx, jbyteArray obj) {
-  // JS_NewArrayBufferCopy copies the bytes, so the Java array must be released
-  // (JNI_ABORT = no copy back) before returning. Leaving it pinned leaks a
-  // local ref / pinned buffer on every ArrayBuffer construction.
+  // JS_NewArrayBufferCopy 会复制字节，所以返回前必须把 Java 数组放掉
+  // （JNI_ABORT = 不回写）。留着不放的话，每构造一个 ArrayBuffer 就漏一个
+  // local ref / pinned buffer。
   auto len = env->GetArrayLength(obj);
   auto elems = env->GetByteArrayElements(obj, nullptr);
   auto ret = (jlong) new JSValue(
@@ -197,19 +192,17 @@ Java_soko_ekibun_quickjs_QuickJS_definePropertyValue(JNIEnv*, jclass, jlong ctx,
   auto ret = JS_DefinePropertyValue((JSContext*)ctx, *(JSValue*)obj, atom,
                                     *(JSValue*)v, flags);
   JS_FreeAtom((JSContext*)ctx, atom);
-  // This function takes ownership of BOTH handles and fully retires them:
+  // 这个函数收下 k / v **两个**句柄，并让它们彻底退场：
   //
-  //   v -- JS_DefinePropertyValue's body ends with `JS_FreeValue(ctx, val)`, so
-  //        the caller's reference is consumed by the callee (the property keeps
-  //        its own, separate reference). Releasing v again here would be a
-  //        double free -- that was the exact cause of the
-  //        `js_rc(p)->ref_count > 0` assertion in gc_decref_child.
-  //   k -- JS_ValueToAtom only borrows it, so this reference is ours to drop.
+  //   v —— JS_DefinePropertyValue 的函数体以 `JS_FreeValue(ctx, val)` 收尾，
+  //        调用方那一票已经被被调方吃掉（属性自己另持一票）。这里再放一次就是
+  //        双重释放 —— gc_decref_child 里那句 `js_rc(p)->ref_count > 0` 断言
+  //        就是这么来的。
+  //   k —— JS_ValueToAtom 只是借用，这一票得我们自己放。
   //
-  // Both wrappers are destroyed as well: every call site is a one-shot "define
-  // this property" operation, and no caller reuses the k/v handle afterwards.
-  // Fusing release+destroy here removes the wrapper leak that an unconsumed
-  // `new JSValue` would otherwise leave on the refs ledger.
+  // 两个包装也一并销毁：每个调用点都是一次性的「定义这个属性」，没人会再用那个
+  // k/v 句柄。把「放引用」与「销毁包装」合在这里做，才不会让没被消费掉的
+  // `new JSValue` 在引用账本上留下一笔。
   jsReleaseValue(ctx, k);
   jsDestroyHandle(k);
   jsDestroyHandle(v);
@@ -235,15 +228,15 @@ Java_soko_ekibun_quickjs_QuickJS_jsDestroyHandle(JNIEnv*, jclass, jlong obj) {
 extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_evaluate(
     JNIEnv* env, jclass, jlong ctx, jstring cmd, jstring name, jint flag) {
   JS_UpdateStackTop(JS_GetRuntime((JSContext*)ctx));
-  // Restart the timeout window for this evaluation.
+  // 每次求值都重新起算超时窗口。
   auto opaque =
       (JSRuntimeOpaque*)JS_GetRuntimeOpaque(JS_GetRuntime((JSContext*)ctx));
   if (opaque != nullptr) {
     opaque->evalStart = std::chrono::steady_clock::now();
     opaque->interrupted = false;
   }
-  // JS_Eval does not take ownership of the source: release both strings after
-  // use, otherwise every evaluate() leaks a pinned copy of the script.
+  // JS_Eval 不接管源码：用完两个字符串都要放掉，否则每次 evaluate() 都会漏
+  // 一份 pinned 的脚本副本。
   auto cmdChars = env->GetStringUTFChars(cmd, nullptr);
   auto cmdLen = env->GetStringUTFLength(cmd);
   auto nameChars = env->GetStringUTFChars(name, nullptr);
@@ -289,9 +282,8 @@ static jobject jsToJavaObject(JNIEnv* env, JSContext* ctx, JSValue obj,
                               std::unordered_map<void*, jobject>& cache);
 
 /**
- * Scalar (non-object) conversion. Objects are delegated to [jsToJavaObject] by
- * the unified [jsToJava] dispatcher below, so this function never has to know
- * about them -- and never returns a silent NULL for one.
+ * 标量（非对象）转换。对象由下面统一的 [jsToJava] 分派器交给 [jsToJavaObject]，
+ * 所以这里根本不必知道对象的存在 —— 也就不会对着对象悄悄返回 NULL。
  */
 static jobject jsToJavaScalar(JNIEnv* env, JSContext* ctx, JSValue obj) {
   int tag = JS_VALUE_GET_TAG(obj);
@@ -324,13 +316,11 @@ static jobject jsToJavaScalar(JNIEnv* env, JSContext* ctx, JSValue obj) {
 }
 
 /**
- * Single entry point for every JS → Java conversion.
+ * 所有 JS → Java 转换的唯一入口。
  *
- * The object case is handled *here* rather than at each call site. That
- * matters: the recursive conversions (array elements, a promise's `then`)
- * previously called a scalar-only helper, so any object reached through them
- * silently became NULL. Keeping the dispatch in one place makes that
- * impossible.
+ * 对象分支放在**这里**而不是各个调用点，是有原因的：递归转换（数组元素、promise
+ * 的 `then`）以前走的是只认标量的辅助函数，于是顺着它们碰到的对象一律悄悄
+ * 变成 NULL。把分派收在一处，这种错就不可能再发生。
  */
 jobject jsToJava(JNIEnv* env, JSContext* ctx, JSValue obj,
                  std::unordered_map<void*, jobject> cache =
@@ -341,10 +331,9 @@ jobject jsToJava(JNIEnv* env, JSContext* ctx, JSValue obj,
 }
 
 /**
- * Object/function branch of [jsToJava]. Split out because it is the only part
- * that has to consult the persistent wrapper registry, and because that
- * registry pre-seeds `cache` -- the split keeps the scalar fast path above free
- * of any Java upcall.
+ * [jsToJava] 的对象 / 函数分支。单独拆出来，因为只有它要查那张常驻包装表，
+ * 而那张表会预先往 `cache` 里塞东西 —— 拆开之后，上面那条标量快路径不夹带
+ * 任何 Java 上行调用。
  */
 static jobject jsToJavaObject(JNIEnv* env, JSContext* ctx, JSValue obj,
                               std::unordered_map<void*, jobject>& cache) {
@@ -352,10 +341,9 @@ static jobject jsToJavaObject(JNIEnv* env, JSContext* ctx, JSValue obj,
     size_t size;
     uint8_t* buf = JS_GetArrayBuffer(ctx, &size, obj);
     if (!buf) {
-      // This is only a type probe: JS_GetArrayBuffer already threw a
-      // TypeError ("ArrayBuffer object expected") for any other object,
-      // and leaving it pending poisons every later API that returns NULL
-      // without throwing. Drop it.
+      // 这里只是探个类型：非 ArrayBuffer 的对象，JS_GetArrayBuffer 已经抛了
+      // TypeError（"ArrayBuffer object expected"）。把它留着不清理，后面每个
+      // 「返回 NULL 却不抛异常」的 API 都会被这个旧异常污染。放掉它。
       JS_FreeValue(ctx, JS_GetException(ctx));
     } else {
       jbyteArray arr = env->NewByteArray((jsize)size);
@@ -367,10 +355,9 @@ static jobject jsToJavaObject(JNIEnv* env, JSContext* ctx, JSValue obj,
   auto opaque = (JSRuntimeOpaque*)JS_GetRuntimeOpaque(JS_GetRuntime(ctx));
   auto javaObj = JS_GetOpaque(obj, opaque->javaClassID);
   if (javaObj) return (jobject)javaObj;
-  // A wrapper for this very object may already exist from an earlier, separate
-  // conversion. It is registered on the Kotlin side (see
-  // `Context.wrapperCache`) and has to take precedence over the per-call
-  // `cache`, otherwise identity would only hold *within* one traversal.
+  // 这个对象可能早在另一次转换里就造过包装。它登记在 Kotlin 侧
+  // （见 `Context.wrapperCache`），优先级必须高于每次调用自带的那张 `cache`，
+  // 否则「同一个对象给同一个包装」只会在**一次**遍历里成立。
   auto ptr = JS_VALUE_GET_PTR(obj);
   jclass ctxClazz = env->GetObjectClass(opaque->thiz);
   auto persistent = env->CallObjectMethod(
@@ -378,9 +365,9 @@ static jobject jsToJavaObject(JNIEnv* env, JSContext* ctx, JSValue obj,
       env->GetMethodID(ctxClazz, "peekWrapper", "(J)Ljava/lang/Object;"),
       (jlong)ptr);
   if (persistent != nullptr) {
-    // Reuse it: the persistent entry already owns the wrapper's original
-    // reference, so take one more for the caller and remember the pair so the
-    // caller's own frame keeps the ledger balanced.
+    // 复用：常驻表那一份已经持着包装原来那一票，这里再为调用方单独记一票
+    // （见 `reuseWrapper` 里的 `dup()`），并把配对写进 `cache`，好让调用方
+    // 那一层自己把账平掉。
     auto wrapper = env->CallObjectMethod(
         opaque->thiz,
         env->GetMethodID(ctxClazz, "reuseWrapper",
@@ -392,9 +379,8 @@ static jobject jsToJavaObject(JNIEnv* env, JSContext* ctx, JSValue obj,
   if (cache.find(ptr) != cache.end()) return cache[ptr];
   auto remember = [&](jobject wrapper) -> jobject {
     cache[ptr] = wrapper;
-    // Publish for later conversions. A fresh wrapper owns exactly one
-    // reference, so it is registered here with the same handle the caller will
-    // later retire.
+    // 登记给后续转换用。新造的包装恰好持一票，所以这里登记的句柄就是调用方
+    // 将来要退场的那一个。
     env->CallVoidMethod(
         opaque->thiz,
         env->GetMethodID(ctxClazz, "registerWrapper", "(JLjava/lang/Object;)V"),
@@ -410,13 +396,11 @@ static jobject jsToJavaObject(JNIEnv* env, JSContext* ctx, JSValue obj,
   } else if (JS_IsError(ctx, obj)) {
     return jsToThrowable(env, ctx, obj);
   } else if (JS_IsPromise(ctx, obj)) {
-    // NOT registered in the persistent wrapper cache: the promise's wrapper is
-    // driven by `wrapJSPromiseAsync`, which needs a live `then` callback. A
-    // cached entry would be replayed *after* that callback (and its `then`
-    // reference) were already retired, exactly like the reused Deferred in
-    // flutter_qjs' deferred test. Same-value-every-time is preserved inside a
-    // single traversal by `cache` below, where the object identity is still
-    // valid.
+    // **不**登记进那张常驻包装表：promise 的包装由 `wrapJSPromiseAsync` 驱动，
+    // 而它需要一个还活着的 `then` 回调。缓存条目会在那个回调（连同它的 `then`
+    // 引用）退场**之后**才被重放 —— 就是 flutter_qjs deferred 测试里那个被复用
+    // 的 Deferred 的下场。同一次遍历内仍由下面的 `cache` 保证「同一个对象给
+    // 同一个包装」，因为那时候对象身份还有效。
     jclass clazz = env->GetObjectClass(opaque->thiz);
     jmethodID wrap = env->GetMethodID(
         clazz, "wrapJSPromiseAsync",
@@ -440,9 +424,8 @@ static jobject jsToJavaObject(JNIEnv* env, JSContext* ctx, JSValue obj,
     cache[ptr] = list;
     for (int i = 0; i < arrLen; i++) {
       auto jsprop = JS_GetPropertyUint32(ctx, obj, i);
-      // Convert exactly once: the recursive call registers the result in
-      // `cache`, so a second call for the same element would hand back a local
-      // ref that has already been deleted below.
+      // 只转一次：递归调用会把结果登记进 `cache`，同一个元素再转一次，拿到的
+      // 会是下面已经删掉的那个 local ref。
       auto jval = jsToJava(env, ctx, jsprop, cache);
       env->SetObjectArrayElement(list, i, jval);
       env->DeleteLocalRef(jval);
@@ -466,10 +449,9 @@ jobject jsToJavaEntry(JNIEnv* env, JSContext* ctx, JSValue obj) {
 extern "C" JNIEXPORT jobject JNICALL Java_soko_ekibun_quickjs_QuickJS_jsToJava(
     JNIEnv* env, jclass, jlong ctx, jlong obj) {
   auto ret = jsToJavaEntry(env, (JSContext*)ctx, *(JSValue*)obj);
-  // jsToJava consumes the reference it is given (JS_GetProperty / JS_Call
-  // results are handed over, not borrowed), so drop it here. The wrapper itself
-  // survives
-  // -- callers may still hold it, and its lifetime is now managed explicitly.
+  // jsToJava 会吃掉给它的那一票（JS_GetProperty / JS_Call 的返回值是**交出来**
+  // 而不是借出），所以在这里放掉。包装本身不受影响 —— 调用方可能还握着它，它的
+  // 生命周期之后归显式管理。
   jsReleaseValue(ctx, obj);
   return ret;
 }
@@ -514,8 +496,8 @@ extern "C" JNIEXPORT jlong JNICALL
 Java_soko_ekibun_quickjs_QuickJS_jsThrowError(JNIEnv*, jclass, jlong ctx,
                                               jlong err) {
   JS_Throw((JSContext*)ctx, JS_DupValue((JSContext*)ctx, *(JSValue*)err));
-  // JS_Throw took its own reference via JS_DupValue, so drop ours; the handle
-  // itself is a one-shot from javaToJs and is retired with it.
+  // JS_Throw 自己用 JS_DupValue 记了一票，所以把我们这份放掉；这个句柄从
+  // javaToJs 出来就是一次性的，跟着一起退场。
   jsReleaseValue(ctx, err);
   jsDestroyHandle(err);
   return (jlong) new JSValue(JS_EXCEPTION);
@@ -536,9 +518,8 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_jsCall(
   JSRuntime* rt = JS_GetRuntime((JSContext*)ctx);
   JS_UpdateStackTop(rt);
   auto longArr = env->GetLongArrayElements(argv, nullptr);
-  // JS_Call only borrows argv; the JSValue structs themselves stay owned by
-  // the caller (Kotlin frees every argument right after the call returns).
-  // Use stack storage to avoid leaking a heap array on every call.
+  // JS_Call 只是借用 argv，那些 JSValue 结构仍归调用方（Kotlin 在调用返回后
+  // 立刻把每个参数放掉）。这里用 js_malloc 临时铺一份、调完立刻 js_free。
   auto argvJs = (JSValue*)js_malloc((JSContext*)ctx,
                                     sizeof(JSValue) * (argc > 0 ? argc : 1));
   if (argvJs == nullptr) {
@@ -564,13 +545,13 @@ Java_soko_ekibun_quickjs_QuickJS_executePendingJob(JNIEnv*, jclass, jlong ctx) {
 }
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_soko_ekibun_quickjs_QuickJS_jsNewPromise(JNIEnv* env, jclass, jlong ctx) {
-  // JS_NewPromiseCapability writes two freshly owned references into the array,
-  // so each gets its own wrapper and no dup is needed.
+  // JS_NewPromiseCapability 往数组里写两个**新持有**的引用，所以各自造一个
+  // 包装即可，不用再 dup。
   auto resolving_funcs = new JSValue[2];
   auto promise = (jlong) new JSValue(
       JS_NewPromiseCapability((JSContext*)ctx, resolving_funcs));
-  // Transfer the two resolving functions into their own single-value allocation
-  // so each wrapper can be destroyed independently by jsDestroyHandle().
+  // 把 resolve / reject 两个函数各自搬进单独的分配里，这样它们的包装可以分别
+  // 被 jsDestroyHandle() 销毁。
   auto resolve = (jlong) new JSValue(resolving_funcs[0]);
   auto reject = (jlong) new JSValue(resolving_funcs[1]);
   delete[] resolving_funcs;
@@ -596,9 +577,8 @@ Java_soko_ekibun_quickjs_QuickJS_getPropertyValue(JNIEnv*, jclass, jlong ctx,
   auto atom = JS_ValueToAtom((JSContext*)ctx, *(JSValue*)k);
   auto ret = JS_GetProperty((JSContext*)ctx, *(JSValue*)obj, atom);
   JS_FreeAtom((JSContext*)ctx, atom);
-  // `k` is a one-shot key handle produced by the caller purely for this lookup:
-  // JS_ValueToAtom only borrows it, so we drop its reference and retire the
-  // wrapper. Returning `ret` hands the caller a *new* owned reference.
+  // `k` 是调用方只为这次查表造的一次性键句柄：JS_ValueToAtom 只是借用，所以
+  // 我们放掉它的引用、让包装退场。返回的 `ret` 才是交给调用方**新持有**的一票。
   jsReleaseValue(ctx, k);
   jsDestroyHandle(k);
   return (jlong) new JSValue(ret);

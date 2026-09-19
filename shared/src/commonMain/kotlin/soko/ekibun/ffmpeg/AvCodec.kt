@@ -71,8 +71,8 @@ class AvCodec(
     withContext(dispatcher) {
       pctx?.let {
         closeNative(it)
-        // Clear the handle so a later sendPacketAndGetFrames cannot reach the
-        // freed decoder context: ensureContext() only rebuilds when pctx==null.
+        // 把句柄清掉，免得之后的 sendPacketAndGetFrames 摸到已经释放的解码器
+        // 上下文：ensureContext() 只在 pctx==null 时才重建。
         pctx = null
       }
     }
