@@ -81,6 +81,14 @@ tasks.named<ProcessResources>("jvmTestProcessResources") {
 
 // 临时调试：把 webview.cpp 的日志打开
 tasks.named<Test>("jvmTest") {
+  // 进程级崩溃（native 段的访问违例之类）时，HotSpot 的现场报告默认落在**进程工作目录**，
+  // 也就是本模块目录 —— 每崩一次就多一个待提交的未跟踪文件。指到 build/ 下，
+  // 跟其他产物一样被 `**/build/` 忽略掉。排查崩溃时去 shared/build/ 找 hs_err_pid*.log。
+  jvmArgs("-XX:ErrorFile=${layout.buildDirectory.get().asFile.resolve("hs_err_pid%p.log")}")
+  // 每个用例各自 ctx.close()：native 段的断言 abort 会连整个测试进程一起带走，
+  // 而 Gradle 默认只汇总结果，崩了就只能从上一轮残留的 XML 去猜死在哪个用例。
+  // 打印逐用例事件才能一眼定位，代价是每轮几十行输出 —— 留着当偶发崩的第一现场。
+  testLogging { events("started", "passed", "skipped", "failed") }
   environment("ACG_WEBVIEW_DEBUG", "1")
   environment("ACG_WEBVIEW_LOG", "${rootProject.layout.projectDirectory.asFile}/build/acg-webview.log")
   // 让 WebView2 把自己那份 Chromium 日志写到 user data folder 下的
