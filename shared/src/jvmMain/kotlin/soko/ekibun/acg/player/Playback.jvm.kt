@@ -29,7 +29,7 @@ import javax.sound.sampled.SourceDataLine
 class DesktopPlayback(
   onFrame: (Long?) -> Unit,
 ) : Playback(onFrame) {
-  private val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+  private val playbackDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
 
   override val sampleRate: Int = 48000
   override val channels: Int = 2
@@ -53,7 +53,7 @@ class DesktopPlayback(
   var frameWrite = 0L
 
   override suspend fun flushAudioBuffer(buf: ByteArray): Int =
-    withContext(dispatcher) {
+    withContext(playbackDispatcher) {
       val out = line
       // 对应 Android 端的 audio.playState != PLAYSTATE_PLAYING 时自动 play()。
       // 必须用 isRunning：向未 start 的 line 写入，缓冲区满后会永久阻塞。
@@ -110,17 +110,17 @@ class DesktopPlayback(
   }
 
   override suspend fun resume() =
-    withContext(dispatcher) {
+    withContext(playbackDispatcher) {
       line.start()
     }
 
   override suspend fun pause() =
-    withContext(dispatcher) {
+    withContext(playbackDispatcher) {
       line.stop()
     }
 
   override suspend fun stop() =
-    withContext(dispatcher) {
+    withContext(playbackDispatcher) {
       val out = line
       out.stop()
       out.flush()
@@ -139,6 +139,6 @@ class DesktopPlayback(
       it.close()
     }
     lineRef = null
-    dispatcher.close()
+    playbackDispatcher.close()
   }
 }

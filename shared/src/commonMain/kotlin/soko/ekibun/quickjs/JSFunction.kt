@@ -17,10 +17,7 @@ class JSFunction(
     vararg argv: Any?,
     thisVal: Any?,
   ): Any? =
-    ctx.runOnDispatcher {
-      // 转换结果也必须留在 JS 线程上：`jsToJava` 要遍历转换出来的对象图，全都在
-      // 碰这个 runtime。丢在调用方线程就等于和 dispatcher 上的
-      // `executePendingJob` / GC 并发进同一个 runtime。
+    withPtrSync {
       ctx.toJava(ctx.jsCallImpl(this, *argv, thisVal = thisVal))
     }
 }

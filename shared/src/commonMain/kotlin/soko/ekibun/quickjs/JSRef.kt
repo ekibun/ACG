@@ -1,5 +1,6 @@
 package soko.ekibun.quickjs
 
+import soko.ekibun.Pointer
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -31,9 +32,25 @@ import java.util.concurrent.atomic.AtomicInteger
  * flutter_qjs 的 `_jsToDart`），所以本类目前唯一的子类是 [JSFunction]。
  */
 open class JSRef internal constructor(
-  val ptr: Long,
+  nativePtr: Long,
   protected val ctx: QuickJS,
-) : AutoCloseable {
+) : Pointer(nativePtr) {
+  /**
+   * 同步读句柄 —— 纯同步、**不做线程校验**（基类那扇已弃用的门，
+   * 见 [soko.ekibun.Pointer.ptr]）。
+   *
+   * 为什么没走挂起那条：本类**不注入 dispatcher**（`Pointer(nativePtr)` 只有一个
+   * 参数），没有可切的归属线程；调用点（`jsCall` / `jsDupValue` / `jsReleaseValue`，
+   * 以及 [JSFunction] 的 `invoke`）也全在 [QuickJS] 的 native 回调链里，没有协程
+   * 上下文可挂起。线程归属由 [QuickJS] 保证 —— 句柄由 native 侧交出来，构造点
+   * 遍布 JNI 回调链。
+   *
+   * `@Suppress` 两个都要：`DEPRECATION` 压的是「读了基类那扇弃用门（`super.ptr`）」，
+   * `OVERRIDE_DEPRECATION` 压的是「覆写了一个弃用成员却没把自己也标成弃用」。
+   */
+  @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+  public override val ptr: Long get() = super.ptr
+
   // 计数与「已销毁」标记都是原子的：`free()` / `close()` 可能来自任意线程
   // （测试线程、WebView 回调线程），而归还动作被投递到 JS 线程上。
   // 普通 Int / Boolean 会丢更新 —— 少一次计量就是提前释放（use-after-free），
@@ -77,8 +94,27 @@ open class JSRef internal constructor(
     if (_refCount.decrementAndGet() <= 0) release()
   }
 
-  /** [free] 的别名，实现 [AutoCloseable] 以便 `use {}`。重复调用安全。 */
-  override fun close() = free()
+  /**
+   * 把**所有票**一次还清，实现 [AutoCloseable] 以便 `use {}`。重复调用安全。
+   *
+   * 与 [free] 的区别正是这里：[free] 是「我少一票」，减不到 0 就什么都不发生；
+   * [close] 是「Kotlin 侧这个持有者已经不可达了」，剩下的票全是垃圾 —— 于是直接把
+   * 计数清零并归还，不等别人来投。
+   *
+   * 若 `close()` 只是 `free()` 的别名，`dup()` 过的值就永远还不掉：`use {}` /
+   * `invokeOnCompletion` 这类自动调用点走的都是 `close()`，而它们只肯减一票，
+   * 于是每个跑过 `dup` 的对象都会在关闭清算里留一条永久的「泄漏」。
+   *
+   * ⚠️ 它会**阻塞等 JS 线程**：归还动作要投递到 [QuickJS] 的 dispatcher 上执行
+   * （见 [release]）。在 JS 线程自己身上调不会死锁（[QuickJS.onJsThreadQuietly]
+   * 会直接就地执行），但在别的线程上调就要等那一条线程空出来。
+   */
+  override fun close() {
+    // 先清零再归还：describe() 里看到的仍是归还前的计数（清算先记录后归还），
+    // 但之后的 dup() 拿不到票（destroyedFlag 已置位会直接抛）。
+    _refCount.set(0)
+    release()
+  }
 
   /**
    * 泄漏诊断用的描述。
@@ -86,7 +122,7 @@ open class JSRef internal constructor(
    * 关闭时若仍有未归零的引用，这里的内容会进入抛出的异常，形如
    * flutter_qjs 的 `"  ADDR\tREF\tTYPE\tPROP"` 行。
    */
-  fun describe(): String = "${javaClass.simpleName}(refs=$refCount, ptr=$ptr)"
+  suspend fun describe(): String = "${javaClass.simpleName}(refs=$refCount, ptr=${ptrValue()})"
 
   /**
    * 真正把引用还给 runtime。
@@ -94,13 +130,14 @@ open class JSRef internal constructor(
    * 登记表与 native 调用都收敛到 JS 线程上：调用方可能在任意线程 `close()`（测试
    * 线程、WebView 回调线程），而那张表只在 JS 线程上被改。`compareAndSet` 保证只有
    * 一个调用者真的去归还。
+   *
+   * 走 [QuickJS.onJsThreadQuietly] 而**不是** [Pointer.withPtr]：后者那套「标记即拒绝」
+   * 会把关闭时的清算一起挡掉 —— 清算是跑在「已标记、未销毁」的窗口里的。投递出去的
+   * 归还还必须**就地执行**（已在 JS 线程上时），否则会排在销毁消息之后。
    */
   internal fun release() {
     if (!destroyedFlag.compareAndSet(false, true)) return
-    ctx.onJsThreadQuietly {
-      ctx.unregister(this)
-      ctx.releaseValue(ptr)
-    }
+    ctx.releaseRef(this)
   }
 }
 

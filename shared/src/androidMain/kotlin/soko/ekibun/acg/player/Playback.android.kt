@@ -24,7 +24,7 @@ class AndroidPlayback(
 ) : Playback(
     onFrame,
   ) {
-  private val dispatcher by lazy {
+  private val playbackDispatcher by lazy {
     Executors.newSingleThreadExecutor().asCoroutineDispatcher()
   }
 
@@ -89,7 +89,7 @@ class AndroidPlayback(
   var frameWrite = 0L
 
   override suspend fun flushAudioBuffer(buf: ByteArray): Int =
-    withContext(dispatcher) {
+    withContext(playbackDispatcher) {
       if (channels == 2 && isMuteVoice) {
         // 左右声道相减（人声消除）。步长是每个采样点的字节数，不是固定 2：
         // native 可能给 8bit(1) / 16bit(2) / float32(4)，按 2 走会串位。
@@ -156,17 +156,17 @@ class AndroidPlayback(
   }
 
   override suspend fun resume() =
-    withContext(dispatcher) {
+    withContext(playbackDispatcher) {
       audio.play()
     }
 
   override suspend fun pause() =
-    withContext(dispatcher) {
+    withContext(playbackDispatcher) {
       audio.pause()
     }
 
   override suspend fun stop() =
-    withContext(dispatcher) {
+    withContext(playbackDispatcher) {
       audio.pause()
       frameWrite = 0
       audio.flush()

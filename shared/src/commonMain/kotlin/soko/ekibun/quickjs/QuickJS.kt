@@ -2,14 +2,15 @@ package soko.ekibun.quickjs
 
 import androidx.annotation.Keep
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import soko.ekibun.Pointer
 import soko.ekibun.jniLoadLibrary
-import java.lang.ref.Cleaner
 import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.concurrent.Executors
@@ -18,19 +19,78 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * 一个独立的 QuickJS runtime。
  *
+ * **本类直接继承 [Pointer]**：句柄要拿 `this` 去 `initContext` 换，而 [Pointer] 的
+ * 构造参数在 super 调用点求值 —— 那时 `this` 还不完整（Kotlin 与 Java 都禁止在
+ * super 实参里引用 `this`）。解法是**覆写 [Pointer.initPtr]**：构造参数留空，句柄由
+ * 本类的属性初始化器算出（那已经晚于 super，`this` 与全部构造参数都可读），于是内部
+ * 那个只为「帮 `QuickJS` 在构造期拿到句柄」而存在的 `Runtime` 子类被拆掉了。
+ *
+ * 构造入口是挂起工厂 [create]：它把构造放到归属 dispatcher 上，这样 [Pointer] 记下的
+ * **构造线程**就等于归属线程（理由见 [Pointer] 类文档「归属 dispatcher + 构造线程」）。
+ *
  * @param moduleHandler 模块加载器，返回 null 表示模块不存在
  * @param stackSize JS 层最大栈空间（字节），<=0 用默认 256KB。必须显著小于
  *   宿主线程栈（JVM 默认约 1MB），否则深递归会撞穿宿主栈导致整个进程崩溃
  * @param memoryLimit 堆内存上限（字节），<=0 表示不限制
  * @param timeout 单次 evaluate/executePendingJob 的超时（毫秒），<=0 表示不限制
  */
-class QuickJS(
+class QuickJS private constructor(
   val moduleHandler: ((String) -> String?)? = null,
   val stackSize: Long = 256 * 1024,
   val memoryLimit: Long = -1,
   val timeout: Long = -1,
-) {
+  /**
+   * 归属线程的执行器：所有 native 调用都投递到这里串行执行，因此多个 [Pointer]
+   * 完全可以共用同一条（ffmpeg 侧的打算）。默认就是共享：[sharedDispatcher]。
+   *
+   * 它同时是**构造参数属性**：`super` 实参里读到的是**参数**，而字段要到 super 返回
+   * 之后才赋值 —— 实参位置上解析到的正是参数本身，所以两种身份都成立。
+   */
+  private val jsDispatcher: CoroutineDispatcher,
+) : Pointer(dispatcher = jsDispatcher) {
   companion object {
+    /**
+     * 构造入口 —— **挂起**，因为构造必须发生在归属线程上。
+     *
+     * 为什么不能直接 `QuickJS(...)`：`initContext` 里 `JS_NewRuntime()` 与
+     * `JS_SetMaxStackSize()` 都会把**调用线程的帧地址**记成 `stack_top`、再据此算
+     * `stack_limit`，而 `js_check_stack_overflow` 是拿**当前帧地址**去比这个界限。
+     * 跨线程建，基准就来自另一条栈：要么假阳性（碰一下就报栈溢出），要么恒为假
+     * （真撞穿宿主线程栈，进程直接挂）。native 侧在 `evaluate` / `jsCall` /
+     * `executePendingJob` 三个入口都会重新 `JS_UpdateStackTop`，基准迟早被纠正 ——
+     * 但那是**没有写进任何断言的巧合**，删掉其中任一处就失效。
+     *
+     * 顺带钉住另一条不变量：[Pointer] 记下的构造线程等于归属线程，[Pointer.withPtrSync]
+     * 的「要不要投递」才判断得准。构造器私有，就是为了不让这两条不变量有绕过去的入口。
+     */
+    suspend fun create(
+      moduleHandler: ((String) -> String?)? = null,
+      stackSize: Long = 256 * 1024,
+      memoryLimit: Long = -1,
+      timeout: Long = -1,
+    ): QuickJS =
+      withContext(sharedDispatcher) {
+        QuickJS(moduleHandler, stackSize, memoryLimit, timeout, sharedDispatcher)
+      }
+
+    /**
+     * [jsDispatcher] 的默认值：**全进程共享一条线程**，线程名 `quickjs`。
+     *
+     * 共享的代价：所有没显式传 dispatcher 的 runtime 在这条线程上**串行** ——
+     * 一个 runtime 跑长任务（或卡在 [timeout] 边界上）会拖住别的 runtime 的操作。
+     * 想独占就显式传一条自己的单线程 dispatcher
+     * （`Executors.newSingleThreadExecutor { r -> Thread(r, "quickjs-xxx") }.asCoroutineDispatcher()`）。
+     *
+     * 在 JS 回调里再建一个 runtime **不会**死锁：[create] 用的是 `withContext`，对**同一个**
+     * dispatcher 走 kotlinx 的 undispatched 快路径，就地构造完就返回。但新 runtime 的操作
+     * 会和外面那些一起排在这条单线程上 —— 在回调里**等**它的结果就是自己等自己。
+     *
+     * ⚠️ 它**从不 shutdown**：共享的东西没有哪一方有权关掉它，所以这条线程活到进程结束。
+     * 反过来的好处是反复建 runtime 不再攒线程（改造前是每个 runtime 一条、同样不关）。
+     */
+    val sharedDispatcher: CoroutineDispatcher =
+      Executors.newSingleThreadExecutor { r -> Thread(r, "quickjs") }.asCoroutineDispatcher()
+
     init {
       jniLoadLibrary("quickjs")
     }
@@ -178,31 +238,9 @@ class QuickJS(
    *
    * 这里刻意用强引用（与 flutter_qjs 的 `_RuntimeOpaque._ref` 一致）：只有强引用才能
    * 保证「还没 close 的对象一定还在册」，从而让清算**确定发生**而不是听天由命等 GC。
-   * 代价是 [Cleaner] 不再作用于这些对象 —— 这不是损失，因为清算已经覆盖了它们；
-   * [Cleaner] 负责的是下面 [cleaner] 注释里说明的另一种情况。
+   * 这也是本类不设 GC 兜底清扫的底气 —— 见 [releaseImpl]。
    */
   private val refs = Collections.newSetFromMap(IdentityHashMap<JSRef, Boolean>())
-
-  /**
-   * 替代已废弃的 `Object.finalize()` 的兜底清扫。
-   *
-   * `finalize` 有两个致命问题：一是在任意 GC 线程执行、无法保证线程安全，二是
-   * JDK 18 起被标记为 deprecated for removal。[Cleaner] 把清理动作排队到守护线程
-   * 执行，并且可以用 [Cleaner.Cleanable.clean] 显式触发。
-   *
-   * 这里登记的是 **QuickJS 自身**，作用域是「runtime 有没有被销毁」：即便调用方
-   * 完全忘记 `close()`，QuickJS 被 GC 时也会有人去 `JS_FreeRuntime`，不会把一个
-   * runtime 连同它的堆永久漏掉。`JSRef` 的泄漏则由 [refs] 在 close 时清算 ——
-   * 两条路径分工明确，不重叠。
-   *
-   * **闭包只捕获 `handle`（一个 Long）与 `dispatcher`，绝不捕获 QuickJS 自身。**
-   * 这是 Cleaner 的硬性要求：清理动作若持有被登记对象，该对象就永远可达，清扫器
-   * 永远不会触发。
-   *
-   * 另外清理动作运行在 Cleaner 的守护线程上，所有 native 调用都必须回到
-   * [dispatcher]，否则会和 JS 线程并发访问同一个 runtime。
-   */
-  private val cleaner = Cleaner.create()
 
   internal fun register(value: JSRef) {
     refs.add(value)
@@ -212,84 +250,86 @@ class QuickJS(
     refs.remove(value)
   }
 
-  private val ctxDelegate = lazy { initContext(this, stackSize, memoryLimit, timeout) }
-  private val ptr by ctxDelegate
   private val updateChannel = Channel<Unit>()
-  private val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
-  private val dispatcherThread = runBlocking(dispatcher) { Thread.currentThread() }
 
-  @Volatile
-  private var closed = false
-
-  internal fun <T> runOnDispatcher(block: () -> T): T {
-    // 关闭后 ptr 指向的 runtime 已被销毁，任何访问都是 use-after-free
-    if (closed) throw IllegalStateException("QuickJS context is closed")
-    if (Thread.currentThread() == dispatcherThread) return block()
-    return runBlocking(dispatcher) { block() }
-  }
+  /** runtime 是否还在：销毁之后为 `false`。[onJsThreadQuietly] 靠它决定还能不能归还。 */
+  private val runtimeAlive = AtomicBoolean(true)
 
   /**
-   * 把「归还引用 / 撤销登记」放到 JS 线程上跑。
+   * runtime 句柄。
    *
-   * 与 [runOnDispatcher] 的区别是**关闭之后静默跳过**而不是抛异常：runtime 已经销毁，
-   * 没有什么可归还的；而归还多发生在 `finally` 里，在那里抛会盖掉真正的异常，也会把
-   * 「归还比关闭晚」这种正常时序变成崩溃。
+   * ⚠️ 它必须在**属性初始化器**里算，[initPtr] 只是把它交给基类 —— 基类构造期本类的
+   * 字段还没有值，那一刻 `stackSize` / `memoryLimit` / `timeout` 全是 `0`（实测
+   * `putfield` 排在 `invokespecial <init>` 之后，而且**编译器不报错**）。`timeout = 0`
+   * 等于关掉了死循环中断 —— 那正是「测试跑着跑着不动了」的样子。
+   *
+   * 它排在 [refs] / [updateChannel] 之后：`initContext` 期间 native 就可能回调
+   * （模块加载、包装），那些回调要读到已建好的登记表。
+   *
+   * 句柄**不会**在销毁后变成 0（[Pointer] 的指针不可更改），所以「runtime 还活着吗」
+   * 要看 [runtimeAlive]，别拿 `ptr == 0L` 去猜。
    */
-  internal fun onJsThreadQuietly(block: () -> Unit) {
-    if (closed) return
-    val run = { if (!closed) block() }
-    val onJsThread = Thread.currentThread() == dispatcherThread
-    if (onJsThread) run() else runBlocking(dispatcher) { run() }
-  }
-
-  /**
-   * 承载 `ptr` 的小盒子：让 Cleaner 的清理动作不必引用 QuickJS 自身，
-   * 同时把「销毁 runtime」变成一次性的。
-   */
-  private class Reachable {
-    @Volatile var ptr: Long = 0
-    private val armed = AtomicBoolean(true)
-
-    /** 返回要销毁的指针；已被销毁过则返回 null。 */
-    fun disarm(): Long? = if (armed.compareAndSet(true, false)) ptr else null
-  }
-
-  private lateinit var runtimeHandle: Reachable
+  private val handle: Long = initContext(this@QuickJS, stackSize, memoryLimit, timeout)
 
   init {
-    // 兜底：调用方忘了 close() 时，QuickJS 被 GC 后仍会有人去销毁 runtime。
-    //
-    // 清理动作只能捕获**值**，绝不能捕获 `this`：动作若持有 QuickJS，QuickJS 就
-    // 永远可达，清扫器永远不会触发。这里把需要的东西先取成局部变量再交给 Cleaner。
-    //
-    // [Reachable.disarm] 保证 `destroyContext` 只被调用一次 —— close() 与 Cleaner
-    // 是两条独立路径，都可能在同一个 runtime 上触发销毁，而 native 侧的
-    // `JS_FreeRuntime` 不可重入。
-    val dispatcherRef = dispatcher
-    val reachable = Reachable()
-    reachable.ptr = ptr
-    runtimeHandle = reachable
-    cleaner.register(this) {
-      val handle = reachable.disarm() ?: return@register
-      runCatching { runBlocking(dispatcherRef) { destroyContext(handle) } }
-    }
-    MainScope().launch(dispatcher) {
+    // 创建失败（句柄为 0）在**构造期**就暴露，而不是等首次求值才炸
+    check(handle != 0L) { "initContext failed" }
+  }
+
+  /** 把句柄交给基类 —— 基类那几扇读门都从这里取值（见 [Pointer.initPtr]）。 */
+  override fun initPtr(): Long = handle
+
+  override val releaseHint: String
+    get() = "它由 QuickJS.close() 统一销毁：先清算引用，再调 destroyContext"
+
+  /**
+   * 真正销毁 runtime —— 覆写基类的归还钩子，[Pointer] 保证**只跑一次**。
+   *
+   * 跑在归属线程上（基类 [Pointer.submit] 投递过来的），所以 [ptrValue] 走的是那条
+   * 就地读的快路径。**不自己设门**：唯一入口 [closeAndCollect] 已经用基类的
+   * [Pointer.markClosed] 抢过名额，这里再抢必然失败 —— 那会变成「返回成功、其实没
+   * 销毁」，runtime 连同它整个堆漏在 native。
+   *
+   * [runtimeAlive] 先落：它回答的是「runtime 还在不在」，与「关闭是否已标记」
+   * （[isClosed]）**不是一回事** —— 关闭时的清算（[collectLeaks]）必须在标记之后、
+   * 销毁之前照常归还引用，否则残留会撑到 `JS_FreeRuntime` 去触发 `gc_obj_list`
+   * 断言、整个进程 abort。
+   *
+   * 本类**不设 GC 兜底**（曾尝试 `java.lang.ref.Cleaner`，已移除），两条理由：
+   * - Android 上 `java.lang.ref.Cleaner` 是 **API 33** 才有的类，而本工程
+   *   `minSdk = 24` 且没开 core library desugaring —— 低版本上是 `NoClassDefFoundError`，
+   *   而它挂在实例字段上，构造 QuickJS 就会炸；
+   * - 清理动作若持有被登记对象，该对象就永远可达、清扫器永不触发。`QuickJS` 的清理动作
+   *   里写了成员调用，Kotlin 于是把 `this` 带进了捕获表（javap 实证），那层兜底在 JVM
+   *   上其实从未生效过。
+   *
+   * 于是显式 [close] 是唯一销毁路径，[Pointer]（即 [AutoCloseable]）只是给它补上
+   * `use {}` 这类语法契约。漏掉的引用由 [refs] 在关闭时清算并报告，想把它变成可断言的
+   * 事实用 [closeAndCheckLeaks]。
+   */
+  override suspend fun releaseImpl() {
+    runtimeAlive.set(false)
+    destroyContext(ptrValue())
+  }
+
+  init {
+    // 句柄已在上面算好并校验过非 0（见 [handle]），这里只剩 pump。投递即返回、不等它。
+    CoroutineScope(jsDispatcher).launch {
       for (v in updateChannel) {
-        while (true) {
-          val err: Int = executePendingJob(ptr)
-          if (err <= 0) {
-            if (err < 0) print(getException(ptr))
-            break
+        // 销毁消息可能已经排在前面：runtime 没了就别再去 executePendingJob
+        if (!runtimeAlive.get()) break
+        // 本协程就跑在归属线程上，withPtrSync 于是就地执行（零派发）
+        withPtrSync { ptr ->
+          while (true) {
+            val err: Int = executePendingJob(ptr)
+            if (err <= 0) {
+              if (err < 0) print(getException(ptr))
+              break
+            }
           }
         }
       }
     }
-  }
-
-  /** 销毁 runtime，保证只发生一次。 */
-  private fun destroyRuntimeOnce() {
-    val handle = if (::runtimeHandle.isInitialized) runtimeHandle.disarm() else null
-    if (handle != null) destroyContext(handle)
   }
 
   private fun javaToJs(obj: Any?): Long = javaToJsImpl(obj)
@@ -301,7 +341,7 @@ class QuickJS(
    * [JSFunction] 是**顶层**类、只是 [JSRef] 的子类 —— Kotlin 的 `private` 不跨继承
    * 传递，所以这里开一扇 `internal` 的门，而不是把 `jsToJava` 本身放出去。
    */
-  internal fun toJava(handle: Long): Any? = jsToJava(ptr, handle)
+  internal fun toJava(handle: Long): Any? = withPtrSync { ptr -> jsToJava(ptr, handle) }
 
   @Keep
   private fun wrapJSPromiseAsync(
@@ -372,15 +412,25 @@ class QuickJS(
       javaToJs(obj.invoke(*argv, thisVal = thisVal))
     } catch (e: Throwable) {
       e.printStackTrace()
-      jsThrowError(ptr, javaToJs(e))
+      withPtrSync { ptr -> jsThrowError(ptr, javaToJs(e)) }
     }
+
+  /**
+   * **新操作**的入口（旧 `runOnDispatcher`）：先查 [isClosed] 再在归属线程上跑。
+   *
+   * 归还侧**不能**走这扇门，它得用 [onJsThreadQuietly] —— 见那边的注释。
+   */
+  private fun <T> runOnJsThread(block: (Long) -> T): T {
+    if (isClosed) throw IllegalStateException("QuickJS context is closed")
+    return withPtrSync(block)
+  }
 
   internal fun jsCallImpl(
     obj: JSRef,
     vararg argv: Any?,
     thisVal: Any? = null,
   ): Long =
-    runOnDispatcher {
+    runOnJsThread { ptr ->
       // javaToJs 每次返回的都是「新引用」的裸句柄（新建 或 jsDupValue），
       // 这里用 try/finally 保证归还：中途抛异常也不能漏。
       val argvJs = argv.map { javaToJs(it) }.toLongArray()
@@ -409,10 +459,45 @@ class QuickJS(
    */
   internal fun releaseValue(handle: Long) {
     if (handle == 0L) return
-    onJsThreadQuietly {
+    onJsThreadQuietly { ptr ->
       jsReleaseValue(ptr, handle)
       jsDestroyHandle(handle)
     }
+  }
+
+  /**
+   * 归还一个 [JSRef]：撤销登记 + 还掉它那一票。
+   *
+   * ⚠️ 还的是 **ref 自己的值句柄**（`ref.ptr`），**不是**块参数里那个 runtime 句柄 ——
+   * 两个都是 `Long`，混用就是拿 runtime 指针对去 `jsReleaseValue`，当场踩坏 native 堆
+   * （实测表现是测试进程 `0xC0000374` heap corruption 直接死掉）。
+   */
+  internal fun releaseRef(ref: JSRef) {
+    onJsThreadQuietly {
+      unregister(ref)
+      // 已经在 JS 线程上，releaseValue 里面那次投递会就地执行，不产生第二次派发
+      releaseValue(ref.ptr)
+    }
+  }
+
+  /**
+   * 归还侧的投递（旧 `onJsThreadQuietly` 的换代版）：与 [runOnJsThread] 有两点不同。
+   *
+   * - 判据是 **runtime 还在不在**（[runtimeAlive]）而不是 [isClosed]：关闭时的清算
+   *   （[collectLeaks]）必须在标记之后、销毁之前照常归还，否则残留引用会撑到
+   *   `JS_FreeRuntime` 去触发 `gc_obj_list` 断言、整个进程 abort；
+   * - 关闭之后**静默跳过**而不是抛异常：runtime 都没了就没有什么可归还的，而归还多发生
+   *   在 `finally` 里，在那里抛会盖掉真正的异常。
+   *
+   * ⚠️ 块参数是这个 **Pointer 自己的句柄**（与 [withPtr] 一致）；要还别的对象（比如某个
+   * [JSRef] 的值句柄）时别拿它凑合 —— 见 [releaseRef]。
+   *
+   * ⚠️ 已经在 JS 线程上时**就地执行** —— 这不是优化：清算阶段（[collectLeaks]）必须
+   * **在原地**把引用还掉，投递出去的消息会排在销毁消息之后，那时 runtime 已经没了。
+   */
+  internal fun onJsThreadQuietly(block: (Long) -> Unit) {
+    if (!runtimeAlive.get()) return
+    withPtrSync { ptr -> if (runtimeAlive.get()) block(ptr) }
   }
 
   /**
@@ -429,120 +514,129 @@ class QuickJS(
   fun javaToJsImpl(
     obj: Any?,
     cache: MutableMap<Any, Long> = IdentityHashMap<Any, Long>(),
-  ): Long {
-    if (obj == null || obj is Unit) return jsNULL()
-    if (obj is Throwable) {
-      val ret = jsNewError(ptr)
-      // definePropertyValue 完整接管 k/v 两个句柄（归还引用 + 销毁包装），
-      // 所以这里传进去的 jsNewString 结果不需要、也不能再被引用。
-      // 每个属性用一对独立的 jsNewString：句柄是一次性的，不能复用。
-      definePropertyValue(
-        ptr,
-        ret,
-        jsNewString(ptr, "name"),
-        jsNewString(ptr, obj.javaClass.name),
-      )
-      definePropertyValue(
-        ptr,
-        ret,
-        jsNewString(ptr, "message"),
-        jsNewString(ptr, obj.message ?: ""),
-      )
-      definePropertyValue(
-        ptr,
-        ret,
-        jsNewString(ptr, "stack"),
-        jsNewString(ptr, obj.stackTraceToString()),
-      )
-      return ret
-    }
-    if (obj is JSRef) {
-      return jsDupValue(ptr, obj.ptr)
-    }
-    if (obj is Deferred<Any?>) {
-      val (ret, jsRes, jsRej) = jsNewPromise(ptr)
-      // jsToJava 在 native 侧就把句柄的引用消费掉了，所以 jsRes/jsRej 不需要
-      // 单独归还 —— 它们的所有权已经转移给新建的 JSFunction。
-      val resolve = jsToJava(ptr, jsRes) as JSFunction
-      val reject = jsToJava(ptr, jsRej) as JSFunction
-      MainScope().launch(dispatcher) {
-        try {
-          resolve.invoke(obj.await())
-        } catch (e: Throwable) {
-          reject.invoke(e)
-        } finally {
-          // 两个包装各持一票，用完归还
-          resolve.close()
-          reject.close()
+  ): Long =
+    withPtrSync { ptr ->
+      if (obj == null || obj is Unit) return@withPtrSync jsNULL()
+      if (obj is Throwable) {
+        val ret = jsNewError(ptr)
+        // definePropertyValue 完整接管 k/v 两个句柄（归还引用 + 销毁包装），
+        // 所以这里传进去的 jsNewString 结果不需要、也不能再被引用。
+        // 每个属性用一对独立的 jsNewString：句柄是一次性的，不能复用。
+        definePropertyValue(
+          ptr,
+          ret,
+          jsNewString(ptr, "name"),
+          jsNewString(ptr, obj.javaClass.name),
+        )
+        definePropertyValue(
+          ptr,
+          ret,
+          jsNewString(ptr, "message"),
+          jsNewString(ptr, obj.message ?: ""),
+        )
+        definePropertyValue(
+          ptr,
+          ret,
+          jsNewString(ptr, "stack"),
+          jsNewString(ptr, obj.stackTraceToString()),
+        )
+        return@withPtrSync ret
+      }
+      if (obj is JSRef) {
+        return@withPtrSync jsDupValue(ptr, obj.ptr)
+      }
+      if (obj is Deferred<Any?>) {
+        val (ret, jsRes, jsRej) = jsNewPromise(ptr)
+        // jsToJava 在 native 侧就把句柄的引用消费掉了，所以 jsRes/jsRej 不需要
+        // 单独归还 —— 它们的所有权已经转移给新建的 JSFunction。
+        val resolve = jsToJava(ptr, jsRes) as JSFunction
+        val reject = jsToJava(ptr, jsRej) as JSFunction
+        @Suppress("DeferredResultUnused")
+        submit {
+          try {
+            resolve.invoke(obj.await())
+          } catch (e: Throwable) {
+            reject.invoke(e)
+          } finally {
+            // 两个包装各持一票，用完归还
+            resolve.close()
+            reject.close()
+          }
         }
+        return@withPtrSync ret
       }
-      return ret
-    }
-    if (obj is Boolean) return jsNewBool(ptr, obj)
-    if (obj is Byte) return jsNewInt64(ptr, obj.toLong())
-    if (obj is Char) return jsNewInt64(ptr, obj.code.toLong())
-    if (obj is Short) return jsNewInt64(ptr, obj.toLong())
-    if (obj is Int) return jsNewInt64(ptr, obj.toLong())
-    if (obj is Long) return jsNewInt64(ptr, obj)
-    if (obj is Number) return jsNewFloat64(ptr, obj.toDouble())
-    if (obj is String) return jsNewString(ptr, obj)
-    if (obj is ByteArray) {
-      return jsNewArrayBuffer(ptr, obj)
-    }
-    cache[obj]?.let {
-      return jsDupValue(ptr, it)
-    }
-    if (obj is Map<*, *>) {
-      val ret = jsNewObject(ptr)
-      cache[obj] = ret
-      obj.forEach { entry ->
-        definePropertyValue(
-          ptr,
-          ret,
-          javaToJsImpl(entry.key, cache),
-          javaToJsImpl(entry.value, cache),
-        )
+      if (obj is Boolean) return@withPtrSync jsNewBool(ptr, obj)
+      if (obj is Byte) return@withPtrSync jsNewInt64(ptr, obj.toLong())
+      if (obj is Char) return@withPtrSync jsNewInt64(ptr, obj.code.toLong())
+      if (obj is Short) return@withPtrSync jsNewInt64(ptr, obj.toLong())
+      if (obj is Int) return@withPtrSync jsNewInt64(ptr, obj.toLong())
+      if (obj is Long) return@withPtrSync jsNewInt64(ptr, obj)
+      if (obj is Number) return@withPtrSync jsNewFloat64(ptr, obj.toDouble())
+      if (obj is String) return@withPtrSync jsNewString(ptr, obj)
+      if (obj is ByteArray) {
+        return@withPtrSync jsNewArrayBuffer(ptr, obj)
       }
-      return ret
-    }
-    val arrayObj = if (obj is Array<*>) obj.toList() else obj
-    if (arrayObj is Iterable<*>) {
-      val ret = jsNewArray(ptr)
-      cache[obj] = ret
-      arrayObj.forEachIndexed { i, v ->
-        definePropertyValue(
-          ptr,
-          ret,
-          jsNewInt64(ptr, i.toLong()),
-          javaToJsImpl(v, cache),
-        )
+      cache[obj]?.let {
+        return@withPtrSync jsDupValue(ptr, it)
       }
-      return ret
+      if (obj is Map<*, *>) {
+        val ret = jsNewObject(ptr)
+        cache[obj] = ret
+        obj.forEach { entry ->
+          definePropertyValue(
+            ptr,
+            ret,
+            javaToJsImpl(entry.key, cache),
+            javaToJsImpl(entry.value, cache),
+          )
+        }
+        return@withPtrSync ret
+      }
+      val arrayObj = if (obj is Array<*>) obj.toList() else obj
+      if (arrayObj is Iterable<*>) {
+        val ret = jsNewArray(ptr)
+        cache[obj] = ret
+        arrayObj.forEachIndexed { i, v ->
+          definePropertyValue(
+            ptr,
+            ret,
+            jsNewInt64(ptr, i.toLong()),
+            javaToJsImpl(v, cache),
+          )
+        }
+        return@withPtrSync ret
+      }
+      val ret = jsWrapObject(ptr, obj)
+      return@withPtrSync if (obj is JSInvokable) {
+        val func = jsNewCFunction(ptr, ret)
+        // jsNewCFunction 已经把 ret 包进 C function 的 func_data（内部持有），
+        // 这里只需归还我们手上这一票。
+        releaseValue(ret)
+        func
+      } else {
+        ret
+      }
     }
-    val ret = jsWrapObject(ptr, obj)
-    return if (obj is JSInvokable) {
-      val func = jsNewCFunction(ptr, ret)
-      // jsNewCFunction 已经把 ret 包进 C function 的 func_data（内部持有），
-      // 这里只需归还我们手上这一票。
-      releaseValue(ret)
-      func
-    } else {
-      ret
-    }
-  }
 
   /**
    * 求值并转换结果。
    *
+   * **挂起**而不是阻塞：[Pointer.withPtr] 把整段求值搬到 [jsDispatcher] 上跑，
+   * 并顺手把 runtime 句柄压进块里 —— 调用方线程被让出去等结果。对照
+   * [Pointer.withPtrSync] 那条 `runBlocking` 的同步路径，后者是给 native 回调链准备的
+   * （`@Keep` 的函数由 native 线程直接调进来，那里没有协程上下文）。
+   *
    * `evaluate` native 返回的句柄由 [jsToJava] 消费掉（它在 native 侧就会调
    * `jsReleaseValue`），所以这里不需要额外归还。
    */
-  fun evaluate(
+  suspend fun evaluate(
     cmd: String,
     name: String = "<eval>",
     flag: Int = JSEvalFlag.GLOBAL,
-  ): Any? =
-    runOnDispatcher {
+  ): Any? {
+    // 标记即拒绝：晚于关闭消息投进来的求值会排在销毁之后，那是 use-after-free
+    if (isClosed) throw IllegalStateException("QuickJS context is closed")
+    return withPtr { ptr ->
       val ret = evaluate(ptr, cmd, name, flag)
       updateChannel.trySend(Unit)
       if (isException(ret)) {
@@ -550,37 +644,51 @@ class QuickJS(
       }
       jsToJava(ptr, ret)
     }
+  }
+
+  /**
+   * 关闭并把泄漏清单带回来。
+   *
+   * 与 [close] 的区别是**它给你一个 [Deferred]**：`await()` 之后才拿得到清算结果。
+   * [close] 只投递、不等结果，所以拿不到清单 —— 要断言「没有泄漏」就得走这里。
+   * 空列表 = 没有泄漏；`null` = 本次调用**没抢到关闭名额**（已经关过了），因此没跑清算。
+   */
+  fun closeAndCollect(): Deferred<List<String>?> =
+    if (!markClosed()) {
+      // ⚠️ 别写成 `CompletableDeferred(null)`：那个字面量会被重载解析挑到
+      // `CompletableDeferred(parent: Job? = null)` 上去，造出一个**永远不完成**的
+      // Deferred —— `await()` 于是永久挂起（`closeIsIdempotentAcrossEntryPoints`
+      // 第二次关闭卡死就是这么来的）。带上类型实参 + 命名实参才落到 `value: T` 那个重载。
+      CompletableDeferred<List<String>?>(value = null)
+    } else {
+      // 名额在上一行就抢了（基类那份），这里只管投递 —— 基类保证 [releaseImpl] 只跑一次
+      submit {
+        updateChannel.close()
+        // 先清算再销毁：销毁之后 onJsThreadQuietly 会因为 runtimeAlive 为 false
+        // 拒绝工作，那一轮归还就全变成空操作，残留反而撑到 JS_FreeRuntime 去 abort。
+        val leaked = collectLeaks()
+        releaseImpl()
+        leaked
+      }
+    }
 
   /**
    * 主动销毁 runtime；重复调用是安全的。
    *
-   * 销毁前会做一轮强制清算（[collectLeaks]），把还登记着的引用逐个归还。
-   * 这一步不可省略：QuickJS 的 `JS_FreeRuntime` 结尾有
-   * `assert(list_empty(&rt->gc_obj_list))`，只要还有活引用就是 `abort()`，
-   * 整个进程会直接死掉。清算之后残留（理论上不该有）只打印不抛出 ——
-   * 需要把泄漏当成**可断言的事实**时用 [closeAndCheckLeaks]。
+   * 关闭是**异步**的：只把「清算 + 销毁」投递到 JS 线程就返回，同时
+   * [isClosed] 立即置位 —— 标记了就当作已删除，之后的新操作会被
+   * [runOnJsThread] / [evaluate] 拒绝。队列是 FIFO，所以投递之前发出的操作一定先跑完，
+   * 之后发出的又一定排在销毁之后，不会 use-after-free。
+   *
+   * 泄漏报告只能打印在异步侧（[close] 不等结果，也就无法在这里抛）：
+   * 想把它变成**可断言的失败**请用 [closeAndCheckLeaks]。
    */
-  fun close() {
-    if (closed) return
-    val destroy = {
-      updateChannel.close()
-      if (ctxDelegate.isInitialized()) {
-        // 先清算再置 closed：releaseValue 在 closed 之后会拒绝工作，
-        // 否则这一轮归还全部变成空操作，残留反而撑到 JS_FreeRuntime 去 abort。
-        val leaked = collectLeaks()
-        closed = true
-        destroyRuntimeOnce()
-        if (leaked.isNotEmpty()) {
-          System.err.println("QuickJS reference leak:\n" + leaked.joinToString("\n"))
-        }
-      } else {
-        closed = true
+  override fun close() {
+    CoroutineScope(jsDispatcher).launch {
+      val leaked = closeAndCollect().await()
+      if (leaked?.isNotEmpty() == true) {
+        System.err.println("QuickJS reference leak:\n" + leaked.joinToString("\n"))
       }
-    }
-    if (Thread.currentThread() == dispatcherThread) {
-      destroy()
-    } else {
-      runBlocking(dispatcher) { destroy() }
     }
   }
 
@@ -599,7 +707,7 @@ class QuickJS(
    * 换句话说：Leak 报告负责「暴露问题」，归还负责「不让它升级成崩溃」。
    * 两者都要，且缺一不可。
    */
-  internal fun collectLeaks(): List<String> {
+  internal suspend fun collectLeaks(): List<String> {
     val snapshot = refs.toList()
     // 先记录：还在册 = 调用方漏了归还
     val leaked = snapshot.map { "  ${it.describe()}" }
@@ -612,31 +720,16 @@ class QuickJS(
   /**
    * 关闭并断言没有引用泄漏。
    *
-   * 与 [close] 的区别是**泄漏会抛异常**。测试用它来把「有没有漏归还」变成可断言
-   * 的事实（对照 flutter_qjs 的 `test('reference leak')`），而不是等进程崩掉。
+   * 与 [close] 的区别是**泄漏会抛异常**，而且会 `await()` 到清算真正跑完。
+   * 测试用它来把「有没有漏归还」变成可断言的事实（对照 flutter_qjs 的
+   * `test('reference leak')`），而不是等进程崩掉。
    */
-  fun closeAndCheckLeaks() {
-    if (closed) return
-    val runDestroy = {
-      updateChannel.close()
-      if (ctxDelegate.isInitialized()) {
-        // 与 close 同理：清算必须在 closed 置位之前，否则 releaseValue 会拒绝执行
-        val leaked = collectLeaks()
-        closed = true
-        destroyRuntimeOnce()
-        if (leaked.isNotEmpty()) {
-          throw JSError(
-            "reference leak:\n    REFS\tTYPE\tPTR\n" + leaked.joinToString("\n"),
-          )
-        }
-      } else {
-        closed = true
-      }
-    }
-    if (Thread.currentThread() == dispatcherThread) {
-      runDestroy()
-    } else {
-      runBlocking(dispatcher) { runDestroy() }
+  suspend fun closeAndCheckLeaks() {
+    val leaked = closeAndCollect().await()
+    if (leaked?.isNotEmpty() == true) {
+      throw JSError(
+        "reference leak:\n    REFS\tTYPE\tPTR\n" + leaked.joinToString("\n"),
+      )
     }
   }
 }

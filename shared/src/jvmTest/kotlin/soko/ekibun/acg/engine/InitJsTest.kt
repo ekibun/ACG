@@ -2,6 +2,7 @@ package soko.ekibun.acg.engine
 
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.runBlocking
+import soko.ekibun.quickjs.JSEvalFlag
 import soko.ekibun.quickjs.JSFunction
 import soko.ekibun.quickjs.JSInvokable
 import soko.ekibun.quickjs.QuickJS
@@ -50,7 +51,7 @@ class InitJsTest {
     ctx: QuickJS,
     javaStub: JSInvokable,
   ) {
-    val factory = assertIs<JSFunction>(ctx.evaluate(initSource(), name = "<init.js>"))
+    val factory = assertIs<JSFunction>(eval(ctx, initSource(), name = "<init.js>"))
     try {
       runBlocking {
         val ret = factory.invoke(javaStub)
@@ -98,14 +99,28 @@ class InitJsTest {
       }
     }
 
+  /**
+   * 测试里的求值入口。
+   *
+   * [soko.ekibun.quickjs.QuickJS.evaluate] 是**挂起**的 —— 求值要搬到 runtime 的归属
+   * 线程上。而这些用例是普通函数、没有协程上下文，于是统一在这里阻塞等一次。
+   */
+  private fun eval(
+    ctx: QuickJS,
+    cmd: String,
+    name: String = "<eval>",
+    flag: Int = JSEvalFlag.GLOBAL,
+  ): Any? = runBlocking { ctx.evaluate(cmd, name, flag) }
+
   @Test
   fun formDataAppendAndGetAll() {
-    val ctx = QuickJS()
+    val ctx = runBlocking { QuickJS.create() }
     try {
       loadInit(ctx, stubInvokable())
       // 每个方法都在 _java 之外的纯 JS 里，直接整段验证
       val out =
-        ctx.evaluate(
+        eval(
+          ctx,
           """
           (function(){
             const fd = new FormData();
@@ -130,53 +145,55 @@ class InitJsTest {
       assertEquals(listOf("a", "a", "b"), (out[4] as Array<*>).toList())
       assertEquals(listOf("1", "2", "4"), (out[5] as Array<*>).toList())
     } finally {
-      ctx.close()
+      runBlocking { ctx.closeAndCollect().await() }
     }
   }
 
   @Test
   fun encodeUriPadsHexBytes() {
-    val ctx = QuickJS()
+    val ctx = runBlocking { QuickJS.create() }
     try {
       loadInit(ctx, stubInvokable())
       // \n (0x0a) 必须编成 %0A；不补零的话会得到 %A
-      assertEquals("%0A", ctx.evaluate("encodeURIComponent('\\n')"))
+      assertEquals("%0A", eval(ctx, "encodeURIComponent('\\n')"))
       // 空格 0x20 -> %20（本来就有两位，用于对照）
-      assertEquals("%20", ctx.evaluate("encodeURIComponent(' ')"))
+      assertEquals("%20", eval(ctx, "encodeURIComponent(' ')"))
       // 多字节：中文 UTF-8 每个字节都必须是两位
-      assertEquals("%E4%B8%AD", ctx.evaluate("encodeURIComponent('中')"))
+      assertEquals("%E4%B8%AD", eval(ctx, "encodeURIComponent('中')"))
       // 控制字符 0x00..0x0f 全都需要补零
-      assertEquals("%01", ctx.evaluate("encodeURIComponent('\\u0001')"))
+      assertEquals("%01", eval(ctx, "encodeURIComponent('\\u0001')"))
     } finally {
-      ctx.close()
+      runBlocking { ctx.closeAndCollect().await() }
     }
   }
 
   @Test
   fun textEncoderRoundTrip() {
-    val ctx = QuickJS()
+    val ctx = runBlocking { QuickJS.create() }
     try {
       loadInit(ctx, stubInvokable())
       val out =
-        ctx.evaluate(
+        eval(
+          ctx,
           "(function(){ const e = new TextEncoder(); const d = new TextDecoder();" +
             " return d.decode(e.encode('中文abc')); })()",
           name = "<roundtrip>",
         )
       assertEquals("中文abc", out)
     } finally {
-      ctx.close()
+      runBlocking { ctx.closeAndCollect().await() }
     }
   }
 
   @Test
   fun responseJsonWorks() {
-    val ctx = QuickJS()
+    val ctx = runBlocking { QuickJS.create() }
     try {
       loadInit(ctx, stubInvokable())
       // Response.text() 走 _java decode，json() 再 JSON.parse —— 串起整条链
       val out =
-        ctx.evaluate(
+        eval(
+          ctx,
           """
           (async function(){
             const body = new TextEncoder().encode('{"a":1}');
@@ -188,7 +205,7 @@ class InitJsTest {
         )
       assertEquals(1L, runBlocking { assertIs<Deferred<Any?>>(out).await() })
     } finally {
-      ctx.close()
+      runBlocking { ctx.closeAndCollect().await() }
     }
   }
 

@@ -20,7 +20,7 @@ agent_created: true
 - `jsToJava` 是**唯一**的对象/标量分发点，递归点必须走它。历史上把对象分支移出去过一次，
   症状是「数组元素全是 null」「promise 没有 then」。
 - `tag = -1` 是**正常的对象**（`JS_TAG_OBJECT = -1`），不是异常。
-- 所有 native 访问都必须落在 **JS 线程**上（过 `runOnDispatcher` / `onJsThreadQuietly`）。
+- 所有 native 访问都必须落在 **JS 线程**上（过 `runOnJsThread` / `onJsThreadQuietly`）。
   QuickJS 单线程，两个线程同时进同一个 `JSRuntime` 的症状是**偶发崩、重跑就变绿** ——
   看着像环境问题，其实是真实竞态。手册里的规则 7。
 

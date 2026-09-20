@@ -44,7 +44,7 @@ fun PlayScreen() {
   DisposableEffect(Unit) {
     onDispose {
       MainScope().launch {
-        player.value?.close()
+        player.value?.closeAsync()
       }
     }
   }
@@ -58,7 +58,7 @@ fun PlayScreen() {
             enabled = playback.value != null,
             onClick = {
               MainScope().launch {
-                player.value?.close()
+                player.value?.closeAsync()
                 val newPlayer =
                   FFPlayer(
                     url.value,

@@ -22,6 +22,7 @@ import soko.ekibun.acg.web.loadBackgroundWebView
 import soko.ekibun.quickjs.JSError
 import soko.ekibun.quickjs.JSFunction
 import soko.ekibun.quickjs.JSInvokable
+import soko.ekibun.quickjs.JSRef
 import soko.ekibun.quickjs.QuickJS
 import soko.ekibun.quickjs.freeRecursive
 import java.nio.charset.Charset
@@ -92,14 +93,19 @@ class JsEngine {
           }
         }
         val ctx1 =
-          QuickJS(
-            moduleHandler = moduleHandler,
-          )
+          runBlocking {
+            QuickJS.create(
+              moduleHandler = moduleHandler,
+            )
+          }
         quickjsDelegate = ctx1
         // 声明成 JSInvokable 会丢掉 AutoCloseable -> 这个工厂函数再也关不掉，
         // 每个引擎实例固定漏 1 票，reset() 的泄漏报告随之永久带一条噪音。
         // JS 侧没有别的引用持有它，调用完即可归还。
-        val init = ctx1.evaluate(moduleHandler("@init")!!, "<init>") as JSFunction
+        // 这里在属性 getter 里，不是协程上下文，只能阻塞等这一次求值 ——
+        // evaluate 本身是挂起的（它要把求值搬到 QuickJS 的归属线程上）。
+        val init =
+          runBlocking { ctx1.evaluate(moduleHandler("@init")!!, "<init>") } as JSFunction
         try {
           init(
             object : JSInvokable {
@@ -154,7 +160,13 @@ class JsEngine {
         ctx1
       }
 
-  fun evaluate(
+  /**
+   * 求值。**挂起**：[QuickJS.evaluate] 会把求值搬到 runtime 的归属线程上。
+   *
+   * 这里不做 `runBlocking` 包一层 —— 门面一旦阻塞，UI 侧（[soko.ekibun.acg.ui.screen
+   * .CodeScreen]）就得跟着卡。调用方本来就在协程里。
+   */
+  suspend fun evaluate(
     cmd: String,
     name: String = "<eval>",
   ): Any? = quickjs.evaluate(cmd, name)
@@ -195,7 +207,9 @@ class JsEngine {
    * 三种收场都覆盖。
    */
   private fun <T> CoroutineScope.asyncReleasing(
-    vararg values: AutoCloseable?,
+    // 形参刻意收窄成 JSRef 而不是 AutoCloseable：QuickJS 自己也实现了 AutoCloseable，
+    // 若这里接受 AutoCloseable，把 runtime 传进来就会被 invokeOnCompletion 当场销毁。
+    vararg values: JSRef?,
     block: suspend CoroutineScope.() -> T,
   ): Deferred<T> {
     val job = async(block = block)
@@ -300,7 +314,7 @@ class JsEngine {
    *
    * 调用时机：本函数跑在 WebView 的回调线程上，此时脚本正挂起等 `webviewAsync`
    * 的结果，QuickJS 派发线程是空闲的，所以这里的 `fn.invoke` / `close`
-   * 都能安全地借道 `runOnDispatcher` 落到 JS 线程。
+   * 都能安全地借道 `Pointer.withPtrSync` 落到 JS 线程（`fn.invoke` 内部就是它）。
    */
   private fun invokeInterceptor(
     fn: JSFunction,

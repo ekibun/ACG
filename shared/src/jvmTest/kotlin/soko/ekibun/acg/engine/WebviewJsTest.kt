@@ -5,6 +5,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import soko.ekibun.quickjs.JSError
+import soko.ekibun.quickjs.JSEvalFlag
 import soko.ekibun.quickjs.JSFunction
 import soko.ekibun.quickjs.JSInvokable
 import soko.ekibun.quickjs.QuickJS
@@ -110,7 +111,7 @@ class WebviewJsTest {
     ctx: QuickJS,
     javaStub: JSInvokable,
   ) {
-    val factory = assertIs<JSFunction>(ctx.evaluate(initSource(), name = "<init.js>"))
+    val factory = assertIs<JSFunction>(eval(ctx, initSource(), name = "<init.js>"))
     try {
       runBlocking {
         // init.js 的箭头函数体没有 return，await 出来是 undefined —— 这里没有
@@ -135,26 +136,39 @@ class WebviewJsTest {
   ): Any? =
     runBlocking {
       withTimeout(15_000) {
-        val out = ctx.evaluate("(async () => { $body })()", name = "<webview>")
+        val out = eval(ctx, "(async () => { $body })()", name = "<webview>")
         assertIs<Deferred<Any?>>(out).await()
       }
     }
 
+  /**
+   * 测试里的求值入口。
+   *
+   * [soko.ekibun.quickjs.QuickJS.evaluate] 是**挂起**的 —— 求值要搬到 runtime 的归属
+   * 线程上。而这些用例是普通函数、没有协程上下文，于是统一在这里阻塞等一次。
+   */
+  private fun eval(
+    ctx: QuickJS,
+    cmd: String,
+    name: String = "<eval>",
+    flag: Int = JSEvalFlag.GLOBAL,
+  ): Any? = runBlocking { ctx.evaluate(cmd, name, flag) }
+
   @Test
   fun webviewIsExposedAsGlobal() {
-    val ctx = QuickJS()
+    val ctx = runBlocking { QuickJS.create() }
     try {
       loadInit(ctx, javaStub { _, _, _ -> null })
-      assertEquals("function", ctx.evaluate("typeof webview"))
+      assertEquals("function", eval(ctx, "typeof webview"))
     } finally {
-      ctx.close()
+      runBlocking { ctx.closeAndCollect().await() }
     }
   }
 
   /** 命中拦截：结果就是 { url, headers }，脚本拿去自己 fetch。 */
   @Test
   fun interceptResultIsUnwrapped() {
-    val ctx = QuickJS()
+    val ctx = runBlocking { QuickJS.create() }
     try {
       loadInit(
         ctx,
@@ -182,14 +196,14 @@ class WebviewJsTest {
         )
       assertEquals("https://cdn.example.com/1.m3u8|bytes=0-", out)
     } finally {
-      ctx.close()
+      runBlocking { ctx.closeAndCollect().await() }
     }
   }
 
   /** 脚本返回值是 JSON 字符串 → 解析成对象交回。 */
   @Test
   fun scriptResultIsParsed() {
-    val ctx = QuickJS()
+    val ctx = runBlocking { QuickJS.create() }
     try {
       var seenScript: String? = null
       loadInit(
@@ -203,7 +217,7 @@ class WebviewJsTest {
       assertEquals(1L, out)
       assertEquals("JSON.stringify({a:1})", seenScript)
     } finally {
-      ctx.close()
+      runBlocking { ctx.closeAndCollect().await() }
     }
   }
 
@@ -215,7 +229,7 @@ class WebviewJsTest {
    */
   @Test
   fun emptyScriptResultIsUndefined() {
-    val ctx = QuickJS()
+    val ctx = runBlocking { QuickJS.create() }
     try {
       loadInit(
         ctx,
@@ -227,14 +241,14 @@ class WebviewJsTest {
         evalAsync(ctx, """return (await webview("https://a/", {})) === undefined ? null : "not undefined";"""),
       )
     } finally {
-      ctx.close()
+      runBlocking { ctx.closeAndCollect().await() }
     }
   }
 
   /** 不是 JSON 的返回值原样给出，别把裸文本吞掉。 */
   @Test
   fun nonJsonScriptResultIsReturnedAsIs() {
-    val ctx = QuickJS()
+    val ctx = runBlocking { QuickJS.create() }
     try {
       loadInit(
         ctx,
@@ -244,14 +258,14 @@ class WebviewJsTest {
       )
       assertEquals("plain text", evalAsync(ctx, """return await webview("https://a/", {});"""))
     } finally {
-      ctx.close()
+      runBlocking { ctx.closeAndCollect().await() }
     }
   }
 
   /** 失败（超时 / 没有后端）必须 reject，而不是回一个让脚本误判的空值。 */
   @Test
   fun failureRejects() {
-    val ctx = QuickJS()
+    val ctx = runBlocking { QuickJS.create() }
     try {
       loadInit(
         ctx,
@@ -269,7 +283,7 @@ class WebviewJsTest {
         )
       assertEquals("caught:后台 WebView 失败：超时", out)
     } finally {
-      ctx.close()
+      runBlocking { ctx.closeAndCollect().await() }
     }
   }
 
@@ -290,7 +304,7 @@ class WebviewJsTest {
    */
   @Test
   fun interceptCallbackCanBeInvokedFromKotlin() {
-    val ctx = QuickJS()
+    val ctx = runBlocking { QuickJS.create() }
     try {
       val started = CompletableDeferred<JSFunction>()
       val finish = CompletableDeferred<Any?>()
@@ -374,7 +388,7 @@ class WebviewJsTest {
       // `started` 里那一票是 Kotlin 侧自己持有的回调包装，用完还给 runtime
       fn.close()
     } finally {
-      ctx.close()
+      runBlocking { ctx.closeAndCollect().await() }
     }
   }
 }

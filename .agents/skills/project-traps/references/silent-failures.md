@@ -15,8 +15,8 @@
   能力必须内联（脚本位置见根 [`AGENTS.md`](../../../../AGENTS.md) §3）。
 - **在 JS 线程之外碰 `JSRuntime`** → 偶发崩、**重跑就变绿**，看着像环境问题，其实是真实竞态
   （引用计数是裸 `int`、GC 链表与 Shape 哈希链都无锁）。桥接层已经把 `jsCall` / `releaseValue`
-  收敛到 dispatcher 上了 —— **新增任何直接调 native 的路径都要先过 `runOnDispatcher` /
-  `onJsThreadQuietly`**，别在调用方线程上调
+  收敛到 dispatcher 上了 —— **新增任何直接调 native 的路径都要先过 `runOnJsThread` /
+  `withPtrSync` / `onJsThreadQuietly`**，别在调用方线程上调
   （规则 7 见 skill [`quickjs-ownership`](../../quickjs-ownership/references/quickjs-reference-ownership.md)）。
 - **动了 submodule** → 改动不报错，但会污染上游源码树、下次同步即丢。`cxx/ffmpeg/ffmpeg/`、
   `cxx/quickjs/quickjs/` 是上游源码树，**不要动**（需要参考实现就直接读本地文件）。
