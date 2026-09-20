@@ -1,7 +1,6 @@
 package soko.ekibun.quickjs
 
 import soko.ekibun.Pointer
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -30,27 +29,17 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * 普通 JS 对象**不走这条路径** —— `jsToJava` 把它们整图展开成 `Map`（对齐
  * flutter_qjs 的 `_jsToDart`），所以本类目前唯一的子类是 [JSFunction]。
+ *
+ * 句柄由 native 侧交出来（构造点遍布 JNI 回调链），直接作为基类 [Pointer] 的构造参数。
+ * 本类**不注入 dispatcher**：没有可切的归属线程，调用点（`jsCall` / `jsDupValue` /
+ * `jsReleaseValue`，以及 [JSFunction] 的 `invoke`）也全在 [QuickJS] 的 native 回调链里，
+ * 没有协程上下文可挂起。线程归属由 [QuickJS] 保证；要同步读句柄一律走
+ * [Pointer.withPtrSync] —— 没有 dispatcher 时它就地在调用线程上返回。
  */
 open class JSRef internal constructor(
   nativePtr: Long,
-  protected val ctx: QuickJS,
-) : Pointer(nativePtr) {
-  /**
-   * 同步读句柄 —— 纯同步、**不做线程校验**（基类那扇已弃用的门，
-   * 见 [soko.ekibun.Pointer.ptr]）。
-   *
-   * 为什么没走挂起那条：本类**不注入 dispatcher**（`Pointer(nativePtr)` 只有一个
-   * 参数），没有可切的归属线程；调用点（`jsCall` / `jsDupValue` / `jsReleaseValue`，
-   * 以及 [JSFunction] 的 `invoke`）也全在 [QuickJS] 的 native 回调链里，没有协程
-   * 上下文可挂起。线程归属由 [QuickJS] 保证 —— 句柄由 native 侧交出来，构造点
-   * 遍布 JNI 回调链。
-   *
-   * `@Suppress` 两个都要：`DEPRECATION` 压的是「读了基类那扇弃用门（`super.ptr`）」，
-   * `OVERRIDE_DEPRECATION` 压的是「覆写了一个弃用成员却没把自己也标成弃用」。
-   */
-  @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
-  public override val ptr: Long get() = super.ptr
-
+  internal val ctx: QuickJS,
+) : Pointer(nativePtr, ctx.dispatcher) {
   // 计数与「已销毁」标记都是原子的：`free()` / `close()` 可能来自任意线程
   // （测试线程、WebView 回调线程），而归还动作被投递到 JS 线程上。
   // 普通 Int / Boolean 会丢更新 —— 少一次计量就是提前释放（use-after-free），
@@ -59,11 +48,6 @@ open class JSRef internal constructor(
 
   /** 当前持有者数量。仅用于泄漏诊断。 */
   val refCount: Int get() = _refCount.get()
-
-  private val destroyedFlag = AtomicBoolean(false)
-
-  /** 是否已经归零并释放。 */
-  val released: Boolean get() = destroyedFlag.get()
 
   init {
     @Suppress("LeakingThis")
@@ -76,7 +60,7 @@ open class JSRef internal constructor(
    * 必须在 JS 线程上下文内调用（只改计数，不碰 native）。
    */
   fun dup(): JSRef {
-    if (destroyedFlag.get()) throw IllegalStateException("JSRef already released")
+    if (isClosed) throw IllegalStateException("JSRef already released")
     _refCount.incrementAndGet()
     return this
   }
@@ -90,30 +74,12 @@ open class JSRef internal constructor(
    * 会抛 `IllegalStateException` 的是 [dup]：已经还完了还想要一票，没得给。
    */
   fun free() {
-    if (destroyedFlag.get()) return
-    if (_refCount.decrementAndGet() <= 0) release()
+    if (isClosed) return
+    if (_refCount.decrementAndGet() <= 0) close()
   }
 
-  /**
-   * 把**所有票**一次还清，实现 [AutoCloseable] 以便 `use {}`。重复调用安全。
-   *
-   * 与 [free] 的区别正是这里：[free] 是「我少一票」，减不到 0 就什么都不发生；
-   * [close] 是「Kotlin 侧这个持有者已经不可达了」，剩下的票全是垃圾 —— 于是直接把
-   * 计数清零并归还，不等别人来投。
-   *
-   * 若 `close()` 只是 `free()` 的别名，`dup()` 过的值就永远还不掉：`use {}` /
-   * `invokeOnCompletion` 这类自动调用点走的都是 `close()`，而它们只肯减一票，
-   * 于是每个跑过 `dup` 的对象都会在关闭清算里留一条永久的「泄漏」。
-   *
-   * ⚠️ 它会**阻塞等 JS 线程**：归还动作要投递到 [QuickJS] 的 dispatcher 上执行
-   * （见 [release]）。在 JS 线程自己身上调不会死锁（[QuickJS.onJsThreadQuietly]
-   * 会直接就地执行），但在别的线程上调就要等那一条线程空出来。
-   */
-  override fun close() {
-    // 先清零再归还：describe() 里看到的仍是归还前的计数（清算先记录后归还），
-    // 但之后的 dup() 拿不到票（destroyedFlag 已置位会直接抛）。
-    _refCount.set(0)
-    release()
+  override suspend fun releaseImpl(ptr: Long) {
+    ctx.releaseRef(this)
   }
 
   /**
@@ -122,35 +88,8 @@ open class JSRef internal constructor(
    * 关闭时若仍有未归零的引用，这里的内容会进入抛出的异常，形如
    * flutter_qjs 的 `"  ADDR\tREF\tTYPE\tPROP"` 行。
    */
-  suspend fun describe(): String = "${javaClass.simpleName}(refs=$refCount, ptr=${ptrValue()})"
-
-  /**
-   * 真正把引用还给 runtime。
-   *
-   * 登记表与 native 调用都收敛到 JS 线程上：调用方可能在任意线程 `close()`（测试
-   * 线程、WebView 回调线程），而那张表只在 JS 线程上被改。`compareAndSet` 保证只有
-   * 一个调用者真的去归还。
-   *
-   * 走 [QuickJS.onJsThreadQuietly] 而**不是** [Pointer.withPtr]：后者那套「标记即拒绝」
-   * 会把关闭时的清算一起挡掉 —— 清算是跑在「已标记、未销毁」的窗口里的。投递出去的
-   * 归还还必须**就地执行**（已在 JS 线程上时），否则会排在销毁消息之后。
-   */
-  internal fun release() {
-    if (!destroyedFlag.compareAndSet(false, true)) return
-    ctx.releaseRef(this)
-  }
+  suspend fun describe(): String = withPtr { ptr -> "${javaClass.simpleName}(refs=$refCount, ptr=$ptr)" }
 }
-
-/**
- * 递归地给一组容器/引用加票。
- *
- * 递归对象（`a['a'] = a`）会重复访问同一个实例，用 [seen] 去重，否则环形结构会
- * 无限递归 —— flutter_qjs 的 `_callRecursive` 出于同样原因也带一个 `cache` Set。
- */
-fun List<JSRef?>.dupRecursive(seen: MutableSet<Any> = mutableSetOf()): Unit = forEach { it?.dupOrSkip(seen) }
-
-/** [dupRecursive] 的释放对应体。 */
-fun List<JSRef?>.freeRecursive(seen: MutableSet<Any> = mutableSetOf()): Unit = forEach { it?.freeOrSkip(seen) }
 
 /**
  * 对任意值做递归操作：穿透 List / Map / Array，遇到 [JSRef] 就执行 [action]。
@@ -169,16 +108,6 @@ private fun Any?.walkRefs(
     is Iterable<*> -> forEach { it.walkRefs(seen, action) }
     is Map<*, *> -> values.forEach { it.walkRefs(seen, action) }
   }
-}
-
-internal fun JSRef.dupOrSkip(seen: MutableSet<Any>) {
-  if (!seen.add(this)) return
-  dup()
-}
-
-internal fun JSRef.freeOrSkip(seen: MutableSet<Any>) {
-  if (!seen.add(this)) return
-  free()
 }
 
 /** 递归加票：`listOf(obj).dupRecursive()` 的简写入口。 */

@@ -3,28 +3,15 @@ package soko.ekibun.ffmpeg
 import soko.ekibun.Pointer
 import soko.ekibun.jniLoadLibrary
 
-class AvPacket : AutoCloseable {
+class AvPacket : Pointer() {
   /**
-   * packet 句柄的 [Pointer] 视图。
+   * packet 句柄 —— 覆写基类的句柄来源。
    *
-   * 本类**不继承** [Pointer]：句柄要调实例方法 `initNative()` 才拿得到，而 Kotlin 不允许
-   * 在 `super(...)` 的实参里出现 `this`；[Pointer] 的指针又是**构造参数**（创建即确定、
-   * 之后不可更改），后填不进去。于是句柄单独归一个内部子类持有，本类只负责转发。
+   * 句柄要调实例方法 `initNative()` 才拿得到，而 Kotlin 不允许在 `super(...)` 的实参里
+   * 出现 `this`，所以本类**留空基类的第一个实参**、在这里现算。首次读句柄（`packet.ptr`）
+   * 时才建 —— 一次没读就 `close()` 的话，[Pointer.closeDeferred] 不会为了「还」去建一个。
    */
-  private val handle: Handle = Handle(initNative())
-
-  private inner class Handle(
-    ptr: Long,
-  ) : Pointer(ptr) {
-    /**
-     * 本子类不带 dispatcher，所以基类 [Pointer.close] 走的就是同步路径，无需另立入口。
-     * 句柄用 [Pointer.ptrValue] 读 —— 没有 dispatcher 时它就地在调用线程上返回。
-     */
-    override suspend fun releaseImpl() = closeNative(ptrValue())
-  }
-
-  /** 读句柄（挂起）—— `av_read_frame` / `avcodec_send_packet` 都要它。 */
-  suspend fun ptr(): Long = handle.ptrValue()
+  override fun initPtr(): Long = initNative()
 
   var streamIndex: Int = -1
 
@@ -55,7 +42,5 @@ class AvPacket : AutoCloseable {
    * 归还点在消费侧（[AvCodec.sendPacketAndGetFrames] 的 `finally`），而丢弃点在
    * [AvFormat.getPacket] 与 [FFPlayer] 的几条提前退出分支上，两边可能都跑到。
    */
-  override fun close() {
-    handle.close()
-  }
+  override suspend fun releaseImpl(ptr: Long) = closeNative(ptr)
 }

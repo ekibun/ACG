@@ -329,16 +329,15 @@ class FFPlayer(
       playJobs.joinAll()
     }
 
-  override suspend fun closeAsync() =
+  suspend fun closeAsync() =
     withContext(playerDispatcher) {
       pause()
-      super.closeAsync()
+      super.closeDeferred().await()
+      // 每个 codec 有自己的归属 dispatcher：这里要等**归还真的落地**，
+      // 而不是投出去就返回 —— 所以 await 各自的 closeDeferred()。
       codecs
-        .map {
-          async(playerDispatcher) {
-            it.value.closeAsync()
-          }
-        }.awaitAll()
+        .map { async(playerDispatcher) { it.value.closeDeferred().await() } }
+        .awaitAll()
       codecs.clear()
     }
 }

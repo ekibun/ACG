@@ -1,16 +1,15 @@
 package soko.ekibun.ffmpeg
 
-import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.withContext
 import soko.ekibun.Pointer
+import soko.ekibun.ThreadDispatcher
 import soko.ekibun.jniLoadLibrary
-import java.util.concurrent.Executors
 
 open class AvFormat(
   val url: String,
   val io: AvIO.Handler,
-) : AutoCloseable {
+) : Pointer(dispatcher = formatDispatcher) {
   companion object {
+    private val formatDispatcher = ThreadDispatcher("avformat")
     const val AVSEEK_SIZE = 0x10000
     const val AV_TIME_BASE = 1000000
 
@@ -49,59 +48,18 @@ open class AvFormat(
     }
   }
 
-  /**
-   * 解封装上下文句柄的 [Pointer] 视图。
-   *
-   * 句柄要等首次 [runWithContext] 才建，而 [Pointer] 的指针是**构造参数**（创建即
-   * 确定、之后不可更改）—— 后填不进去。于是句柄单独归一个内部子类持有，本类只负责
-   * 转发；「还没建」与「已经销毁」两种状态统一表达为 `ctx == null`。
-   */
-  private var ctx: Context? = null
-
-  private inner class Context(
-    ptr: Long,
-  ) : Pointer(ptr, formatDispatcher) {
-    override val releaseHint: String
-      get() = "它由 AvFormat.closeAsync() 统一销毁：销毁必须回到 formatDispatcher 线程"
-
-    /**
-     * 销毁，只跑一次。只能由外层在 [formatDispatcher] 线程上调用 ——
-     * 句柄用基类的 [Pointer.ptrValue] 读，此时已在归属 dispatcher 上，就地返回。
-     */
-    suspend fun destroyNow() {
-      if (markClosed()) destroyNative(ptrValue())
-    }
-
-    override suspend fun releaseImpl() = destroyNow()
-  }
-
-  private val formatDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
-
   private var streams: List<AvStream>? = null
 
   private external fun initNative(url: String): Long
 
-  /**
-   * 在归属线程上跑一段用到上下文句柄的代码。
-   *
-   * 挂起版（原先是一条 `runOnDispatcher` 同步桥）：句柄通过基类的 [Pointer.ptrValue]
-   * 读取，此时已经在归属线程上，它是就地返回、不做多余调度。
-   */
-  private suspend fun <T> runWithContext(
-    create: Boolean = false,
-    cb: suspend (ctx: Long) -> T,
-  ): T =
-    withContext(formatDispatcher) {
-      if (create && ctx == null) ctx = Context(initNative(url))
-      cb((ctx ?: throw Exception("AvFormat closed")).ptrValue())
-    }
+  override fun initPtr(): Long = initNative(url)
 
   private external fun getStreamsNative(pctx: Long): Array<AvStream>
 
   suspend fun getStreams(): List<AvStream> =
-    runWithContext(true) { ctx ->
+    withPtr { ptr ->
       if (streams == null) {
-        streams = getStreamsNative(ctx).toList()
+        streams = getStreamsNative(ptr).toList()
       }
       streams!!
     }
@@ -135,8 +93,8 @@ open class AvFormat(
     maxTs: Long = Long.MAX_VALUE,
     flags: Int = 0,
   ): Unit =
-    runWithContext { ctx ->
-      seekToNative(ctx, ts, stream?.index ?: -1, minTs, maxTs, flags)
+    withPtr { ptr ->
+      seekToNative(ptr, ts, stream?.index ?: -1, minTs, maxTs, flags)
     }
 
   // < 0：出错
@@ -147,15 +105,15 @@ open class AvFormat(
   ): Int
 
   suspend fun getPacket(streams: Collection<AvStream>): AvPacket? =
-    runWithContext { ctx ->
+    withPtr { ptr ->
       val packet = AvPacket()
       while (true) {
-        val ret = getPacketNative(ctx, packet.ptr())
+        val ret = getPacketNative(ptr, packet.ptr)
         if (ret < 0) {
           // EOF / 出错：这个 packet 交不出去了，必须就地归还 —— native 侧
           // 只有 av_packet_free 一个释放点，没有 GC 兜底（见 AvPacket）。
           packet.close()
-          return@runWithContext null
+          return@withPtr null
         }
         if (streams.isEmpty() || streams.firstOrNull { it.index == ret } != null) {
           packet.streamIndex = ret
@@ -167,27 +125,5 @@ open class AvFormat(
 
   private external fun destroyNative(ctx: Long)
 
-  // 这里原先有个 `protected fun finalize()` 当 GC 兜底（它意外覆写了 `Object.finalize`，
-  // javap 里就是 `protected final void finalize()`），已移除：
-  // - finalize 跑在 JVM 的 finalizer 线程上，JDK 18 起已被标记为待移除；而它里面是
-  //   `runBlocking { close() }` —— 在 finalizer 线程上阻塞等另一条线程，时机与死锁
-  //   风险都不可控。
-  //
-  // 名字为什么是 `closeAsync` 而不是 `close`：销毁必须回到 dispatcher 线程，而 Kotlin
-  // 不允许 `suspend fun close()` 与非挂起的 `fun close()` 共存（实测报
-  // "Conflicting overloads" + "Suspend function cannot override non-suspend
-  // function"）。于是挂起那版只能改名。
-  //
-  // 同步的 `close()` 则刻意保留成**抛异常**：走 `use {}` 会立刻吵出来，而不是假装
-  // 关掉了。这就是「要等线程」那类资源的预期行为 —— 必须自己 await。
-  private val releaseHint: String =
-    "销毁必须回到 formatDispatcher 线程上执行，请在用完后显式 await suspend 的 closeAsync()"
-
-  override fun close(): Unit = throw UnsupportedOperationException(releaseHint)
-
-  open suspend fun closeAsync() =
-    runWithContext {
-      ctx?.destroyNow()
-      ctx = null
-    }
+  override suspend fun releaseImpl(ptr: Long) = destroyNative(ptr)
 }

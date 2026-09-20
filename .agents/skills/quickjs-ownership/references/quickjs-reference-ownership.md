@@ -220,35 +220,33 @@ promise 必须排除在表外……而这些在 `_jsToDart` 的模型里**一个
 ```kotlin
 class QuickJS private constructor(
   ...,
-  private val jsDispatcher: CoroutineDispatcher,
-) : Pointer(dispatcher = jsDispatcher) {           // 直接继承基类，见规则 5.1
+  val dispatcher: ThreadDispatcher,                // 归属线程的调度器，见规则 5.1
+) : Pointer(dispatcher = dispatcher) {             // 直接继承基类，见规则 5.1
 
   companion object {
-    // 构造入口是**挂起**工厂：构造必须落在归属线程上（initContext 那一步，见下）
+    // 构造入口是**挂起**工厂：整个构造过程落在归属 dispatcher 上
     suspend fun create(...): QuickJS =
       withContext(sharedDispatcher) { QuickJS(..., sharedDispatcher) }
 
     // 全进程共享一条线程，线程名 `quickjs`；**从不 shutdown**
-    val sharedDispatcher: CoroutineDispatcher =
-      Executors.newSingleThreadExecutor { r -> Thread(r, "quickjs") }.asCoroutineDispatcher()
+    val sharedDispatcher: ThreadDispatcher = ThreadDispatcher("quickjs")
   }
 
   private val runtimeAlive = AtomicBoolean(true)   // 「已销毁」标记，与 isClosed 不是一回事
 
-  // 句柄必须在**属性初始化器**里算好 —— 理由见下面的 ⚠️（构造期子类字段还是 0）
-  private val handle: Long = initContext(this@QuickJS, stackSize, memoryLimit, timeout)
+  // 唯一覆写者：本类要拿 this 换句柄（规则 5.1 第 2 条）。基类保证它**只调一次**、且那次调用
+  // 推迟到**首次读句柄**那一刻才发生（[withPtr] / [withPtrSync] 的块里，也就是投递之后）——
+  // 于是构造参数都已就位、而且跑在归属线程上，`JS_NewRuntime` 的 `stack_top` 基准靠的就是它。
+  // 建失败返回 0 由基类 check。
+  override fun initPtr(): Long = initContext(this@QuickJS, stackSize, memoryLimit, timeout)
 
-  init { check(handle != 0L) { "initContext failed" } }
-
-  override fun initPtr(): Long = handle            // 基类那几扇读门都从这里取值（规则 5.1 第 2 条）
-
-  override suspend fun releaseImpl() {             // 门只在上游：closeAndCollect() 先 markClosed()
+  override suspend fun releaseImpl(ptr: Long) {    // 门只在上游：closeAndCollect() 先 markClosed()
     runtimeAlive.set(false)                        // 先落「已销毁」，onJsThreadQuietly 才会停
-    destroyContext(ptrValue())
+    destroyContext(ptr)                            // 句柄**以参数交进来**，不必自己去读
   }
 
   override fun close() {                           // 投递即返回，不等释放
-    CoroutineScope(jsDispatcher).launch { closeAndCollect().await() }
+    submit { /* closeAndCollect().await() + 打印泄漏 */ }   // 不在归属线程上也无需 withContext
   }
 }
 ```
@@ -262,8 +260,8 @@ class QuickJS private constructor(
   基类的入口（`Pointer.closeDeferred()`、本类的 `closeAndCollect()`）**先抢名额、再调
   `releaseImpl()`**；实现里再抢一次必然失败，结果是「`close()` 返回成功、其实没销毁」，
   runtime 连同它整个堆漏在 native。2026-09-20 收口后的形态：门只在 `closeAndCollect()`
-  那次 `Pointer.markClosed()`，`releaseImpl()` 就是裸销毁 `destroyContext(ptrValue())`
-  外加把 `runtimeAlive` 落下。此前那套两层叠法（`destroyNow()` 自己再抢一次 + 裸
+  那次 `Pointer.markClosed()`，`releaseImpl(ptr)` 就是裸销毁 `destroyContext(ptr)`
+  外加把 `runtimeAlive` 落下（句柄由基类当参数交进来）。此前那套两层叠法（`destroyNow()` 自己再抢一次 + 裸
   `releaseImpl()`）在「基类那条路」上是错的，已整段删掉。
 - **runtime 句柄必须建在归属线程上**（`initContext` 那一步，2026-09-20 起由挂起工厂
   `create()` 的 `withContext(sharedDispatcher)` 强制）。`JS_NewRuntime()` 与
@@ -290,40 +288,64 @@ class QuickJS private constructor(
 
 | 职责 | 成员 |
 | --- | --- |
-| 保管指针 | 构造参数 `heldPtr`（`private`，`0` = 没有句柄）、**`protected open initPtr()`（句柄来源，默认返回 `heldPtr`）**、`internal suspend withPtr {}`（标准形态）、`internal withPtrSync {}`（非挂起入口）、`suspend ptrValue()`、已弃用的 `protected ptr` |
-| 归属 dispatcher | 构造参数 `dispatcher`（`private`）、`internal submit {}`（`dispatcher == null` ⇒ 就地跑完再返回）、`withPtr {}` |
-| 只关一次 | `isClosed` / `protected markClosed()` / `protected suspend releaseImpl()` |
+| 保管指针 | 构造参数 `private val nativePtr: Long?`（**多数子类走这条**，2026-09-20 收口；留 `null` = 没交，基类转去问覆写钩子）、`internal open initPtr()`（**唯一覆写钩子**，2026-09-20 收口：基类保证它**只调一次**、且**推迟到首次读句柄**时才跑）、`val ptr: Long`（公开裸读，2026-09-20 立）、`internal suspend withPtr {}`（标准形态）、`internal withPtrSync {}`（非挂起入口） |
+| 归属调度器 | 构造参数 `dispatcher: ThreadDispatcher?`（`private`；`null` = 不承诺线程归属）、构造参数 `closeDispatcherOnClose: Boolean`（`private`，默认 `false`；**只有自己建的独占 dispatcher 才传 `true`** —— 基类替它在归还落地后关掉，见下面「这条线程靠 `ThreadDispatcher.close()`」那段）、`internal submit {}`（`dispatcher == null` ⇒ 就地跑完再返回）、`withPtr {}` / `withPtrSync {}`（判据见下） |
+| 只关一次 | `isClosed` / `protected markClosed()` / `fun closeDeferred(): Deferred<Unit?>`（基类收口的归还入口）/ `abstract suspend releaseImpl(ptr: Long)`（**子类只回答这一件事**，2026-09-20 由「默认抛异常 + `releaseHint`」改成 `abstract`） |
 
 承重约定，逐条都有实测代价：
 
-- **指针创建即指定、之后不可更改**（没有 `setPtr`，也别想清零）。按**获得句柄的时机**
-  分三条路，都不是惰性：
-  1. **构造期就有** —— 当 `heldPtr` 传给 `super`（`AvFrame`、`JSRef` 等）。
-  2. **要拿 `this` 去 native 换** —— **继承本类并覆写 `initPtr()`**：构造参数留空，句柄
-     在自己的**属性初始化器**里算好、存进一个 `private val`，覆写体只读那个字段
-     （`QuickJS.handle` 即此类，2026-09-20 定稿）。塞不进 `super(...)` 实参是因为 `this`
-     在 super 调用点还不可引用（Kotlin 报 `cannot access '<this>' before the instance has
-     been initialized`；Java 同样禁止，JEP 513 放宽的只是「super 之前可以有语句」）。
-     ⚠️ **覆写体不是在构造期被调用的** —— `ptr` 的 getter 到**读句柄时**才调它。理由：基类
-     构造期子类字段还没有值，实测 `putfield` 排在 `invokespecial <init>` **之后**，那一刻
-     覆写体读到的是 `0`，而且**编译器不报错**（静默错值）。`QuickJS` 的句柄要读
-     `stackSize` / `memoryLimit` / `timeout` 三个构造参数，按构造期那个时机算就必然是 `0`
-     （`timeout = 0` ⇒ 死循环不再被打断，测试会一直挂着）。相应地，**基类也绝不能在构造期
-     读 `ptr`** —— 同一个理由。实测：`PointerTest.initPtrSeesConstructionState`（探针类在
-     构造期读 `initPtr()` 只看到 `0`，构造完成后才读到真值）。
-  3. **要晚点才有** —— **不继承**，改成**内部持有一个 `Pointer` 子类**
-     （`AvFormat.ctx` / `AvCodec.ctx` / `AvPlayback` / `AvPacket.handle`），由那个子类在
-     自己的构造期拿到句柄，外层 façade 只转发。
-  ⚠️ 曾经有过一版「子类覆写 `initPtr()`、基类**首次读指针时惰性创建**」，已废弃：惰性
-  意味着「句柄可能还没建」，于是每个读指针的地方都要问一句「现在建吗」，而建的动作又该
-  落在哪条线程上也说不清。现在的 `initPtr()` **不是**那个东西 —— 它是**读时取值**的钩子
-  （`ptr` 的 getter 调它），句柄本身早在属性初始化器里就建好了。
-- **`heldPtr` / `dispatcher` 都是 `private`，子类读不到**，只剩两扇该用的门 + 一扇弃用的门：
+- **指针创建即指定、之后不可更改**（没有 `setPtr`，也别想清零）。按**句柄是怎么到手的**
+  分两条路，另加一条「干脆别继承」：
+  1. **构造参数里就有句柄** —— **最常见的一条**：把句柄当**基类构造参数的第一个实参**
+     传进来（`Pointer(nativePtr, dispatcher)`）即可，一个成员都不用覆写（`AvFrame` /
+     `AvPacket` / `JSRef`）。2026-09-20 收口 —— 此前每个子类各写一份
+     `private val nativePtr` 加 `override fun initPtr()`，重复 8 遍。
+  2. **要拿 `this` 去 native 换** —— 第一个实参**留 `null`**、**覆写 `initPtr()`**
+     （`QuickJS` 是**唯一**此类）。塞不进 `super(...)` 实参是因为 `this` 在 super 调用点还不可
+     引用（Kotlin 报 `cannot access '<this>' before the instance has been initialized`；Java
+     同样禁止，JEP 513 放宽的只是「super 之前可以有语句」）。
+     ⚠️ **基类保证这次调用「只一次」且「不在构造期」**：它被推迟到**首次读句柄**那一刻才跑
+     （结果存进 `Pointer.ptr` 的 `by lazy`），于是覆写体里读到的构造参数属性都已就位。挪回
+     **基类构造期**必错 —— 基类 `<init>` 整体跑在子类字段赋值之前，实测 `putfield` 排在
+     `invokespecial <init>` **之后**，那一刻覆写体读到的是 `0`，而且**编译器不报错**（静默错
+     值）。`QuickJS` 的句柄要读 `stackSize` / `memoryLimit` / `timeout`，按构造期那个时机算
+     必然全是 `0` —— 其中 `timeout = 0` 等于**关掉死循环中断**（native 侧
+     `JS_SetInterruptHandler` 里 `timeoutMs <= 0` 直接放行），表现就是「测试跑着跑着不动了」。
+     实测：`PointerTest.initPtrSeesConstructionState`。
+     ⚠️ 首次读落在 `withPtr` / `withPtrSync` 的**块里**，也就是**投递之后**，所以这次求值跑在
+     归属线程上 —— 「建句柄」要挑线程的子类因此不必自己安排：`JS_NewRuntime` 记 `stack_top`
+     靠的就是这条。覆写体里可以 `assert` 一下（`Pointer` 就是这么写的）。
+     ⚠️ 既没交句柄（`null`）也没覆写 `initPtr()` 的子类，**第一次读句柄就抛**
+     `IllegalStateException` —— 默认实现直接抛，**不是** `NotImplementedError`（后者不是
+     `IllegalStateException`，会让 `assertFailsWith<IllegalStateException>` 漏过）。实测：
+     `PointerTest.missingHandleFailsLoudly`。
+     ⚠️ 第一个实参**不拿 `0` 当「没交」的哨兵**：`0` 是合法的空句柄（借用型的空壳传
+     `0L`），哨兵会把「真的交了 `0`」误判成「没交」而转头去问 `initPtr`。实测：
+     `PointerTest.explicitZeroHandleIsNotTreatedAsMissing`。覆写路径返回 `0` 则是
+     **建句柄失败**，基类 `check` 出来。
+     ⚠️ `initPtr()` **只被调一次**（结果记在 `Pointer.ptr` 的 `by lazy` 里）—— 对 `QuickJS`
+     是硬要求：覆写体就是 `initContext`，多调一次就是多建一个 runtime。实测：
+     `PointerTest.initPtrIsCalledOnce`。
+  3. **只是借用**（指针归别人所有）—— **不继承本类**（`AvStream`）：没有 `close()` 就没有
+     人能误关它。2026-09-20 由「继承 + 覆写 `close()` 抛异常」改成这一版 —— 后者要跑到运行期
+     才拦得住，而「不拥有」本来就该是**类型**上的事实。
+  ⚠️ 还有一条曾经存在、**2026-09-20 已撤掉**的路：**「句柄要晚点才有」→ 不继承本类、改成内部
+  持有一个子类**（`AvFormat.ctx` / `AvCodec.ctx` / `AvPlayback.Handle` / `AvPacket.handle`）。
+  撤掉的理由是它们都在冒充「句柄还不知道在哪」：现在 `AvFormat` / `AvCodec` / `AvPlayback`
+  / `AvPacket` **直接继承 `Pointer`**、各自覆写 `initPtr()` 现算，少一层转发和一层
+  「实例是惰性的」的绕。
+  ⚠️ 「句柄什么时候到手」这一处 2026-09-20 走过**两版，前一版错**，别再回去：
+  - **基类构造期求值**（`private val ptr = initPtr()`）—— 读到全 `0`，句柄必是错值；
+  - **首次读句柄时惰性求值**（`by lazy`，现在这一版）—— 值对了；代价是「句柄什么时候建起来」
+    变成调用方时序的函数：基类每一轮都得论证「首次读一定发生在归属线程上」，等于把一条不变
+    量挂到调用点上，而且「只调一次」得靠 `SYNCHRONIZED` 的锁维持。
+- **句柄与 `dispatcher` 都是基类的 `private` 成员**，读句柄只剩三个入口（句柄本身以
+  `Pointer.ptr` 公开，见第三条）：
   - `internal suspend fun <T> withPtr(block: suspend (Long) -> T): T` —— **做 native 调用的
     标准形态**（2026-09-20 新增）。把句柄**当参数压进块**、连同块一起投递到归属 dispatcher，
     于是「在归属线程上」与「拿到句柄」合并成一个动作；已在归属 dispatcher 上就**就地执行**
     （零派发），`dispatcher == null` 就地执行且不切线程。首个改用它的调用点是
-    `QuickJS.evaluate`（原先是手写 `withContext(jsDispatcher)`）。
+    `QuickJS.evaluate`（原先是手写 `withContext(自己的 dispatcher)`）。
     `internal` 而不是 `protected`：还有一类 façade **不继承** `Pointer`、只内部持有它的
     子类（`AvFormat.ctx` 等，见下一条承重约定的第 3 点），外层得拿那个内部子类去调，
     而 `protected` 到不了外层。
@@ -338,56 +360,81 @@ class QuickJS private constructor(
     **不希望异常被 `Deferred` 吞掉**）才继续用 `CoroutineScope(dispatcher).launch`。
     ⚠️ **别用 `MainScope()`**：它底下是 `Dispatchers.Main`，在 JVM 测试这类没有 Android
     主线程的环境里根本没初始化，一调就是 `IllegalStateException`（崩在 `MainDispatchers.kt`）。
-    归属线程就是 `jsDispatcher`，要投就往它投。
+    归属线程就是 `sharedDispatcher`，要投就往它投。
   - `internal fun <T> withPtrSync(block: (Long) -> T): T` —— `withPtr` 的**同步版**
     （2026-09-20 新增），给**没有协程上下文**的入口用（JNI 直接进来的回调链、
-    `AutoCloseable.close()` 这种非挂起签名）。已在归属线程上（跟**构造线程**比）就地执行、
-    零派发，否则 `runBlocking(d)` 投过去跑完再返回；`dispatcher == null` 就地执行、不判断
-    线程。⚠️ 它会在**调用线程上阻塞**等归属 dispatcher 空出来，所以别在「归属线程正等着你
-    返回」的场合调它。
-    ⚠️ 判据只能用构造线程快照，是因为 `CoroutineDispatcher` 反查不了自己的线程（见下一条）；
-    快照失准的后果**只是多一次投递**、不影响正确性 —— 代价由一条不变量来抵：**带 dispatcher
-    的子类都在归属线程上构造**（`QuickJS.create()` 用 `withContext` 强制了这一点，
-    `AvFormat` / `AvCodec` 本来就在 `withContext` 里构造）。
+    `AutoCloseable.close()` 这种非挂起签名）。已在归属线程上（跟 `ThreadDispatcher.thread`
+    比）就地执行、零派发，否则 `runBlocking(d)` 投过去跑完再返回；`dispatcher == null` 就地
+    执行、不判断线程。⚠️ 它会在**调用线程上阻塞**等归属 dispatcher 空出来，所以别在「归属
+    线程正等着你返回」的场合调它。
+    ⚠️ 判据是 `ThreadDispatcher.thread`，**不再**是「构造线程」（2026-09-21 换）：归属线程由
+    `ThreadDispatcher` 自己记，跟谁在哪条线程上构造无关。快照失准的后果**只是多一次投递**、
+    不影响正确性。
     实测：`PointerTest.withPtrSyncDispatchesToOwnerThread`（在别处调会投递、在归属线程上调
     就地执行）。
-  - `suspend fun ptrValue()` —— 只要句柄、不打算顺带跑一段代码时用它；任意线程可调，
-    实现就是 `withPtr { it }`，判据只有一处。
-  - `protected val ptr` —— 同步、**已弃用、且不做任何判断**（`@Deprecated(WARNING)`）。
-    还离不开它的只有 JNI 直接进来的**非挂起**回调链 —— `handleJSInvokable` /
-    `wrapJSPromiseAsync`，以及 `javaToJsImpl` 一个函数里的几十处读。那些入口没有协程上下文，
-    挂起版顶不上。
-    ⚠️ **覆写**它要 `@Suppress("OVERRIDE_DEPRECATION")` —— 报的是 "overrides a deprecated
-    member but is not marked as deprecated itself"，`@Suppress("DEPRECATION")` **压不住**；
-    **使用**它才是 `@Suppress("DEPRECATION")`。`JSRef` 两样都占（它 `get() = super.ptr`）。
-    另注：子类覆写出来的 `ptr` 自己**不带** `@Deprecated`（该注解不被继承），于是类内后续
-    读它不再报警 —— `JSRef` 里那几处 native 调用点正是靠这一点保持干净的。
-    ⚠️ 它是**取值的门**、不是**定值的门**：getter 就是 `initPtr()`。只该用在「已经确定自己
-    在归属线程上、只想同步读一下」的场合（`JSRef` 提成 `public` 就是这个用途），其余一律走
-    `withPtr` / `ptrValue` / `withPtrSync`。
-  - ⚠️ **四扇门（`withPtr` / `ptrValue` / `withPtrSync` / `ptr`）都不看 `isClosed`。**
+  - `val ptr: Long` —— **公开的裸读门**（2026-09-20 由「挂起的 `ptrValue()` + `protected`
+    裸读」合成这一个）：同步、任意线程可调、**不判断也不投递**，读得到就读。给「已经确定在
+    归属线程上」的场合用 —— `withPtr {}` 块里、native 回调链里，形态就是 `frame.ptr` /
+    `packet.ptr` 这种直接取值（各子类原先那份 `suspend fun ptr(): Long = ptrValue()` 转发
+    也一并删了）。
+    为什么敢公开：要挑线程的人本来就该用 `withPtr` / `withPtrSync`，而**已经**在归属线程上的
+    人再投递一次纯属白跑；把它藏起来只会逼出「各子类自己开一扇转发门」——
+    2026-09-20 收口前就是这样，`AvFrame` / `AvPacket` / `JSRef` 各有一份。
+    ⚠️ 它是**裸读**：跨线程误用不会被拦下，正确性归调用方。挂起的 `ptrValue()` 已删（它的
+    调用点本来就都在 `withPtr` 块里）；「没有 dispatcher 就地同步读」由
+    `withPtrWithoutDispatcherRunsInPlace` 钉住，裸读零派发由
+    `PointerTest.nakedReadNeverDispatches` 钉住。
+  - ⚠️ **三个入口（`withPtr` / `withPtrSync` / `ptr`）都不看 `isClosed`。**
     关闭是「先标记、后释放」，而归还动作恰好跑在「已标记、未销毁」那个窗口里
     （`releaseImpl` 自己就要读句柄），拿标记当门会把归还一起挡在外边。「标记即拒绝」只适用
     于**新操作**，由子类自己判（`QuickJS.runOnJsThread` / `evaluate`）。
-    实测：`PointerTest.releaseImplCanReadHandleAfterCloseIsMarked`（`markClosed()` 之后
-    `releaseImpl` 仍读得到句柄）与 `deprecatedSyncReadDoesNotGuardThread`（裸读不做线程校验）。
-  - `dispatcher == null` = 「本类不承诺线程归属」：`submit` 就地跑、`withPtr` / `ptrValue`
-    就地读 —— 还没注入 dispatcher 的类（`AvFrame` / `AvPacket` / `AvStream` / `JSRef`）即此类。
-- **为什么撤掉「归属线程」校验**（2026-09-20 收口，三条都是实测结论，别再往回改）：
-  1. `CoroutineDispatcher` **无法反查自己的线程**：`newSingleThreadExecutor()
-     .asCoroutineDispatcher()` 返回 `ExecutorCoroutineDispatcherImpl`，它**没有覆写**
-     `isDispatchNeeded`，于是继承 `CoroutineDispatcher` 的默认实现 —— 恒为 `true`，
-     拿不到「我在不在你的线程上」。要查源码就翻 gradle 缓存里
-     `kotlinx-coroutines-core-jvm/<ver>/*-sources.jar` 的 `jvmMain/Executors.kt` 与
-     `commonMain/CoroutineDispatcher.kt`（`python -c` 配 `zipfile` 直读即可，不必解包）。
-  2. 唯一能反查的手段（构造期 `runBlocking(dispatcher) { currentThread() }`）**必然死锁**：
-     带 dispatcher 的子类**全部在归属线程上构造** —— `AvFormat` / `AvCodec` 在
-     `withContext` 里、`QuickJS` 在挂起工厂 `create()` 的 `withContext(sharedDispatcher)` 里。
-     ⇒ 于是只能退一步，改用**构造线程快照**给 `withPtrSync` 用（见上一条）。
-  3. `suspend` 里拿到的是**调用方**的 dispatcher，不是**归属**的 —— 归属是对象自己的
-     属性，与谁在调无关；构造器又不能 suspend。所以它只能当「我是否已在归属 dispatcher
-     上」的判据用，也就是 `withPtr` / `ptrValue` 那一条。
-  ⇒ 跨线程读的正确性改由调用方保证，**读错了不会被拦下** —— 同步门因此撤掉校验。
+    实测：`PointerTest.releaseImplReceivesHandleAfterCloseIsMarked` —— `markClosed()` 之后
+    `releaseImpl` 仍拿得到句柄（它此时是**参数**），块里再 `withPtrSync` 也照样读得到。
+  - `dispatcher == null` = 「本类不承诺线程归属」：`submit` 就地跑、`withPtr` / `ptr` 就地读
+    —— 还没注入 dispatcher 的类（`AvFrame` / `AvPacket` / `JSRef`）即此类。
+- **「我此刻在不在归属线程上」怎么判**（2026-09-21 定稿：自带 `ThreadDispatcher`；别再退回
+  「构造线程快照」那一版）：
+  1. `CoroutineDispatcher` 本身**没有反查自己线程的接口**：`newSingleThreadExecutor()
+     .asCoroutineDispatcher()` 返回 `ExecutorCoroutineDispatcherImpl`，它既**没有覆写**
+     `isDispatchNeeded`（恒 `true`），也**从没记下自己那条线程** —— 拿不到「我在不在你的
+     线程上」。要查源码就翻 gradle 缓存里 `kotlinx-coroutines-core-jvm/<ver>/*-sources.jar`
+     的 `jvmMain/Executors.kt` 与 `commonMain/CoroutineDispatcher.kt`（`python -c` 配
+     `zipfile` 直读即可，不必解包）。
+  2. 于是**归属线程由本工程自己的 `ThreadDispatcher` 记**：它**继承 `CoroutineDispatcher`**
+     （所以能直接当上下文元素用，`withContext(d)` / `CoroutineScope(d)` 不必再 `.dispatcher`
+     拐一层），外加一份**构造期投递一次**取到的 `thread` 快照，并把 `isDispatchNeeded` 改成
+     「已在归属线程上就别派发」。
+     ⚠️ 旧版不包装、直接用 `asCoroutineDispatcher()`，再拿**构造线程**当归属线程 —— 那条路
+     把归属挂到**构造现场**上，`withPtrSync` 判得准不准全看子类有没有在归属线程上构造。
+     这条不变量**已经不需要**了。
+     ⚠️ 快照唯一的失效场景是「**在归属线程上建自己**」（构造期那次 `runBlocking` 会自己
+     等自己）；当前三个调用点都不在归属线程上（伴生对象初始化 / `withContext` 里）。
+     ⚠️ 这条线程靠 `ThreadDispatcher.close()` 显式关（转发 `ExecutorService.shutdown()`）；
+     **只有独占者才该调**（`QuickJS.sharedDispatcher` / `AvFormat` 的伴生实例是全进程共享的）。
+     注意 `delegate` 的类型要留成 `ExecutorCoroutineDispatcher` —— 削成 `CoroutineDispatcher`
+     就再也拿不到 `close()`。
+     ⚠️ **关掉之后再投递，拿到的是 `CancellationException` 而不是 `RejectedExecutionException`**
+     （2026-09-21 实测）：kotlinx 在 `ExecutorCoroutineDispatcherImpl.dispatch` 里把它兜住、
+     **改投到 `Dispatchers.IO`**（`jvmMain/Executors.kt:133-141`）。实测四条路：裸 `dispatch`
+     静默跑在 `DefaultDispatcher-worker-N`；`withContext` / `runBlocking` / `submit{}.await()`
+     抛 `CancellationException("The task was rejected")`；`launch` 与不 `await` 的 `submit { }`
+     完全静默。⇒ **「归属线程」这个承诺在关掉之后不再由 kotlinx 保证**。
+     ⇒ **这一手由 `ThreadDispatcher` 自己拦**（2026-09-21 补上）：`dispatch` 在
+     `delegate.dispatch` **之前** `check(!closedFlag)`，关掉之后的投递一律抛
+     `IllegalStateException`；`close()` 里**先置标记、再 `shutdown()`**。上面那三种表现从此只在
+     「绕过它、直接用裸 `ExecutorCoroutineDispatcherImpl`」时才出现。
+     **共享实例照旧绝不能关**（`QuickJS.sharedDispatcher` / `AvFormat` 的伴生实例）：拦一手只是把
+     「静默埋雷」换成「当场炸」—— 受害的仍是之后所有投递者，只是炸得早。
+     **独占者不必自己攥着 dispatcher**（`Pointer.dispatcher` 是 `private`，`AvCodec` 够不到它）：
+     在基类构造参数里传 `closeDispatcherOnClose = true`，基类替它关。两条约束 ——
+     ① 时机是**归还落地之后**：早一步 `shutdown` 会把 `releaseImpl` 一起拒在门外（那条线程的
+     回收本身也是一次归还）；② 挂在 `closeDeferred()` 返回的 `Deferred` **完成**上，不是挂在
+     `close()` 里：`FFPlayer.closeAsync()` 走的是 `codec.closeDeferred().await()`，只关 `close()`
+     会漏掉它（2026-09-21 实测踩过：每实例一条 `avcodec` 线程照旧攒着）。
+  3. 挂起侧仍看**协程上下文里的 interceptor 是否同一个**（`=== d`）—— 它不依赖线程对象、
+     也不会误判，且比 `isDispatchNeeded` 更早短路（省掉一次调度上下文的构造）。
+  ⇒ 跨线程读的正确性仍由调用方保证（`ptr` 是裸读门），**读错了不会被拦下** —— 同步门不做
+  跨线程校验，只决定「就地跑还是投过去」。
 - ⚠️ **别再写「`withContext(自己的 dispatcher)` 会重派发」**（2026-09-20 实测纠正的旧说法）：
   `isDispatchNeeded` 恒 `true` 只说明它**回答不了**「我在不在你的线程上」，**不**说明
   `withContext` 会往队列里投一次 —— kotlinx 在 `withContext` 里比的是**上下文里的
@@ -396,26 +443,39 @@ class QuickJS private constructor(
   `PointerTest.withContextOnSameDispatcherDoesNotRedispatch`：同一个 dispatcher 嵌套调用，
   派发计数为 0。⇒ `withPtr` / `ptrValue` 那条就地分支的价值是**省掉一层调度上下文的构造**、
   并把判据显式摆出来，**不是**为避免死锁或多余派发。
-- **默认 `releaseImpl()` 抛 `UnsupportedOperationException`**（`releaseHint` 里写清原因）：
-  宁可吵，不要静默 —— 没有归还实现的类被 `close()` 时立刻炸，而不是假装成功地把
-  native 资源留在那儿（本项目没有 GC 兜底，静默 = 泄漏）。分三档：
-  - **能就地归还**：`override suspend fun releaseImpl()`。基类保证它**跑在归属 dispatcher 上**，
-    所以里面直接用 `ptrValue()` 拿句柄即可（此时走的就是就地读那条快路径）；没有
-    dispatcher 时 `close()` 会就地跑完（内部一次
-    `runBlocking`，块里不挂起 = 等于直接调用）—— `AvFrame`、`AvPacket.Handle`、
-    `AvPlayback.Handle`、`AvFormat.Context`、`AvCodec.Context`、`QuickJS`。
-    `JSRef` 是另一种：它覆写 `close()` 走自己那套（见规则 5.2）。
-  - **要等线程**：释放必须回 dispatcher 线程，于是释放函数只能是 `suspend` 的，而它
-    **不能叫 `close`**（Kotlin 不允许 `fun close()` 与 `suspend fun close()` 共存，实测
-    `Conflicting overloads` + `Suspend function cannot override non-suspend function`）；
-    统一改名 `closeAsync()`，并把同步的 `close()` 覆写成**直接抛** —— `AvFormat` /
-    `AvCodec` / `FFPlayer`。`use {}` 对这类会抛异常，必须自己 await。重命名会波及调用方：
-    `FFPlayer` 里的 `super.closeAsync()`、`PlayScreen` 里的 `player.closeAsync()`。
-  - **只是借用**：指针归别人所有，自己不该也不能释放 —— `AvStream` 的 `AVStream*` 归
-    `AvFormat` 的 `AVFormatContext` 所有。保持基类那个抛异常的默认实现。
-- ⚠️ 继承 `Pointer` **只是标记，不负责归还**：`use {}`、`invokeOnCompletion` 这类自动
-  调用点仍会在末尾调 `close()`，所以「借用型」和「要等线程型」必须保证不会被自动关掉，
-  否则抛出的异常会盖掉真正的业务逻辑。
+- **`releaseImpl(ptr: Long)` 是 `abstract`，没有默认实现**（2026-09-20 由「默认抛
+  `UnsupportedOperationException` + `releaseHint` 讲原因」改过来）：宁可吵，不要静默 ——
+  `abstract` 让「忘了写归还」在**编译期**就吵出来，比运行期抛异常更早；而原先那套
+  `releaseHint` 加上「各 façade 自己覆写 `close()` 抛异常」的排布，最后变成了「谁都不能用
+  `use {}`」。子类只回答一件事：怎么还。契约三条 —— 句柄**以参数交进来**、**只跑一次**、
+  **跑在归属 dispatcher 上**（`dispatcher == null` 时跑在调用线程上）。
+  分两档：
+  - **能归还**（绝大多数）：`override suspend fun releaseImpl(ptr: Long)` —— `AvFrame` /
+    `AvPacket` / `AvFormat` / `AvCodec` / `AvPlayback` / `QuickJS`。基类把归还投递到归属
+    dispatcher 上，所以**「释放必须回那条线程」不再是特例**：`AvFormat` / `AvCodec` 从前
+    得把 `close()` 覆写成抛异常、另立 `closeAsync()`，现在直接继承、`close()` 就是正常路径
+    （`PlayScreen` / `FFPlayer` 的调用点也随之改回 `close()`）。
+  - **只是借用**：指针归别人所有，自己不该也不能释放 —— 那就**不继承 `Pointer`**
+    （`AvStream` 的 `AVStream*` 归 `AvFormat` 的 `AVFormatContext` 所有）。
+- ⚠️ **「句柄从没兑现过」这条捷径只对覆写 `initPtr()` 的子类成立**：
+  `closeDeferred()` 的判据是 `!markClosed() || (nativePtr == null && !ptrLazy.isInitialized())`
+  —— 后半个合取**不能省**。句柄是**构造参数交进来**的子类（`JSRef` / `AvFrame`）手上
+  本来就有资源，`ptr` 读没读过都欠着一次归还；只看 `isInitialized()` 会让它们的
+  `close()` **静默什么都不还**（`JSRef.free()` 减到 0 就走进这条路 —— 引用不归还 → 关闭
+  清算报泄漏、`JS_FreeRuntime` 的 `gc_obj_list` 断言 abort）。反过来，「没兑现过就别为了
+  还去建」这条对 `QuickJS` 是必需的：否则 `close()` 会先 `JS_NewRuntime` 再 `JS_FreeRuntime`。
+  实测：`PointerTest.closeSkipsReleaseWhenHandleWasNeverBuilt`（覆写型不建不还、但仍先标记）
+  与 `explicitZeroHandleIsNotTreatedAsMissing`（构造参数型拿着 `0` 也照样归还一次）。
+- ⚠️ **`close()` 一定先 `markClosed()`**（哪怕这一轮不还）：`closeDeferred()` 的两条短路
+  分支都在标记**之后**。否则「关过了但句柄没建」的对象会放过之后的新操作，让新操作建出一个
+  没人释放的上下文（`AvPlayback.postFrame` 就靠 `isClosed` 拦这一手，2026-09-20 起不再自备
+  `AtomicBoolean`）。
+- ⚠️ 要**等归还落地**的地方得 `await()` 它：`close()` 只投递。`FFPlayer.closeAsync()` 里
+  `super.close()` / `codec.close()` 这种「以为写的是 `closeAsync`」的位置，2026-09-20 起
+  一律改 `closeDeferred().await()` —— 否则 `closeAsync()` 会在 native 上下文还没销毁时返回。
+  回归见 `PointerTest.releaseRunsOnOwnerThreadAndOnlyOnce`。
+  ⚠️ 所以关的**落点也必须在 `closeDeferred()` 上**：`closeDispatcherOnClose` 的关闭动作挂在它
+  返回的 `Deferred` 完成里；只关 `close()` 的话，漏掉的不只是等待，还有那条独占线程的回收。
 - ⚠️ **`close()` 是「先标记、后释放」且不等结果**：`markClosed()` 先置位，释放动作投进
   dispatcher 队列就返回。不等返回不会 use-after-free —— 同一个单线程 dispatcher 是
   **FIFO** 的，释放消息一定排在「它之前投递的操作」之后、「它之后投递的操作」之前；
@@ -424,7 +484,10 @@ class QuickJS private constructor(
 - ⚠️ **「句柄是不是 0」不能当守卫**：指针不可更改，销毁之后它仍是原值。判「还活着吗」
   看 `isClosed`，或各 façade 自己的一次性标记（`QuickJS.runtimeAlive`）。
 - ⚠️ `close()` 的**短路分支必须返回已完成的 `CompletableDeferred`**：写成空的 `async {}`
-  没人 complete，调用方 `await()` 会永久挂住。**同一个坑还有一个更隐蔽的形态**：写
+  没人 complete，调用方 `await()` 会永久挂住。**已完成还有第二个用途**：`closeDispatcherOnClose`
+  的关闭动作挂在完成上，短路分支返回的就是已完成的 Deferred ⇒ 关闭**当场同步执行**，于是
+  「句柄都没建过也得收线程」也成立 —— 那条线程的构造期就投递过一次（`ThreadDispatcher` 要取
+  `thread` 快照），不关就是纯泄漏。**同一个坑还有一个更隐蔽的形态**：写
   `CompletableDeferred(null)` 会被重载解析挑到 `CompletableDeferred(parent: Job? = null)`
   那一个上去 —— 造出来的同样是**永不完成**的 Deferred，`await()` 永久挂起，而字符上完全
   看不出异常。2026-09-20 实测症状：`QuickJSTest.closeIsIdempotentAcrossEntryPoints` 第二次
@@ -433,15 +496,19 @@ class QuickJS private constructor(
   完成的 Deferred」的指纹，别误判成 native 卡死。
   ⇒ 一律写 `CompletableDeferred<T?>(value = null)`：带**类型实参 + 命名实参**才会落到
   `value: T` 那个重载上。`Pointer.submit()` 的兜底路径同理。
-- ⚠️ 已知毛刺：基类那条默认「抛异常」的 `releaseImpl` 也是先把 `markClosed()` 置位的，
-  于是**第二次 `close()` 会静默返回**（第一次已经抛过了）。目前只有 `AvStream` 这类借用
-  指针会碰上；要「每次都吵」就得再给基类加一个「本类可否归还」的表态位。
+- ⚠️ 已知取舍：`releaseImpl` 改 `abstract` 之后，「借用型」不再有「继承着但不实现」这种
+  半吊子状态 —— 它干脆不继承（见上）。所以「第二次 `close()` 静默返回」不再是一个需要额外
+  表态位的问题：第二次本来就是「已经关过」，静默是对的。
 
 ### 规则 5.2 —— `JSRef.close()` 是「还清」，不是 `free()` 的别名
 
 `JSRef` 持有引用计数（构造即一票、`dup()` 加票、`free()` 减票）。`close()` 走
-`AutoCloseable`，语义是「Kotlin 侧这个持有者已经不可达了，剩下的票全是垃圾」——
-所以它**直接清零计数再 `release()`**，而不是减一票。
+`AutoCloseable`（即基类 `Pointer.close()`），语义是「Kotlin 侧这个持有者已经不可达了」
+—— 2026-09-20 收口：**它不再清零计数**，而是走基类那套「先 `markClosed()`、再归还一次」，
+归还动作就是 `ctx.releaseRef(this)`（撤销登记 + 还掉值句柄那一票）。计数不再被清零的后果
+只有一处：`describe()` 里的 `refs=` 会停在归还前的读数 —— 而清算本来就要求「先记录、后
+归还」，这正是想要的。`dup()` 在关闭之后会被 `isClosed` 直接拒掉（`IllegalStateException`），
+所以「还完了还想要一票」这条路仍然堵着。
 
 若 `close()` 只是 `free()` 的别名，`dup()` 过的值就永远还不掉：`use {}` /
 `invokeOnCompletion` 这类自动调用点走的都是 `close()`，而它们只肯减一票，于是每个跑过
@@ -503,12 +570,12 @@ QuickJS 是**单线程**的：引用计数是裸 `int`、GC 链表与 Shape 哈�
 崩在 `get_shape_prop` / `list_del` 这类地方），要么漏减（对象/Shape 卡在 `gc_obj_list`，
 `JS_FreeRuntime` 的断言 `abort()`）。**症状是偶发崩、重跑就变绿**，因此极易被误判成环境问题。
 
-`QuickJS` 只有一个专用线程（`jsDispatcher`），三类入口分工不同：
+`QuickJS` 只有一个专用线程（`sharedDispatcher`），三类入口分工不同：
 
 | 入口 | 用哪个 | 关闭之后 |
 |---|---|---|
 | 会**返回**东西的同步调用（`jsCallImpl`、`javaToJsImpl`…） | `runOnJsThread`（= `isClosed` 守卫 + `withPtrSync`） | 抛 `IllegalStateException`（判据 `isClosed`） |
-| `evaluate` —— public 且**已 suspend** | `withPtr {}`（内部 `withContext(jsDispatcher)`） | 抛 `IllegalStateException`（判据 `isClosed`） |
+| `evaluate` —— public 且**已 suspend** | `withPtr {}`（内部 `withContext(d)`） | 抛 `IllegalStateException`（判据 `isClosed`） |
 | 只**归还 / 撤登记**的收尾动作（`releaseValue`、`releaseRef`） | `onJsThreadQuietly`（= `runtimeAlive` 判据 + `withPtrSync`，**已在 JS 线程上时就地执行**） | **静默跳过**（判据 `runtimeAlive`） |
 
 - **两类入口的判据不一样，别统一。** 新操作用 `isClosed`（标记即拒绝，否则它会排在销毁
@@ -528,7 +595,7 @@ QuickJS 是**单线程**的：引用计数是裸 `int`、GC 链表与 Shape 哈�
 - `releaseValue` / `releaseRef` 的调用方可以是**任意线程**（`close()` 出现在 `finally` 里）；
   非 JS 线程时它们要 `runBlocking` 一次调度 —— **UI 线程 `close()` 会等一次调度，这是明确
   接受的取舍**，别改成「异步投递、投递完就返回」（runtime 可能已经被销毁）。
-- ⚠️ **别把 runtime 句柄当值句柄用。** `releaseRef(ref)` 里那句 `releaseValue(ref.ptr)` 是
+- ⚠️ **别把 runtime 句柄当值句柄用。** `releaseRef(ref)` 把 ref 的值句柄交给 `releaseValue` 是
   唯一的正确写法：`onJsThreadQuietly { handle -> … }` 的块参数是**这个 Pointer 自己的
   runtime 句柄**，而 `releaseValue` 要的是**某个 JS 值**的句柄 —— 两个都是 `Long`，混用
   就是拿 runtime 指针对去 `jsReleaseValue`，当场踩坏 native 堆（实测表现：测试进程

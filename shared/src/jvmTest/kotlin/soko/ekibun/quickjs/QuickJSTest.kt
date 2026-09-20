@@ -193,9 +193,9 @@ class QuickJSTest {
       assertEquals(2, fn.refCount)
       fn.free()
       assertEquals(1, fn.refCount)
-      assertTrue(!fn.released, "still held once, must not be released yet")
+      assertTrue(!fn.isClosed, "still held once, must not be released yet")
       fn.free()
-      assertTrue(fn.released, "refcount hit zero, must be released")
+      assertTrue(fn.isClosed, "refcount hit zero, must be released")
       // 归零后重复 free 必须安全（重构前这里会双重释放 native 句柄）
       fn.free()
       fn.close()

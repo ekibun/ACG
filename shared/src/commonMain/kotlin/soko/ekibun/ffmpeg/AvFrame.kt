@@ -9,9 +9,6 @@ class AvFrame(
   val width: Int,
   val height: Int,
 ) : Pointer(nativePtr) {
-  /** 读句柄（挂起）：帧的 native 调用点都在 ffmpeg 的 dispatcher 上。 */
-  suspend fun ptr(): Long = ptrValue()
-
   /** 标记该帧正在被哪个 PTS 播放轮次消费，避免同一帧被重复取用。 */
   var processing: FFPlayer.PTS? = null
 
@@ -34,5 +31,5 @@ class AvFrame(
    * `NoClassDefFoundError`。代价是漏关就真漏一帧 native 内存，所以 [FFPlayer]
    * 的关闭路径必须逐个清点（它也确实是这么做的）。
    */
-  override suspend fun releaseImpl() = closeNative(ptrValue())
+  override suspend fun releaseImpl(ptr: Long) = closeNative(ptr)
 }

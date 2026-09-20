@@ -2,31 +2,32 @@ package soko.ekibun.quickjs
 
 import androidx.annotation.Keep
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import soko.ekibun.Pointer
+import soko.ekibun.ThreadDispatcher
 import soko.ekibun.jniLoadLibrary
 import java.util.Collections
 import java.util.IdentityHashMap
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 一个独立的 QuickJS runtime。
  *
- * **本类直接继承 [Pointer]**：句柄要拿 `this` 去 `initContext` 换，而 [Pointer] 的
- * 构造参数在 super 调用点求值 —— 那时 `this` 还不完整（Kotlin 与 Java 都禁止在
- * super 实参里引用 `this`）。解法是**覆写 [Pointer.initPtr]**：构造参数留空，句柄由
- * 本类的属性初始化器算出（那已经晚于 super，`this` 与全部构造参数都可读），于是内部
- * 那个只为「帮 `QuickJS` 在构造期拿到句柄」而存在的 `Runtime` 子类被拆掉了。
+ * **本类直接继承 [Pointer]**：句柄要拿 `this` 去 `initContext` 换，而换的动作只能在
+ * super 之后做 —— super 实参求值时 `this` 还不完整（Kotlin 与 Java 都禁止在 super 实参里
+ * 引用 `this`）。解法是**基类第一个实参留 `null`、覆写 [Pointer.initPtr]**：基类把这次
+ * 调用推迟到**首次读句柄**那一刻，那时本类的构造参数与字段全都就位、而且读发生在归属
+ * 线程上，于是不必设中转字段，直接在覆写体里
+ * `initContext(this, stackSize, memoryLimit, timeout)`。
  *
- * 构造入口是挂起工厂 [create]：它把构造放到归属 dispatcher 上，这样 [Pointer] 记下的
- * **构造线程**就等于归属线程（理由见 [Pointer] 类文档「归属 dispatcher + 构造线程」）。
+ * 本类因此是**唯一**不往基类构造参数里交句柄的子类 —— 其余子类（ffmpeg 那批、[JSRef]）
+ * 都写成 `Pointer(nativePtr, dispatcher)`，一个成员都不用覆写。
+ *
+ * 构造入口是挂起工厂 [create]：整个构造过程落在归属 dispatcher 上。**句柄的建立时机与
+ * 线程由 [Pointer] 收口**（首次读句柄时才建、且总在归属线程上），与在哪条线程上构造无关
+ * —— 详见 [create]。
  *
  * @param moduleHandler 模块加载器，返回 null 表示模块不存在
  * @param stackSize JS 层最大栈空间（字节），<=0 用默认 256KB。必须显著小于
@@ -46,13 +47,14 @@ class QuickJS private constructor(
    * 它同时是**构造参数属性**：`super` 实参里读到的是**参数**，而字段要到 super 返回
    * 之后才赋值 —— 实参位置上解析到的正是参数本身，所以两种身份都成立。
    */
-  private val jsDispatcher: CoroutineDispatcher,
-) : Pointer(dispatcher = jsDispatcher) {
+  val dispatcher: ThreadDispatcher,
+) : Pointer(dispatcher = dispatcher) {
   companion object {
     /**
-     * 构造入口 —— **挂起**，因为构造必须发生在归属线程上。
+     * 构造入口 —— **挂起**，整个构造过程落在归属 dispatcher 上。
      *
-     * 为什么不能直接 `QuickJS(...)`：`initContext` 里 `JS_NewRuntime()` 与
+     * 真正需要在归属线程上跑的是 [Pointer.initPtr]（它就是 `initContext`）：
+     * `JS_NewRuntime()` 与
      * `JS_SetMaxStackSize()` 都会把**调用线程的帧地址**记成 `stack_top`、再据此算
      * `stack_limit`，而 `js_check_stack_overflow` 是拿**当前帧地址**去比这个界限。
      * 跨线程建，基准就来自另一条栈：要么假阳性（碰一下就报栈溢出），要么恒为假
@@ -60,8 +62,10 @@ class QuickJS private constructor(
      * `executePendingJob` 三个入口都会重新 `JS_UpdateStackTop`，基准迟早被纠正 ——
      * 但那是**没有写进任何断言的巧合**，删掉其中任一处就失效。
      *
-     * 顺带钉住另一条不变量：[Pointer] 记下的构造线程等于归属线程，[Pointer.withPtrSync]
-     * 的「要不要投递」才判断得准。构造器私有，就是为了不让这两条不变量有绕过去的入口。
+     * 而 [Pointer.initPtr] 跑在**首次读句柄**那一刻，又总落在读门的「投递之后」，所以「在
+     * 归属线程上」这条由 [Pointer] 保证，与构造发生在哪条线程无关。挂起工厂留着是为了让
+     * 构造期的事（`init { jniLoadLibrary }` 之类）也落在归属线程上，别在两条线程间来回；
+     * 构造器私有则是不给「句柄只建一次」留绕过去的入口。
      */
     suspend fun create(
       moduleHandler: ((String) -> String?)? = null,
@@ -74,12 +78,12 @@ class QuickJS private constructor(
       }
 
     /**
-     * [jsDispatcher] 的默认值：**全进程共享一条线程**，线程名 `quickjs`。
+     * [create] 固定用的归属 dispatcher：**全进程共享一条线程**，线程名 `quickjs`。
      *
-     * 共享的代价：所有没显式传 dispatcher 的 runtime 在这条线程上**串行** ——
-     * 一个 runtime 跑长任务（或卡在 [timeout] 边界上）会拖住别的 runtime 的操作。
-     * 想独占就显式传一条自己的单线程 dispatcher
-     * （`Executors.newSingleThreadExecutor { r -> Thread(r, "quickjs-xxx") }.asCoroutineDispatcher()`）。
+     * 共享的代价：所有 runtime 在这条线程上**串行** —— 一个 runtime 跑长任务（或卡在
+     * [timeout] 边界上）会拖住别的 runtime 的操作。⚠️ [create] **没有**传入自己 dispatcher 的
+     * 入口（2026-09-21 订正：这里原先写着「想独占就显式传一条 `ThreadDispatcher("quickjs-xxx")`」，
+     * 但签名里根本没有那个参数，照做做不出来）—— 真要独占，得先给它加参数。
      *
      * 在 JS 回调里再建一个 runtime **不会**死锁：[create] 用的是 `withContext`，对**同一个**
      * dispatcher 走 kotlinx 的 undispatched 快路径，就地构造完就返回。但新 runtime 的操作
@@ -88,8 +92,7 @@ class QuickJS private constructor(
      * ⚠️ 它**从不 shutdown**：共享的东西没有哪一方有权关掉它，所以这条线程活到进程结束。
      * 反过来的好处是反复建 runtime 不再攒线程（改造前是每个 runtime 一条、同样不关）。
      */
-    val sharedDispatcher: CoroutineDispatcher =
-      Executors.newSingleThreadExecutor { r -> Thread(r, "quickjs") }.asCoroutineDispatcher()
+    val sharedDispatcher = ThreadDispatcher("quickjs")
 
     init {
       jniLoadLibrary("quickjs")
@@ -256,37 +259,32 @@ class QuickJS private constructor(
   private val runtimeAlive = AtomicBoolean(true)
 
   /**
-   * runtime 句柄。
+   * 算出 runtime + context —— 覆写基类的句柄来源。
    *
-   * ⚠️ 它必须在**属性初始化器**里算，[initPtr] 只是把它交给基类 —— 基类构造期本类的
-   * 字段还没有值，那一刻 `stackSize` / `memoryLimit` / `timeout` 全是 `0`（实测
-   * `putfield` 排在 `invokespecial <init>` 之后，而且**编译器不报错**）。`timeout = 0`
-   * 等于关掉了死循环中断 —— 那正是「测试跑着跑着不动了」的样子。
+   * ⚠️ 基类保证它**不在构造期调**、且`只调一次`（结果存进 `Pointer.ptr`）：它在**首次读
+   * 句柄**那一刻才跑，那时 [moduleHandler] / [stackSize] / [memoryLimit] / [timeout] 都
+   * 已经有值。别把它挪回构造期 —— 基类构造期本类的字段全是 `0`（实测 `putfield` 排在
+   * `invokespecial <init>` **之后**，而且**编译器不报错**），而 `timeout = 0` 等于关掉死
+   * 循环中断（native 侧 `JS_SetInterruptHandler` 里 `timeoutMs <= 0` 直接放行），表现就是
+   * 「测试跑着跑着不动了」。钉这一点的用例：`PointerTest.initPtrSeesConstructionState`。
    *
-   * 它排在 [refs] / [updateChannel] 之后：`initContext` 期间 native 就可能回调
-   * （模块加载、包装），那些回调要读到已建好的登记表。
+   * 首次读发生在 [Pointer.withPtr] / [Pointer.withPtrSync] 的**块里**，也就是**投递之
+   * 后**，所以本函数跑在归属线程上 —— `JS_NewRuntime()` 与
+   * `JS_SetMaxStackSize()` 据此把**调用线程的帧地址**记成 `stack_top`，这条依赖不能丢
+   * （见 [create]）。
    *
-   * 句柄**不会**在销毁后变成 0（[Pointer] 的指针不可更改），所以「runtime 还活着吗」
-   * 要看 [runtimeAlive]，别拿 `ptr == 0L` 去猜。
+   * 建不起来（返回 `0`）由基类 `check` 出来，这里不用自己判。句柄**不会**在销毁后变成
+   * `0`（[Pointer] 的指针不可更改），所以「runtime 还活着吗」要看 [runtimeAlive]，别拿
+   * `ptr == 0L` 去猜。
    */
-  private val handle: Long = initContext(this@QuickJS, stackSize, memoryLimit, timeout)
-
-  init {
-    // 创建失败（句柄为 0）在**构造期**就暴露，而不是等首次求值才炸
-    check(handle != 0L) { "initContext failed" }
-  }
-
-  /** 把句柄交给基类 —— 基类那几扇读门都从这里取值（见 [Pointer.initPtr]）。 */
-  override fun initPtr(): Long = handle
-
-  override val releaseHint: String
-    get() = "它由 QuickJS.close() 统一销毁：先清算引用，再调 destroyContext"
+  override fun initPtr(): Long = initContext(this@QuickJS, stackSize, memoryLimit, timeout)
 
   /**
    * 真正销毁 runtime —— 覆写基类的归还钩子，[Pointer] 保证**只跑一次**。
    *
-   * 跑在归属线程上（基类 [Pointer.submit] 投递过来的），所以 [ptrValue] 走的是那条
-   * 就地读的快路径。**不自己设门**：唯一入口 [closeAndCollect] 已经用基类的
+   * 句柄由基类**以参数交进来**（[Pointer.releaseImpl] 的 `ptr`），不必自己去读；跑在归属
+   * 线程上（基类 [Pointer.submit] 投递过来的）。**不自己设门**：唯一入口 [closeAndCollect]
+   * 已经用基类的
    * [Pointer.markClosed] 抢过名额，这里再抢必然失败 —— 那会变成「返回成功、其实没
    * 销毁」，runtime 连同它整个堆漏在 native。
    *
@@ -307,14 +305,14 @@ class QuickJS private constructor(
    * `use {}` 这类语法契约。漏掉的引用由 [refs] 在关闭时清算并报告，想把它变成可断言的
    * 事实用 [closeAndCheckLeaks]。
    */
-  override suspend fun releaseImpl() {
+  override suspend fun releaseImpl(ptr: Long) {
     runtimeAlive.set(false)
-    destroyContext(ptrValue())
+    destroyContext(ptr)
   }
 
   init {
-    // 句柄已在上面算好并校验过非 0（见 [handle]），这里只剩 pump。投递即返回、不等它。
-    CoroutineScope(jsDispatcher).launch {
+    // 句柄是惰性的（首次读时才建，见 [initPtr]），这里只起 pump。投递即返回、不等它。
+    submit {
       for (v in updateChannel) {
         // 销毁消息可能已经排在前面：runtime 没了就别再去 executePendingJob
         if (!runtimeAlive.get()) break
@@ -436,7 +434,7 @@ class QuickJS private constructor(
       val argvJs = argv.map { javaToJs(it) }.toLongArray()
       val thisJs = javaToJs(thisVal)
       try {
-        val ret = jsCall(ptr, obj.ptr, thisJs, argvJs.size, argvJs)
+        val ret = jsCall(ptr, obj.withPtrSync { it }, thisJs, argvJs.size, argvJs)
         updateChannel.trySend(Unit)
         if (isException(ret)) {
           throw getException(ptr)
@@ -459,7 +457,7 @@ class QuickJS private constructor(
    */
   internal fun releaseValue(handle: Long) {
     if (handle == 0L) return
-    onJsThreadQuietly { ptr ->
+    withPtrSync { ptr ->
       jsReleaseValue(ptr, handle)
       jsDestroyHandle(handle)
     }
@@ -468,36 +466,16 @@ class QuickJS private constructor(
   /**
    * 归还一个 [JSRef]：撤销登记 + 还掉它那一票。
    *
-   * ⚠️ 还的是 **ref 自己的值句柄**（`ref.ptr`），**不是**块参数里那个 runtime 句柄 ——
-   * 两个都是 `Long`，混用就是拿 runtime 指针对去 `jsReleaseValue`，当场踩坏 native 堆
-   * （实测表现是测试进程 `0xC0000374` heap corruption 直接死掉）。
+   * ⚠️ 还的是 **ref 自己的值句柄**（`ref.withPtrSync { it }` 读到的那个），**不是**块参数
+   * 里那个 runtime 句柄 —— 两个都是 `Long`，混用就是拿 runtime 指针对去 `jsReleaseValue`，
+   * 当场踩坏 native 堆（实测表现是测试进程 `0xC0000374` heap corruption 直接死掉）。
    */
   internal fun releaseRef(ref: JSRef) {
-    onJsThreadQuietly {
+    withPtrSync {
       unregister(ref)
       // 已经在 JS 线程上，releaseValue 里面那次投递会就地执行，不产生第二次派发
-      releaseValue(ref.ptr)
+      releaseValue(ref.withPtrSync { it })
     }
-  }
-
-  /**
-   * 归还侧的投递（旧 `onJsThreadQuietly` 的换代版）：与 [runOnJsThread] 有两点不同。
-   *
-   * - 判据是 **runtime 还在不在**（[runtimeAlive]）而不是 [isClosed]：关闭时的清算
-   *   （[collectLeaks]）必须在标记之后、销毁之前照常归还，否则残留引用会撑到
-   *   `JS_FreeRuntime` 去触发 `gc_obj_list` 断言、整个进程 abort；
-   * - 关闭之后**静默跳过**而不是抛异常：runtime 都没了就没有什么可归还的，而归还多发生
-   *   在 `finally` 里，在那里抛会盖掉真正的异常。
-   *
-   * ⚠️ 块参数是这个 **Pointer 自己的句柄**（与 [withPtr] 一致）；要还别的对象（比如某个
-   * [JSRef] 的值句柄）时别拿它凑合 —— 见 [releaseRef]。
-   *
-   * ⚠️ 已经在 JS 线程上时**就地执行** —— 这不是优化：清算阶段（[collectLeaks]）必须
-   * **在原地**把引用还掉，投递出去的消息会排在销毁消息之后，那时 runtime 已经没了。
-   */
-  internal fun onJsThreadQuietly(block: (Long) -> Unit) {
-    if (!runtimeAlive.get()) return
-    withPtrSync { ptr -> if (runtimeAlive.get()) block(ptr) }
   }
 
   /**
@@ -543,7 +521,7 @@ class QuickJS private constructor(
         return@withPtrSync ret
       }
       if (obj is JSRef) {
-        return@withPtrSync jsDupValue(ptr, obj.ptr)
+        return@withPtrSync jsDupValue(ptr, obj.withPtrSync { it })
       }
       if (obj is Deferred<Any?>) {
         val (ret, jsRes, jsRej) = jsNewPromise(ptr)
@@ -621,7 +599,7 @@ class QuickJS private constructor(
   /**
    * 求值并转换结果。
    *
-   * **挂起**而不是阻塞：[Pointer.withPtr] 把整段求值搬到 [jsDispatcher] 上跑，
+   * **挂起**而不是阻塞：[Pointer.withPtr] 把整段求值搬到归属线程（[dispatcher]）上跑，
    * 并顺手把 runtime 句柄压进块里 —— 调用方线程被让出去等结果。对照
    * [Pointer.withPtrSync] 那条 `runBlocking` 的同步路径，后者是给 native 回调链准备的
    * （`@Keep` 的函数由 native 线程直接调进来，那里没有协程上下文）。
@@ -667,7 +645,7 @@ class QuickJS private constructor(
         // 先清算再销毁：销毁之后 onJsThreadQuietly 会因为 runtimeAlive 为 false
         // 拒绝工作，那一轮归还就全变成空操作，残留反而撑到 JS_FreeRuntime 去 abort。
         val leaked = collectLeaks()
-        releaseImpl()
+        withPtr { ptr -> releaseImpl(ptr) }
         leaked
       }
     }
@@ -684,11 +662,13 @@ class QuickJS private constructor(
    * 想把它变成**可断言的失败**请用 [closeAndCheckLeaks]。
    */
   override fun close() {
-    CoroutineScope(jsDispatcher).launch {
+    submit {
       val leaked = closeAndCollect().await()
       if (leaked?.isNotEmpty() == true) {
         System.err.println("QuickJS reference leak:\n" + leaked.joinToString("\n"))
       }
+    }.invokeOnCompletion { e ->
+      e?.printStackTrace()
     }
   }
 
@@ -712,7 +692,7 @@ class QuickJS private constructor(
     // 先记录：还在册 = 调用方漏了归还
     val leaked = snapshot.map { "  ${it.describe()}" }
     // 再归还：清空登记册，让 runtime 可以安全销毁
-    snapshot.forEach { it.release() }
+    snapshot.forEach { it.closeDeferred().await() }
     refs.clear()
     return leaked
   }
