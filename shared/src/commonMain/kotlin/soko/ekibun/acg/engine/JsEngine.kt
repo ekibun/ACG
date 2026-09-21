@@ -92,12 +92,7 @@ class JsEngine {
             }
           }
         }
-        val ctx1 =
-          runBlocking {
-            QuickJS.create(
-              moduleHandler = moduleHandler,
-            )
-          }
+        val ctx1 = QuickJS(moduleHandler = moduleHandler)
         quickjsDelegate = ctx1
         // 声明成 JSInvokable 会丢掉 AutoCloseable -> 这个工厂函数再也关不掉，
         // 每个引擎实例固定漏 1 票，reset() 的泄漏报告随之永久带一条噪音。

@@ -69,10 +69,10 @@ internal fun releaseValue(handle: Long) {
 它的函数体结尾**无条件**调 `JS_FreeValue(ctx, val)`。所以：
 
 ```cpp
-Java_..._definePropertyValue(JNIEnv *, jclass, jlong ctx, jlong obj, jlong k, jlong v, jint flags) {
+Java_..._definePropertyValue(JNIEnv *, jclass, jlong ctx, jlong obj, jlong k, jlong v) {
   auto atom = JS_ValueToAtom((JSContext *) ctx, *(JSValue *) k);
   auto ret = JS_DefinePropertyValue((JSContext *) ctx, *(JSValue *) obj, atom,
-                                    *(JSValue *) v, flags);
+                                    *(JSValue *) v, JS_PROP_C_W_E);  // 旗标钉在 native 侧
   JS_FreeAtom((JSContext *) ctx, atom);
   jsReleaseValue(ctx, k);   // JS_ValueToAtom 只是借用了 k -> 这一票归我们放
   jsDestroyHandle(k);
@@ -81,6 +81,9 @@ Java_..._definePropertyValue(JNIEnv *, jclass, jlong ctx, jlong obj, jlong k, jl
   return ret;
 }
 ```
+
+旗标（可配置 + 可写 + 可枚举）**钉在 native 实现里**：Kotlin 侧的 `JSProp` 常量对象与
+`definePropertyValue` 的 `flags` 入参已在 2026-09-21 一并删除 —— 五个调用点要的都是这一个值。
 
 `JS_DefineProperty` 对 `this_obj` 只是**借用**；它自己存了一份属性的引用。
 所以**不要**在这里释放 `obj`。
@@ -218,16 +221,15 @@ promise 必须排除在表外……而这些在 `_jsToDart` 的模型里**一个
 `refs` 强登记表 + `collectLeaks()`。
 
 ```kotlin
-class QuickJS private constructor(
+class QuickJS(
   ...,
   val dispatcher: ThreadDispatcher,                // 归属线程的调度器，见规则 5.1
 ) : Pointer(dispatcher = dispatcher) {             // 直接继承基类，见规则 5.1
 
   companion object {
-    // 构造入口是**挂起**工厂：整个构造过程落在归属 dispatcher 上
-    suspend fun create(...): QuickJS =
-      withContext(sharedDispatcher) { QuickJS(..., sharedDispatcher) }
-
+    // 构造入口就是**主构造器**（2026-09-21 起，挂起工厂 create() 已删）：构造本身不切线程，
+    // 「句柄建在归属线程上」由 Pointer 的读门担保（见下 initPtr）。要独占线程就传自己的
+    // ThreadDispatcher，不传就用下面这条共享的。
     // 全进程共享一条线程，线程名 `quickjs`；**从不 shutdown**
     val sharedDispatcher: ThreadDispatcher = ThreadDispatcher("quickjs")
   }
@@ -264,7 +266,8 @@ class QuickJS private constructor(
   外加把 `runtimeAlive` 落下（句柄由基类当参数交进来）。此前那套两层叠法（`destroyNow()` 自己再抢一次 + 裸
   `releaseImpl()`）在「基类那条路」上是错的，已整段删掉。
 - **runtime 句柄必须建在归属线程上**（`initContext` 那一步，2026-09-20 起由挂起工厂
-  `create()` 的 `withContext(sharedDispatcher)` 强制）。`JS_NewRuntime()` 与
+  `create()` 强制；2026-09-21 删掉工厂后改由 **`Pointer` 的读门**担保 —— 首次读句柄发生在
+  `withPtr` / `withPtrSync` 的块里，也就是投递之后）。`JS_NewRuntime()` 与
   `JS_SetMaxStackSize()` 都把**调用线程的帧地址**记成 `stack_top`，再据此算
   `stack_limit`（`quickjs.c` 的 `JS_NewRuntime2` / `JS_UpdateStackTop` /
   `update_stack_limit`），而 `js_check_stack_overflow` 拿**当前帧地址**比这个界限。
@@ -582,7 +585,7 @@ QuickJS 是**单线程**的：引用计数是裸 `int`、GC 链表与 Shape 哈�
   消息**后面** → use-after-free）；归还动作必须用「runtime 还在不在」，否则清算那一轮
   归还全变空操作 → 残留撑到 `JS_FreeRuntime` 的断言 `abort()`。见规则 6 第一条。
 - **`evaluate` 已经 suspend 化**（2026-09-20）：构造期**不再有 `runBlocking`** —— 构造
-  入口是挂起工厂 `create()`（`withContext(sharedDispatcher)`）。阻塞只剩 `runOnJsThread` /
+  入口是主构造器 `QuickJS(…)`（2026-09-21 前是挂起工厂 `create()`，已删）。阻塞只剩 `runOnJsThread` /
   `withPtrSync` 那条给 native 回调链用的**同步**出口，以及 `onJsThreadQuietly` 在非 JS
   线程上被调时的那一次。
   native 回调（`@Keep` 的 `loadModule` / `handleJSInvokable` / `wrapJSPromiseAsync`）

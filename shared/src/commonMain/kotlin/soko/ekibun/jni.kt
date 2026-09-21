@@ -170,7 +170,7 @@ open class ThreadDispatcher(
  *   了」。`PointerTest.initPtrSeesConstructionState` 钉住它；
  * - **首次读发生在归属线程上**（[withPtr] / [withPtrSync] 都把读放在投递之后），所以
  *   「建句柄要挑线程」的子类不必自己安排 —— `JS_NewRuntime` 正是靠这条让 `stack_top`
- *   基准落在归属线程上（见 [soko.ekibun.quickjs.QuickJS.create]）。
+ *   基准落在归属线程上（见 [soko.ekibun.quickjs.QuickJS.initPtr]）。
  *
  * ⚠️ 第一个实参**不拿 `0` 当「没交」的哨兵**：`0` 是合法的空句柄（借用型的空壳就传
  * `0L`），拿它当哨兵会把「真的交了 `0`」误判成「没交」、转头去调 [initPtr]。要表示「没

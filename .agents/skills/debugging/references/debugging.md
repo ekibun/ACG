@@ -31,7 +31,7 @@
 ```kotlin
 fun mark(s: String) { File(".../dbg.txt").appendText("${System.currentTimeMillis()} $s\n") }
 mark("BOOT")
-val ctx = runBlocking { QuickJS.create() }
+val ctx = QuickJS()
 mark("created")
 val r1 = runBlocking { withTimeoutOrNull(5000) { ctx.closeAndCollect().await() } }
 mark("close1 -> $r1")          // 超时打 null；正常打真值

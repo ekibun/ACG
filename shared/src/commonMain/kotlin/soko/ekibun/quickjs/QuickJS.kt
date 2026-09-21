@@ -4,7 +4,6 @@ import androidx.annotation.Keep
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.withContext
 import soko.ekibun.Pointer
 import soko.ekibun.ThreadDispatcher
 import soko.ekibun.jniLoadLibrary
@@ -25,9 +24,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 本类因此是**唯一**不往基类构造参数里交句柄的子类 —— 其余子类（ffmpeg 那批、[JSRef]）
  * 都写成 `Pointer(nativePtr, dispatcher)`，一个成员都不用覆写。
  *
- * 构造入口是挂起工厂 [create]：整个构造过程落在归属 dispatcher 上。**句柄的建立时机与
- * 线程由 [Pointer] 收口**（首次读句柄时才建、且总在归属线程上），与在哪条线程上构造无关
- * —— 详见 [create]。
+ * 构造入口就是**主构造器**：`QuickJS(…)`。**句柄的建立时机与线程由 [Pointer] 收口**
+ * （首次读句柄时才建、且总在归属线程上），所以构造本身发生在哪条线程上都不影响
+ * 「句柄必须建在归属线程上」这条 —— 详见 [initPtr]。
  *
  * @param moduleHandler 模块加载器，返回 null 表示模块不存在
  * @param stackSize JS 层最大栈空间（字节），<=0 用默认 256KB。必须显著小于
@@ -35,7 +34,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * @param memoryLimit 堆内存上限（字节），<=0 表示不限制
  * @param timeout 单次 evaluate/executePendingJob 的超时（毫秒），<=0 表示不限制
  */
-class QuickJS private constructor(
+class QuickJS(
   val moduleHandler: ((String) -> String?)? = null,
   val stackSize: Long = 256 * 1024,
   val memoryLimit: Long = -1,
@@ -47,47 +46,20 @@ class QuickJS private constructor(
    * 它同时是**构造参数属性**：`super` 实参里读到的是**参数**，而字段要到 super 返回
    * 之后才赋值 —— 实参位置上解析到的正是参数本身，所以两种身份都成立。
    */
-  val dispatcher: ThreadDispatcher,
+  val dispatcher: ThreadDispatcher = sharedDispatcher,
 ) : Pointer(dispatcher = dispatcher) {
   companion object {
     /**
-     * 构造入口 —— **挂起**，整个构造过程落在归属 dispatcher 上。
-     *
-     * 真正需要在归属线程上跑的是 [Pointer.initPtr]（它就是 `initContext`）：
-     * `JS_NewRuntime()` 与
-     * `JS_SetMaxStackSize()` 都会把**调用线程的帧地址**记成 `stack_top`、再据此算
-     * `stack_limit`，而 `js_check_stack_overflow` 是拿**当前帧地址**去比这个界限。
-     * 跨线程建，基准就来自另一条栈：要么假阳性（碰一下就报栈溢出），要么恒为假
-     * （真撞穿宿主线程栈，进程直接挂）。native 侧在 `evaluate` / `jsCall` /
-     * `executePendingJob` 三个入口都会重新 `JS_UpdateStackTop`，基准迟早被纠正 ——
-     * 但那是**没有写进任何断言的巧合**，删掉其中任一处就失效。
-     *
-     * 而 [Pointer.initPtr] 跑在**首次读句柄**那一刻，又总落在读门的「投递之后」，所以「在
-     * 归属线程上」这条由 [Pointer] 保证，与构造发生在哪条线程无关。挂起工厂留着是为了让
-     * 构造期的事（`init { jniLoadLibrary }` 之类）也落在归属线程上，别在两条线程间来回；
-     * 构造器私有则是不给「句柄只建一次」留绕过去的入口。
-     */
-    suspend fun create(
-      moduleHandler: ((String) -> String?)? = null,
-      stackSize: Long = 256 * 1024,
-      memoryLimit: Long = -1,
-      timeout: Long = -1,
-    ): QuickJS =
-      withContext(sharedDispatcher) {
-        QuickJS(moduleHandler, stackSize, memoryLimit, timeout, sharedDispatcher)
-      }
-
-    /**
-     * [create] 固定用的归属 dispatcher：**全进程共享一条线程**，线程名 `quickjs`。
+     * [dispatcher] 的默认值：**全进程共享一条线程**，线程名 `quickjs`。
      *
      * 共享的代价：所有 runtime 在这条线程上**串行** —— 一个 runtime 跑长任务（或卡在
-     * [timeout] 边界上）会拖住别的 runtime 的操作。⚠️ [create] **没有**传入自己 dispatcher 的
-     * 入口（2026-09-21 订正：这里原先写着「想独占就显式传一条 `ThreadDispatcher("quickjs-xxx")`」，
-     * 但签名里根本没有那个参数，照做做不出来）—— 真要独占，得先给它加参数。
+     * [timeout] 边界上）会拖住别的 runtime 的操作。要独占就显式传一条
+     * `ThreadDispatcher("quickjs-xxx")`（2026-09-21 订正：原先这里写着「`create()` 没有传入自己
+     * dispatcher 的入口、照做做不出来」—— 挂起工厂已删，主构造器上那个参数真的能传了）。
      *
-     * 在 JS 回调里再建一个 runtime **不会**死锁：[create] 用的是 `withContext`，对**同一个**
-     * dispatcher 走 kotlinx 的 undispatched 快路径，就地构造完就返回。但新 runtime 的操作
-     * 会和外面那些一起排在这条单线程上 —— 在回调里**等**它的结果就是自己等自己。
+     * 构造本身**不切线程**（就是一次 `new`），所以在 JS 回调里再建一个 runtime **不会**
+     * 死锁；但新 runtime 的操作会和外面那些一起排在这条单线程上 —— 在回调里**等**它的
+     * 结果就是自己等自己。
      *
      * ⚠️ 它**从不 shutdown**：共享的东西没有哪一方有权关掉它，所以这条线程活到进程结束。
      * 反过来的好处是反复建 runtime 不再攒线程（改造前是每个 runtime 一条、同样不关）。
@@ -157,7 +129,6 @@ class QuickJS private constructor(
       obj: Long,
       k: Long,
       v: Long,
-      flags: Int = JSProp.C_W_E,
     ): Int
 
     @JvmStatic
@@ -271,7 +242,7 @@ class QuickJS private constructor(
    * 首次读发生在 [Pointer.withPtr] / [Pointer.withPtrSync] 的**块里**，也就是**投递之
    * 后**，所以本函数跑在归属线程上 —— `JS_NewRuntime()` 与
    * `JS_SetMaxStackSize()` 据此把**调用线程的帧地址**记成 `stack_top`，这条依赖不能丢
-   * （见 [create]）。
+   * （见 [Pointer] 类文档「读指针」一节）。
    *
    * 建不起来（返回 `0`）由基类 `check` 出来，这里不用自己判。句柄**不会**在销毁后变成
    * `0`（[Pointer] 的指针不可更改），所以「runtime 还活着吗」要看 [runtimeAlive]，别拿

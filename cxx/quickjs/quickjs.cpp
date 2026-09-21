@@ -203,10 +203,13 @@ Java_soko_ekibun_quickjs_QuickJS_jsNULL(JNIEnv*, jclass) {
 extern "C" JNIEXPORT jint JNICALL
 Java_soko_ekibun_quickjs_QuickJS_definePropertyValue(JNIEnv*, jclass, jlong ctx,
                                                      jlong obj, jlong k,
-                                                     jlong v, jint flags) {
+                                                     jlong v) {
+  // 属性旗标钉死在 native 侧、不再收 Kotlin 入参：Kotlin 侧原先有个 `JSProp`
+  // 常量对象专门传它，而五个调用点要的全是同一个「可配置 + 可写 +
+  // 可枚举」。真要别的旗标（比如 `JS_PROP_THROW`）再从参数位上把它加回来。
   auto atom = JS_ValueToAtom((JSContext*)ctx, *(JSValue*)k);
   auto ret = JS_DefinePropertyValue((JSContext*)ctx, *(JSValue*)obj, atom,
-                                    *(JSValue*)v, flags);
+                                    *(JSValue*)v, JS_PROP_C_W_E);
   JS_FreeAtom((JSContext*)ctx, atom);
   // 这个函数收下 k / v **两个**句柄，并让它们彻底退场：
   //

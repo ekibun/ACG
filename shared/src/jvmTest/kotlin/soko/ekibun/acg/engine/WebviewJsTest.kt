@@ -156,7 +156,7 @@ class WebviewJsTest {
 
   @Test
   fun webviewIsExposedAsGlobal() {
-    val ctx = runBlocking { QuickJS.create() }
+    val ctx = QuickJS()
     try {
       loadInit(ctx, javaStub { _, _, _ -> null })
       assertEquals("function", eval(ctx, "typeof webview"))
@@ -168,7 +168,7 @@ class WebviewJsTest {
   /** 命中拦截：结果就是 { url, headers }，脚本拿去自己 fetch。 */
   @Test
   fun interceptResultIsUnwrapped() {
-    val ctx = runBlocking { QuickJS.create() }
+    val ctx = QuickJS()
     try {
       loadInit(
         ctx,
@@ -203,7 +203,7 @@ class WebviewJsTest {
   /** 脚本返回值是 JSON 字符串 → 解析成对象交回。 */
   @Test
   fun scriptResultIsParsed() {
-    val ctx = runBlocking { QuickJS.create() }
+    val ctx = QuickJS()
     try {
       var seenScript: String? = null
       loadInit(
@@ -229,7 +229,7 @@ class WebviewJsTest {
    */
   @Test
   fun emptyScriptResultIsUndefined() {
-    val ctx = runBlocking { QuickJS.create() }
+    val ctx = QuickJS()
     try {
       loadInit(
         ctx,
@@ -248,7 +248,7 @@ class WebviewJsTest {
   /** 不是 JSON 的返回值原样给出，别把裸文本吞掉。 */
   @Test
   fun nonJsonScriptResultIsReturnedAsIs() {
-    val ctx = runBlocking { QuickJS.create() }
+    val ctx = QuickJS()
     try {
       loadInit(
         ctx,
@@ -265,7 +265,7 @@ class WebviewJsTest {
   /** 失败（超时 / 没有后端）必须 reject，而不是回一个让脚本误判的空值。 */
   @Test
   fun failureRejects() {
-    val ctx = runBlocking { QuickJS.create() }
+    val ctx = QuickJS()
     try {
       loadInit(
         ctx,
@@ -304,7 +304,7 @@ class WebviewJsTest {
    */
   @Test
   fun interceptCallbackCanBeInvokedFromKotlin() {
-    val ctx = runBlocking { QuickJS.create() }
+    val ctx = QuickJS()
     try {
       val started = CompletableDeferred<JSFunction>()
       val finish = CompletableDeferred<Any?>()

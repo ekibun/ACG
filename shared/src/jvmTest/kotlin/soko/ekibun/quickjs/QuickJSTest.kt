@@ -27,7 +27,7 @@ import kotlin.test.assertTrue
  * - 模块加载（moduleHandler）
  */
 class QuickJSTest {
-  private fun context(moduleHandler: ((String) -> String?)? = null) = runBlocking { QuickJS.create(moduleHandler) }
+  private fun context(moduleHandler: ((String) -> String?)? = null) = QuickJS(moduleHandler)
 
   /**
    * `async (a) => a` 在 JS 侧返回 Promise，桥接层会转成 Deferred，
@@ -515,7 +515,7 @@ class QuickJSTest {
   /** flutter_qjs: 'infinite loop' —— timeout 必须把死循环变成可捕获的 JS 错误 */
   @Test
   fun timeoutInterruptsInfiniteLoop() {
-    val ctx = runBlocking { QuickJS.create(timeout = 1000) }
+    val ctx = QuickJS(timeout = 1000)
     try {
       assertEquals(1L, eval(ctx, "1"))
       val err = assertFailsWith<JSError> { eval(ctx, "while(true) {}") }
@@ -532,7 +532,7 @@ class QuickJSTest {
   @Test
   fun memoryLimitIsEnforced() {
     // QuickJS 现在实现了 AutoCloseable，可以直接 `use {}`
-    runBlocking { QuickJS.create(memoryLimit = 1_000_000) }.use { ctx ->
+    QuickJS(memoryLimit = 1_000_000).use { ctx ->
       val err = assertFailsWith<JSError> { eval(ctx, "new Array(1000000).fill(0)") }
       assertTrue(
         err.message?.startsWith("InternalError: out of memory") == true,
