@@ -75,3 +75,19 @@
   `releaseIsRejectedLoudlyWhenDispatcherAlreadyClosed`（归还路径那条）。
 - **动了 submodule** → 改动不报错，但会污染上游源码树、下次同步即丢。`cxx/ffmpeg/ffmpeg/`、
   `cxx/quickjs/quickjs/` 是上游源码树，**不要动**（需要参考实现就直接读本地文件）。
+- **`external fun` 移进 `companion object` 却漏了 `@JvmStatic`（Kotlin / JNI）** → 编译、链接都过，
+  只在**真的调**的时候抛 `UnsatisfiedLinkError`；而"还没调到"和"配对成功"在测试里长得一模一样。
+  JNI 名只由**声明落在哪个类文件里**决定（可见性无关）：放类体里是实例方法、名取外层类名；
+  放 companion 里会多一段 `_00024Companion`。历史代价：`AvFrame.closeNative` 长期是空调用，
+  `av_frame_free` 从来没跑成过。⚠️ 但 `@JvmStatic` 不是白给的 —— 它让原生方法变成静态、
+  **第二个 JNI 实参从实例变成 `jclass`**，native 侧凡用 `thiz` 的那个都必须留在类体里
+  （本仓库只有 `AvFormat.initNative`）。两坑的详解与判据见 [`cxx/AGENTS.md`](../../../../cxx/AGENTS.md)
+  的 JNI 一节。2026-09-21 修。
+- **拿 `List.remove()` 的返回值当"元素在不在队里"的判据（Kotlin）** → `remove()` 本身就是**出队动作**：
+  它返回 `true` 时元素已经摘下来了，此时只把标记置空并不会把它放回去 —— 那一帧**既不在队列里、
+  也没有被归还**，于是**不报错地**跳一帧 + 泄漏一块 native 内存。`FFPlayer.updateJob` 的
+  `invokeOnCompletion` 原来就是这么写的，症状正是「按一次『前进一帧』跳两帧」+ 每轮漏一个 `AVFrame`。
+  判据要写成 `queue?.contains(frame)`，再决定"归还"还是"留队并撤销标记"。
+  同一处的通用规则：帧一旦出队就必须 `close()`（出队即所有权归 Java 侧，见 `AvFrame`）；
+  而 seek / `closeAsync` 清队时**只关得掉不在飞行中的帧**（`processing == null`）—— 飞行中的那几帧
+  归各自的作业收尾，在清队处关就是 use-after-free。2026-09-21 实测踩过。

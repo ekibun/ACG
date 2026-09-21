@@ -68,6 +68,9 @@ native（`cxx/`：WebView2 宿主、QuickJS 桥、FFmpeg 解封装+解码+播放
 - 在 `init.js` 里用 `import()` / `require()`
 - 动了 submodule（规则见 §4）
 - 在 JS 线程之外碰 `JSRuntime`（症状是偶发崩、重跑就变绿）
+- 改 native 绑定的声明落点（类体 / `companion object`）、或动 `AvFormat.initNative`
+  （详解见 [cxx/AGENTS.md](./cxx/AGENTS.md) 的 JNI 一节）
+- 动 `FFPlayer` 的帧队列与帧归还（`frames` / `processing` / `invokeOnCompletion`）
 
 ---
 
