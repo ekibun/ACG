@@ -10,11 +10,6 @@ import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvIO
 import kotlin.getValue
 
-/** POSIX lseek 的 whence 取值（各平台一致：Linux/macOS 0/1/2，Windows CRT 0/1/2）。 */
-private const val SEEK_SET = 0
-private const val SEEK_CUR = 1
-private const val SEEK_END = 2
-
 class HttpIO(
   val options: Map<String, Any>,
 ) : AvIO {
@@ -187,17 +182,17 @@ class HttpIO(
           cachedRsp?.contentLength ?: -1L
         }
 
-        SEEK_SET -> {
+        AvIO.SEEK_SET -> {
           this.offset = offset
           this.offset.toLong()
         }
 
-        SEEK_CUR -> {
+        AvIO.SEEK_CUR -> {
           this.offset = (this.offset + offset).coerceAtLeast(0)
           this.offset.toLong()
         }
 
-        SEEK_END -> {
+        AvIO.SEEK_END -> {
           val size = cachedRsp?.contentLength ?: -1L
           if (size < 0L) {
             -1L

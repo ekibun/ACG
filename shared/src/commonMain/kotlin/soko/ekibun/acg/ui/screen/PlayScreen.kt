@@ -20,7 +20,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
-import soko.ekibun.acg.player.HttpIO
+import soko.ekibun.acg.player.FileIO
 import soko.ekibun.acg.player.Playback
 import soko.ekibun.ffmpeg.AVMediaType
 import soko.ekibun.ffmpeg.AvFormat
@@ -34,7 +34,7 @@ import soko.ekibun.ffmpeg.FFPlayer
 fun PlayScreen() {
   val playback = remember { mutableStateOf<Playback?>(null) }
   val url =
-    remember { mutableStateOf("https://media.w3.org/2010/05/sintel/trailer.mp4") }
+    remember { mutableStateOf("D:/Work/Self/ACG/.workbuddy/test.mp4") }
   val player = remember { mutableStateOf<FFPlayer?>(null) }
   val duration = remember { mutableFloatStateOf(0f) }
   val pts = remember { mutableFloatStateOf(0f) }
@@ -62,7 +62,7 @@ fun PlayScreen() {
                 val newPlayer =
                   FFPlayer(
                     url.value,
-                    HttpIO.Handler(),
+                    FileIO.Handler(),
                     playback.value,
                   )
                 player.value = newPlayer
