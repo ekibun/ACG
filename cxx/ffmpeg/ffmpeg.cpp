@@ -293,7 +293,9 @@ struct SWContext {
   // 视频
   int64_t width = 0;
   int64_t height = 0;
-  int64_t videoFormat = AV_SAMPLE_FMT_NONE;
+  // 转码目标格式固定为 AV_PIX_FMT_RGBA（见 postFrameVideo）：平台侧渲染
+  // （Playback.jvm.kt 的 Skia、Playback.android.kt 的 Bitmap）一直就是按它消费
+  // 帧的，没有别的选项，所以不把它做成构造参数。
   uint8_t* videoBuffer = nullptr;
   int64_t videoBufferSize = 0;
   // opaque：以下都是内部状态
@@ -364,7 +366,7 @@ int64_t postFrameVideo(SWContext* ctx, AVFrame* frame) {
     if (ctx->_swsCtx) sws_freeContext(ctx->_swsCtx);
     ctx->_swsCtx = nullptr;
     ctx->videoBufferSize = av_image_get_buffer_size(
-        (AVPixelFormat)ctx->videoFormat, frame->width, frame->height, 1);
+        AV_PIX_FMT_RGBA, frame->width, frame->height, 1);
     if (!ctx->videoBufferSize) return -1;
     ctx->width = frame->width;
     ctx->height = frame->height;
@@ -372,14 +374,13 @@ int64_t postFrameVideo(SWContext* ctx, AVFrame* frame) {
                    ctx->videoBufferSize);
     if (!ctx->videoBuffer) return -1;
     av_image_fill_arrays(ctx->_videoData, ctx->_linesize, ctx->videoBuffer,
-                         (AVPixelFormat)ctx->videoFormat, ctx->width,
-                         ctx->height, 1);
+                         AV_PIX_FMT_RGBA, ctx->width, ctx->height, 1);
     ctx->_swsCtx = sws_getContext(
         frame->width, frame->height, (AVPixelFormat)frame->format, ctx->width,
         ctx->height,
-        // 必须和上面给 ctx->_videoData 定尺寸、填数据时用的是同一个像素格式，
+        // 与上面给 ctx->_videoData 定尺寸、填数据时用的是同一个格式常量，
         // 否则 sws_scale 写进来的布局与当初分配的缓冲区对不上。
-        (AVPixelFormat)ctx->videoFormat, SWS_POINT, nullptr, nullptr, nullptr);
+        AV_PIX_FMT_RGBA, SWS_POINT, nullptr, nullptr, nullptr);
   }
   if (!ctx->_swsCtx) return -1;
   sws_scale(ctx->_swsCtx, frame->data, frame->linesize, 0, frame->height,
@@ -390,14 +391,12 @@ int64_t postFrameVideo(SWContext* ctx, AVFrame* frame) {
 extern "C" JNIEXPORT jlong JNICALL
 Java_soko_ekibun_ffmpeg_AvPlayback_initNative(JNIEnv* env, jobject thiz,
                                               jint sample_rate, jint channels,
-                                              jint audio_format,
-                                              jint video_format) {
+                                              jint audio_format) {
   auto ret = new SWContext();
   ret->speedRatio = 1;
   ret->sampleRate = sample_rate;
   ret->channels = channels;
   ret->audioFormat = audio_format;
-  ret->videoFormat = video_format;
   return (jlong)ret;
 }
 extern "C" JNIEXPORT jint JNICALL

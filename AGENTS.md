@@ -103,9 +103,11 @@ native（`cxx/`：WebView2 宿主、QuickJS 桥、FFmpeg 解封装+解码+播放
   需要平台能力就 `expect` 一个**最小原语**，两端各 `actual`；照抄现有粒度，别自创抽象层。
   这条**不打折**：现状里 `soko.ekibun.{quickjs,ffmpeg}`、`acg.engine`、`acg.player` 仍有直接引用，
   方向是把这些 Java 语义**全部提到外面**。差距与进度见 [`TODO.md`](./TODO.md) B4 —— 别拿现状当依据。
-- **平台"要求" ≠ 平台"输出"**：`AvPlayback.audioFormat` / `videoFormat` 表示
-  **平台要求 native 输出什么格式**，会传给 native 去配转码器 —— 所以两端各传不同格式是合法的
+- **平台"要求" ≠ 平台"输出"**：`AvPlayback.audioFormat` 表示
+  **平台要求 native 输出什么采样格式**，会传给 native 去配转码器 —— 所以两端各传不同格式是合法的
   （Android 用 `ENCODING_PCM_8BIT` 是有意为之）。改这里之前先确认方向。
+  **视频没有这个自由度**：转码目标在 native 侧写死 `AV_PIX_FMT_RGBA`，Kotlin 侧已无像素格式
+  常量与 `videoFormat` 参数（见 [cxx/AGENTS.md](./cxx/AGENTS.md) 的 ffmpeg 一节）。
 - WebView 契约在 `soko.ekibun.acg.web`（Android 用 `android.webkit.WebView`，桌面走自研宿主）。
   **不要引入第三方 KMP WebView 库**，理由见 [cxx/AGENTS.md](./cxx/AGENTS.md)。
   后台页 JS 契约（对齐 BangumiPlugin `assets/modules/http.js`）：

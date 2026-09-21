@@ -34,7 +34,6 @@ class DesktopPlayback(
   override val sampleRate: Int = 48000
   override val channels: Int = 2
   override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_FLT
-  override val videoFormat: Int = AvFormat.AV_PIX_FMT_RGBA
 
   private var lineRef: SourceDataLine? = null
 

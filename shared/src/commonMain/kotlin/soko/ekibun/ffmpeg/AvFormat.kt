@@ -24,24 +24,17 @@ open class AvFormat(
     /** 允许落在非关键帧上（仅在 demuxer 支持时有效）。 */
     const val AVSEEK_FLAG_ANY = 4
 
-    // AVSampleFormat / AVPixelFormat 常量。
-    // 直接照抄 FFmpeg 枚举值，避免各平台实现里散落 "0"/"26" 这类魔术数字。
-    // 别凭「枚举只到 13」这类印象改这里：pixfmt.h 里 ARGB=25、RGBA=26、BGRA=28
-    // 都是合法值，写错不会报错，只会让拿到帧的平台按别的通道序解释 ——
-    // 症状是「能播但颜色不对」（R/B 互换），不是取不到帧。
+    // AVSampleFormat 常量。
+    // 直接照抄 FFmpeg 枚举值，避免各平台实现里散落 "0"/"1" 这类魔术数字。
+    //
+    // 视频输出格式不在这里：native 侧已把转码目标钉死成 AV_PIX_FMT_RGBA
+    // （`cxx/ffmpeg/ffmpeg.cpp` 的 postFrameVideo），平台侧没有可选项。
     const val AV_SAMPLE_FMT_NONE = -1
     const val AV_SAMPLE_FMT_U8 = 0
     const val AV_SAMPLE_FMT_S16 = 1
     const val AV_SAMPLE_FMT_S32 = 2
     const val AV_SAMPLE_FMT_FLT = 3
     const val AV_SAMPLE_FMT_DBL = 4
-
-    const val AV_PIX_FMT_NONE = -1
-    const val AV_PIX_FMT_YUV420P = 0
-    const val AV_PIX_FMT_RGB24 = 2
-    const val AV_PIX_FMT_BGR24 = 3
-    const val AV_PIX_FMT_RGBA = 26
-    const val AV_PIX_FMT_BGRA = 28
 
     init {
       jniLoadLibrary("ffmpeg")

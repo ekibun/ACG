@@ -64,7 +64,6 @@ class AndroidPlayback(
       else -> AvFormat.AV_SAMPLE_FMT_S16
     }
   }
-  override val videoFormat: Int = AvFormat.AV_PIX_FMT_RGBA
 
   val audio by lazy {
     val audioMode = AudioTrack.MODE_STREAM
@@ -142,6 +141,8 @@ class AndroidPlayback(
     width: Int,
     height: Int,
   ) {
+    // 与桌面端同款早退：非正尺寸喂不进 createBitmap（它要求宽高为正）
+    if (width <= 0 || height <= 0) return
     updateAspectRatio(width, height)
     surfaceTexture.setDefaultBufferSize(width, height)
     if (bitmap == null || bitmap?.width != width || bitmap?.height != height) {

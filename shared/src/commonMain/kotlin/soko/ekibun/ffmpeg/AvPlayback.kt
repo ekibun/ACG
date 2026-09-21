@@ -9,7 +9,6 @@ abstract class AvPlayback(
   abstract val sampleRate: Int
   abstract val channels: Int
   abstract val audioFormat: Int
-  abstract val videoFormat: Int
 
   companion object {
     init {
@@ -35,7 +34,6 @@ abstract class AvPlayback(
     sampleRate: Int,
     channels: Int,
     audioFormat: Int,
-    videoFormat: Int,
   ): Long
 
   /**
@@ -44,8 +42,10 @@ abstract class AvPlayback(
    * 句柄要读 [sampleRate] 这些 **abstract** 成员，而构造期它们还没有值，所以只能等
    * **首次读句柄**时才建（这是基类 [Pointer.initPtr] 的时机约定，见那边的类文档）；
    * 一次都没用过就 `close()` 也没关系：[Pointer.closeDeferred] 不会为了「还」去现建一个。
+   *
+   * 视频输出格式不在参数里：native 侧固定按 `AV_PIX_FMT_RGBA` 转码。
    */
-  override fun initPtr(): Long = initNative(sampleRate, channels, audioFormat, videoFormat)
+  override fun initPtr(): Long = initNative(sampleRate, channels, audioFormat)
 
   private external fun postFrameNative(
     ctx: Long,
@@ -66,6 +66,14 @@ abstract class AvPlayback(
     codecType: Int,
   ): ByteArray
 
+  /**
+   * 把一帧交给平台消费（音频写声卡 / 视频送显）。
+   *
+   * 返回值只对**音频**有意义：它是折算掉重采样前导静音后"真正上屏的时间戳"。
+   * 视频没有这个概念 —— 视频路径恒返回 `-1`，送显只是它的副作用。
+   * 所以调用方**不能**用这个返回值去判断视频帧的时间戳：丢帧收敛要用
+   * [FFPlayer] 那边的 `AvFrame.timeStamp`（单位同样是 `AV_TIME_BASE` 微秒）。
+   */
   suspend fun flushFrame(
     codecType: Int,
     frame: AvFrame,
