@@ -86,6 +86,22 @@ class FFPlayer(
    */
   private val maxResyncDropDistance = 10 * AV_TIME_BASE.toLong()
 
+  /**
+   * 单帧步进用的两个时间戳：画面上那一帧（[lastFrameTs]）、它的前一帧（[prevFrameTs]）。
+   *
+   * 退帧为什么不能"seek 到当前帧再往回挪一点"：容器级 seek 只落关键帧（见类文档），
+   * 落点要靠 [resumeImpl] 的丢帧收敛补齐，而收敛的判据是"第一个时间戳 >= 目标的帧"
+   * —— 目标设成当前帧，收敛完显示的仍是当前帧，退不动。所以前一帧的时间戳只能自己记：
+   *
+   * - **顺序播放**（含 [stepForward]）：新帧紧接上一帧，前一帧就是上一次的当前帧；
+   * - **跳转之后**（seek / [stepBack]）：关键帧到落点之间被丢掉的帧里，**最后那一帧**
+   *   正好是落点的前一帧，收敛期顺手记下来补位；
+   * - 落点**恰好落在关键帧上**时一帧都没丢，前一帧无从得知 —— 这时 [prevFrameTs] 置空，
+   *   由 [stepBack] 再空探一次把它补回来（否则会永远退不动，见 [stepBack] 的文档）。
+   */
+  private var lastFrameTs: Long? = null
+  private var prevFrameTs: Long? = null
+
   /** 用户是否显式暂停过。seek 后据此决定要不要恢复播放。 */
   private var paused = false
 
@@ -124,7 +140,10 @@ class FFPlayer(
 
     val newPts = PTS(oldPts.streams, ts, base = ts)
     pts = newPts
-    // 清掉缓存的帧
+    // 清掉缓存的帧，并把它们归还：只关得掉**不在飞行中**的（`processing` 为空）——
+    // 正在飞行的几帧由各自的作业收尾时归还（它们会发现自己已经不在队列里，
+    // 见 updateJob 的 invokeOnCompletion），在这里关就是 use-after-free。
+    frames.values.forEach { list -> list.filter { it.processing == null }.forEach { it.close() } }
     frames.clear()
     // flush codec：丢弃解码器内部的参考帧历史 / 重排缓冲。
     // 与 drain（sendPacket(NULL) 取残余尾帧）是两件事，不能互相替代。
@@ -161,6 +180,50 @@ class FFPlayer(
       }
     }
 
+  /**
+   * 前进一帧：解出并显示下一帧，然后停住。
+   *
+   * 机制是现成的 —— [resume] 的 `stopOnNextFrame`（视频不等主时钟、送显后立刻 `pause()`）。
+   * 先 [pause] 是为了收干净上一轮：两个播放轮次同时从 [frames] 取帧会各显示一半。
+   */
+  suspend fun stepForward() =
+    withContext(playerDispatcher) {
+      val p = pts ?: return@withContext
+      // 纯音频没有"下一帧画面"，而且 [resume] 的停止信号只由视频帧给出 ——
+      // 不拦这一下会一路解到 EOF 才回来（seekTo 里也是同一道判断）。
+      if (!p.streams.containsKey(AVMediaType.VIDEO)) return@withContext
+      pause()
+      resume(stopOnNextFrame = true)
+    }
+
+  /**
+   * 后退一帧：跳回画面上那一帧的前一帧，然后停住。
+   *
+   * 目标是 [prevFrameTs]，即前一帧自己的时间戳 —— 收敛会丢掉所有早于目标的帧，
+   * 所以落点正是它，而不是"目标附近的关键帧"。先 [pause] 是为了让 [seekTo] 里的
+   * `pauseAtSeekTo` 为假，从而由 `resume(stopOnNextFrame = true)` 落在目标帧上停住；
+   * 否则 [seekTo] 会按"本来在播"把它接着播下去。
+   *
+   * 前一帧无从得知时（上一次跳转正好落在关键帧上、收敛一帧都没丢）先空探一次：目标取
+   * 当前帧之前一微秒，收敛丢掉的最后那一帧就是真正的前一帧 —— 而空探本身不动画面
+   * （收敛的落点是"第一个 >= 目标"的帧，仍是当前帧）。没有这一步，退帧会停在关键帧上
+   * 再也退不动：前一帧只能从丢帧里学，而卡住之后不会再有帧显示，[prevFrameTs] 再也填不上。
+   *
+   * @return 是否真的移动了。还没显示过任何帧、或已经在文件第一帧上时为 `false`。
+   */
+  suspend fun stepBack(): Boolean =
+    withContext(playerDispatcher) {
+      val current = lastFrameTs ?: return@withContext false
+      pause()
+      if (prevFrameTs == null) {
+        // 文件开头取 max：探不出结果，下面统一返回 false
+        seekTo(maxOf(current - 1, 0))
+      }
+      val target = prevFrameTs ?: return@withContext false
+      seekTo(target)
+      true
+    }
+
   private val codecs = HashMap<Int, AvCodec>()
   private val frames = HashMap<Int, ArrayList<AvFrame>>()
 
@@ -172,6 +235,10 @@ class FFPlayer(
       // 所有 PTS 落后于它的视频帧解码后立刻丢弃（对应 ffplay 的 frame_drops_early），
       // 直到第一帧追上目标才撤掉这个标记、回到正常同步。
       val resyncTo = pts.base?.also { pts.base = null }
+      // 收敛期最后被丢掉的那一帧 —— 跳转后它就是落点的前一帧（见 [prevFrameTs]）。
+      // 两个都是**本轮**的局部变量：出了这一轮，"丢掉过谁"就不再说明任何事。
+      var lastDropped: Long? = null
+      var converging = resyncTo != null
       val playJobs =
         pts.streams.map { (codecType, stream) ->
           async(playerDispatcher) {
@@ -187,6 +254,9 @@ class FFPlayer(
               }
               frame.processing = pts
               val lastUpdate = lastUpdateJob
+              // 这一帧是否被本轮"消费"掉（送显、或有意丢弃）？没消费就说明轮次在它显示
+              // 之前就停了 —— 那种帧必须还回队列，不能出队（见下面的 invokeOnCompletion）。
+              var consumed = false
               lastUpdateJob =
                 async(playerDispatcher) updateJob@{
                   if (!isPlaying()) return@updateJob
@@ -221,6 +291,10 @@ class FFPlayer(
                     frame.timeStamp < resyncTo &&
                     resyncTo - frame.timeStamp < maxResyncDropDistance
                   ) {
+                    // 退帧要的「前一帧」就在这些被丢掉的帧里 —— 记下最后那一帧。
+                    // 本轮第一帧就追上目标时它仍是 null，含义是"前一帧无从得知"。
+                    if (codecType == AVMediaType.VIDEO) lastDropped = frame.timeStamp
+                    consumed = true
                     return@updateJob
                   }
                   // 等视频追上主时钟
@@ -230,18 +304,51 @@ class FFPlayer(
                       if (!isPlaying()) return@updateJob
                     }
                   }
-                  if (muteOnNextFrame()) return@updateJob
+                  if (muteOnNextFrame()) {
+                    consumed = true
+                    return@updateJob
+                  }
                   val timeStamp = playback?.flushFrame(codecType, frame) ?: -1
+                  consumed = true
                   if (!isPlaying()) return@updateJob
                   if (timeStamp >= 0) pts.update(timeStamp)
-                  if (codecType == AVMediaType.VIDEO && onNextFrame?.isActive == true) {
-                    pts.update(frame.timeStamp)
-                    onNextFrame.resumeWith(Result.success(true))
+                  if (codecType == AVMediaType.VIDEO) {
+                    // 单帧步进的位置记录（见 [prevFrameTs]）：本轮收敛过，前一帧就用
+                    // 丢帧结果补；没收敛（顺序播放）时，前一帧就是上一次的当前帧。
+                    prevFrameTs = if (converging) lastDropped else lastFrameTs
+                    converging = false
+                    lastFrameTs = frame.timeStamp
+                    if (onNextFrame?.isActive == true) {
+                      pts.update(frame.timeStamp)
+                      onNextFrame.resumeWith(Result.success(true))
+                    }
                   }
                   playback?.onFrame?.invoke(pts.now(playback.speedRatio()))
                 }.also { job ->
                   job.invokeOnCompletion {
-                    frames[stream.index]?.remove(frame)
+                    // 轮次在"已经取到帧、还没显示"时停住是常态 —— 单帧步进的每一轮都是
+                    // 这样：播放协程把下一帧取进本轮了，而送显那一帧一发信号就把轮次停掉。
+                    // 那种帧**不能出队**，否则它再也不会被显示，症状是每按一次「前进一帧」
+                    // 跳过一帧（实测：只有一半的帧能靠步进走到）。
+                    //
+                    // 帧的归还也在这里收口（native 侧把所有权交给了 Java，见 AvFrame）：
+                    // 出队就归还。"队列里已经没了"同样算出队 —— seek / closeAsync 清队时
+                    // 只关得掉**不在飞行中**的帧，正在飞行的这几帧归它自己收尾。
+                    // 只有"没消费、还留在队列里"的那种不关：撤掉标记留给下一轮，
+                    // 它仍然归队列所有，最终由送显或清队那两处归还。
+                    //
+                    // ⚠️ 判在不在队里只能用 contains，**别拿 remove() 的返回值当判据** ——
+                    // remove 是出队动作：它返回 true 时帧已经被摘下来了，此时只把
+                    // `processing` 置空并不会把它放回去，于是那一帧既不在队里也不归还
+                    // （不显示 + 泄漏）。2026-09-21 实测踩过：每轮孤儿掉一帧，
+                    // 表现正是「前进一帧跨两帧」。
+                    val queue = frames[stream.index]
+                    if (consumed || queue?.contains(frame) != true) {
+                      queue?.remove(frame)
+                      frame.close()
+                    } else {
+                      frame.processing = null
+                    }
                   }
                 }
               lastUpdate?.join()
@@ -338,6 +445,10 @@ class FFPlayer(
   suspend fun closeAsync() =
     withContext(playerDispatcher) {
       pause()
+      // 队里剩下的帧也归还。必须排在 [pause] 之后：那一轮已经收干净，飞行中的帧都由各自的
+      // 作业还过了，此刻留在队列里的都是没人要的（轮次停下时就地留下的那些）。
+      frames.values.forEach { list -> list.forEach { it.close() } }
+      frames.clear()
       super.closeDeferred().await()
       // 每个 codec 有自己的归属 dispatcher：这里要等**归还真的落地**，
       // 而不是投出去就返回 —— 所以 await 各自的 closeDeferred()。

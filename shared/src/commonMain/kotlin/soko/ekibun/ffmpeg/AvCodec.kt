@@ -19,19 +19,27 @@ class AvCodec(
     init {
       jniLoadLibrary("ffmpeg")
     }
+
+    @JvmStatic
+    private external fun initNative(stream: Long): Long
+
+    @JvmStatic
+    private external fun sendPacketAndGetFramesNative(
+      ctx: Long,
+      stream: Long,
+      packet: Long,
+    ): Array<AvFrame>
+
+    @JvmStatic
+    private external fun flushNative(ctx: Long)
+
+    @JvmStatic
+    private external fun closeNative(ctx: Long)
   }
 
   override fun initPtr(): Long = initNative(stream.ptr)
 
   override suspend fun releaseImpl(ptr: Long) = closeNative(ptr)
-
-  private external fun initNative(stream: Long): Long
-
-  private external fun sendPacketAndGetFramesNative(
-    ctx: Long,
-    stream: Long,
-    packet: Long,
-  ): Array<AvFrame>
 
   /**
    * 喂入一个 packet 并取出它触发产出的所有帧。
@@ -56,12 +64,8 @@ class AvCodec(
       sendPacketAndGetFramesNative(ptr, stream.ptr, 0L).toList()
     }
 
-  private external fun flushNative(ctx: Long)
-
   suspend fun flush() =
     withPtr { ptr ->
       flushNative(ptr)
     }
-
-  private external fun closeNative(ctx: Long)
 }

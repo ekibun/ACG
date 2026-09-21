@@ -122,6 +122,27 @@ fun PlayScreen() {
           enabled = player.value != null,
           onClick = {
             MainScope().launch {
+              // 退不动（画面还停在第一帧）时返回 false，这里不用管：画面不变就是结果
+              player.value?.stepBack()
+            }
+          },
+        ) {
+          Text("-1f")
+        }
+        TextButton(
+          enabled = player.value != null,
+          onClick = {
+            MainScope().launch {
+              player.value?.stepForward()
+            }
+          },
+        ) {
+          Text("+1f")
+        }
+        TextButton(
+          enabled = player.value != null,
+          onClick = {
+            MainScope().launch {
               playback.value?.isMuteVoice = !(playback.value?.isMuteVoice ?: false)
             }
           },

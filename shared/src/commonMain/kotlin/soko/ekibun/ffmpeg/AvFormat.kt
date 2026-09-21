@@ -39,15 +39,56 @@ open class AvFormat(
     init {
       jniLoadLibrary("ffmpeg")
     }
+
+    @JvmStatic
+    private external fun getStreamsNative(pctx: Long): Array<AvStream>
+
+    @JvmStatic
+    private external fun seekToNative(
+      pctx: Long,
+      ts: Long,
+      streamIndex: Int,
+      minTs: Long,
+      maxTs: Long,
+      flags: Int,
+    ): Int
+
+    // < 0：出错
+    // >= 0：流索引
+    @JvmStatic
+    private external fun getPacketNative(
+      ctx: Long,
+      packet: Long,
+    ): Int
+
+    @JvmStatic
+    private external fun destroyNative(ctx: Long)
   }
+
+  /**
+   * 打开输入、建 `AVFormatContext`。
+   *
+   * ⚠️ **本包唯一一个留在类体里的 `external fun`，别挪进 companion。**
+   *
+   * 本包的约定是「`external fun` 放 companion + `@JvmStatic`」（理由见 [AvFrame.closeNative]）——
+   * 但 `@JvmStatic` 有第二个后果：原生方法变成**静态**，于是第二个 JNI 实参从**实例**
+   * 变成**类对象**（`jclass`）。本函数恰好要用那个实参当实例：
+   * `cxx/ffmpeg/ffmpeg.cpp` 把 `thiz` 存进 `AVFormatContext::opaque`，再在 `io_open`
+   * 回调里对它 `GetObjectClass` 后读 `io` 字段。静态化之后 `GetObjectClass` 拿到的是
+   * `java.lang.Class`，`GetFieldID(..."io"...)` 抛 `NoSuchFieldError`，随后以 null
+   * fieldID 继续走 → **JVM 直接崩**（`EXCEPTION_ACCESS_VIOLATION`）。
+   * 2026-09-21 实测踩过，hs_err 里紧邻崩溃的那条事件就是
+   * `NoSuchFieldError: java.lang.Class.io Lsoko/ekibun/ffmpeg/AvIO$Handler;`。
+   *
+   * 留在类体里没有代价：类体的 `external fun` 是**实例**原生方法，JNI 名同样是外层类名
+   * `Java_soko_ekibun_ffmpeg_AvFormat_initNative`，与 companion + `@JvmStatic` 得到的名一样；
+   * 差别只在那第二个实参。全包其余 16 个原生方法都不碰 `thiz`，所以可以放心静态化。
+   */
+  private external fun initNative(url: String): Long
 
   private var streams: List<AvStream>? = null
 
-  private external fun initNative(url: String): Long
-
   override fun initPtr(): Long = initNative(url)
-
-  private external fun getStreamsNative(pctx: Long): Array<AvStream>
 
   suspend fun getStreams(): List<AvStream> =
     withPtr { ptr ->
@@ -56,15 +97,6 @@ open class AvFormat(
       }
       streams!!
     }
-
-  private external fun seekToNative(
-    pctx: Long,
-    ts: Long,
-    streamIndex: Int,
-    minTs: Long,
-    maxTs: Long,
-    flags: Int,
-  ): Int
 
   /**
    * 容器级 seek。
@@ -90,13 +122,6 @@ open class AvFormat(
       seekToNative(ptr, ts, stream?.index ?: -1, minTs, maxTs, flags)
     }
 
-  // < 0：出错
-  // >= 0：流索引
-  private external fun getPacketNative(
-    ctx: Long,
-    packet: Long,
-  ): Int
-
   suspend fun getPacket(streams: Collection<AvStream>): AvPacket? =
     withPtr { ptr ->
       val packet = AvPacket()
@@ -115,8 +140,6 @@ open class AvFormat(
       }
       packet
     }
-
-  private external fun destroyNative(ctx: Long)
 
   override suspend fun releaseImpl(ptr: Long) = destroyNative(ptr)
 }

@@ -19,11 +19,13 @@ class AvPacket : Pointer() {
     init {
       jniLoadLibrary("ffmpeg")
     }
+
+    @JvmStatic
+    private external fun initNative(): Long
+
+    @JvmStatic
+    external fun closeNative(ptr: Long)
   }
-
-  private external fun initNative(): Long
-
-  external fun closeNative(ptr: Long)
 
   /**
    * 归还底层的 `AVPacket`。**必须显式调用**。

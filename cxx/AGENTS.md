@@ -57,6 +57,21 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
   而 `NativeWebView` 自己做内容哈希分桶目录加载，因为 `webview.dll` 必须与
   `WebView2Loader.dll` **同级**才能启动。
 - native 调用都要回 `dispatcher` 线程（`QuickJS.kt` 里的做法照抄）。
+- **Kotlin 侧 `external fun` 声明在哪，决定 JNI 名**（可见性不影响）：
+  - 声明在**类体**里 → 编译成**实例**原生方法，JNI 名就是外层类名
+    （`Java_soko_ekibun_ffmpeg_AvFrame_closeNative`）；
+  - 声明在 **`companion object`** 里 → 原生方法挂在 `Xxx$Companion` 上，JNI 名多一段
+    `_00024Companion`，**必须加 `@JvmStatic`** 才让名字落回外层类。漏了注解不会编译错，
+    只在**真的调**的时候抛 `UnsatisfiedLinkError`（历史上 `AvFrame.closeNative` 就是这样，
+    `av_frame_free` 因此从来没跑成过）。
+  - ⚠️ **但 `@JvmStatic` 还有第二个后果**：原生方法变成静态，于是**第二个 JNI 实参从「实例」
+    变成「类对象」（`jclass`）**。native 侧凡把这个实参当对象用的（`GetObjectClass(thiz)`、
+    存进 `->opaque` 之类）都会坏。本仓库只有 `AvFormat_initNative` 是这样 —— 它把 `thiz`
+    存进 `AVFormatContext::opaque`，再在 `io_open` 回调里读它的 `io` 字段；静态化后
+    `GetObjectClass` 拿到 `java.lang.Class`、`GetFieldID` 抛 `NoSuchFieldError`，
+    接着 JVM 直接 `EXCEPTION_ACCESS_VIOLATION`（2026-09-21 实测）。所以它**留在类体里**
+    当实例成员 —— 名字同样是外层类名，两全。
+  - ⇒ 往这个包里加原生绑定：默认「companion + `@JvmStatic`」；**native 用到 `thiz` 就改放类体**。
 
 ## webview
 

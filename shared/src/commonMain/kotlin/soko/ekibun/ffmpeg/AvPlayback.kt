@@ -14,12 +14,36 @@ abstract class AvPlayback(
     init {
       jniLoadLibrary("ffmpeg")
     }
-  }
 
-  private external fun speedRatioNative(
-    ctx: Long,
-    new: Float,
-  ): Float
+    @JvmStatic
+    private external fun speedRatioNative(
+      ctx: Long,
+      new: Float,
+    ): Float
+
+    @JvmStatic
+    private external fun initNative(
+      sampleRate: Int,
+      channels: Int,
+      audioFormat: Int,
+    ): Long
+
+    @JvmStatic
+    private external fun postFrameNative(
+      ctx: Long,
+      codecType: Int,
+      frame: Long,
+    ): Int
+
+    @JvmStatic
+    private external fun getBuffer(
+      ctx: Long,
+      codecType: Int,
+    ): ByteArray
+
+    @JvmStatic
+    private external fun closeNative(ctx: Long)
+  }
 
   /** 读播放倍速。挂起：句柄要经 [Pointer.withPtr] 取，属性形态表达不了。 */
   suspend fun speedRatio(): Float = withPtr { ptr -> speedRatioNative(ptr, 0f) }
@@ -29,12 +53,6 @@ abstract class AvPlayback(
     withPtr { ptr ->
       speedRatioNative(ptr, value)
     }
-
-  private external fun initNative(
-    sampleRate: Int,
-    channels: Int,
-    audioFormat: Int,
-  ): Long
 
   /**
    * native 上下文句柄 —— 覆写基类的句柄来源。
@@ -47,12 +65,6 @@ abstract class AvPlayback(
    */
   override fun initPtr(): Long = initNative(sampleRate, channels, audioFormat)
 
-  private external fun postFrameNative(
-    ctx: Long,
-    codecType: Int,
-    frame: Long,
-  ): Int
-
   suspend fun postFrame(
     codecType: Int,
     frame: AvFrame,
@@ -60,11 +72,6 @@ abstract class AvPlayback(
     if (isClosed) return -1
     return withPtr { ptr -> postFrameNative(ptr, codecType, frame.ptr) }
   }
-
-  private external fun getBuffer(
-    ctx: Long,
-    codecType: Int,
-  ): ByteArray
 
   /**
    * 把一帧交给平台消费（音频写声卡 / 视频送显）。
@@ -105,8 +112,6 @@ abstract class AvPlayback(
   abstract suspend fun pause()
 
   abstract suspend fun stop()
-
-  private external fun closeNative(ctx: Long)
 
   /**
    * 释放 native 上下文。幂等 —— 两个平台的 `Playback` 子类都会在 `super.close()`
