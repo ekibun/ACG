@@ -40,6 +40,42 @@ tasks.named<ProcessResources>("processResources") {
   from(rootDir.resolve("cxx/build/bin"))
 }
 
+// dll 不进 jar：它们以「应用资源 / classpath 目录里的真文件」形态存在，打进 jar 只是白占 ~117 MB
+// （运行时也用不到 —— jniLoadLibrary 从 app/resources 或 build/resources/main 直接 System.load 真文件）。
+// 保留 processResources 把 dll 写进 build/resources/main，是为了 IDE / 直接跑 MainKt 时 step 2
+// （file: URL）仍能命中；打包后则由 appResourcesRootDir 提供（step 1）。
+tasks.named<Jar>("jar") {
+  exclude("**/*.dll")
+}
+
+// 打包态的原生库：**不放进 jar**，而是作为「应用资源」随安装包落成一堆散文件。
+//
+// Compose 插件会把 appResourcesRootDir 下 `<os>-<arch>/` 里的一切放进安装目录（实测落点
+// `<app-image>/app/resources/`），运行时用 system property `compose.application.resources.dir`
+// 拿到它的绝对路径 —— `jniLoadLibrary` 于是直接 System.load 那个真文件，一次解包都不需要。
+// 不这么做的话，每次加载都要把 118 MB 的 ffmpeg.dll 解到 %TEMP%，而 Windows 上那个副本
+// **删不掉**（JDK-4171239），一天就能攒出 12 GB。
+//
+// ⚠️ 目录形状是插件写死的（`configureJvmApplication.kt` 的 `prepareAppResources`）：它只读
+// `appResourcesRootDir/common`、`/<os>`、`/<os>-<arch>` 三个子目录，并把三者的内容**摊平**到
+// 同一个目标里。所以库必须落在 `<os>-<arch>/` 这一层 —— 直接扔在 root 下不会有任何提示，
+// 任务会静默变成 NO-SOURCE，打出一个空的 `app/resources/`。桌面端只按 Windows x86_64 考虑，
+// 固定 `windows-x64/`。
+//
+// 用 Sync 而不是 Copy：目标目录是 `cxx/build/bin` 的**镜像**，native 侧删掉的库要跟着消失。
+val nativeResourcesDir = layout.buildDirectory.dir("nativeResources")
+val syncNativeResources =
+  tasks.register<Sync>("syncNativeResources") {
+    description = "把 cxx/build/bin 的 dll 备成打包用的应用资源（appResourcesRootDir）"
+    group = "build"
+    dependsOn(buildJni)
+    from(rootDir.resolve("cxx/build/bin")) {
+      include("*.dll")
+      into("windows-x64")
+    }
+    into(nativeResourcesDir)
+  }
+
 // 把原生日志的两个开关透传给跑起来的 App。
 //
 // `JavaExec` 继承的是 **Gradle daemon** 的环境，命令行上现设的变量进不去 —— 所以这里
@@ -69,6 +105,11 @@ compose.desktop {
       targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
       packageName = "soko.ekibun.acg"
       packageVersion = "1.0.0"
+      // 原生库作为应用资源随包走（见上面 syncNativeResources）。
+      // ⚠️ 必须用 fileProvider 把生产任务挂上去，打包任务才会自动依赖它；直接写
+      // layout.buildDirectory.dir(...) 就断开了这层关系，打包时可能拿到一个空目录
+      // —— 不报错，只是库变成从 jar 里现解（回到 $TEMP 那一套）。
+      appResourcesRootDir.fileProvider(syncNativeResources.map { it.destinationDir })
     }
   }
 }

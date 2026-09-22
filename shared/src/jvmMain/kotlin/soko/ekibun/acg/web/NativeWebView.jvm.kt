@@ -2,10 +2,9 @@ package soko.ekibun.acg.web
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
+import soko.ekibun.jniLoadLibrary
 import java.awt.Component
 import java.io.File
-import java.io.FileOutputStream
-import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -159,59 +158,16 @@ public object NativeWebView {
   private var shutdownHookRegistered = false
 
   /**
-   * 把 webview.dll 和 WebView2Loader.dll 解到**同一个目录**再加载。
+   * 加载 webview 原生库。
    *
-   * 不能直接用 `jniLoadLibrary`：它把每个 .dll 各解成 `%TEMP%` 里的独立随机文件名
-   * （`native_XXXX_webview.dll`），而 webview.dll 是按「自己所在目录」去找
-   * WebView2Loader.dll 的 —— 两个文件必须挨着。
-   *
-   * 解压目录**按库内容的哈希分桶**，理由见 [nativeDir]。
+   * 直接复用 [jniLoadLibrary]：dll 不再打进 jar，而是作为应用资源 / classpath 目录里的真文件
+   * 落盘（见 `jni.jvm.kt`）。`webview.dll` 与 `WebView2Loader.dll` 一定挨着，所以只
+   * `System.load(webview.dll)` 即可 —— Windows 会按「自己所在目录」自动把 `WebView2Loader.dll`
+   * 一起拉起来。以前非得自己解包，正是因为旧逻辑把每个 dll 解成 `%TEMP%` 里互不相邻的随机文件，
+   * 而 webview.dll 是按「自己所在目录」找 `WebView2Loader.dll` 的。
    */
   private fun loadNativeLibraries() {
-    val loader = NativeWebView::class.java.classLoader ?: ClassLoader.getSystemClassLoader()
-    val payload =
-      NATIVE_FILES.associateWith { name ->
-        loader.getResourceAsStream(name)?.use { it.readBytes() }
-          ?: throw IllegalStateException("classpath 里找不到 $name（检查 cxx/build/bin 是否打进了资源）")
-      }
-    val dir = nativeDir(payload.values)
-    for (name in NATIVE_FILES) {
-      val target = File(dir, name)
-      val bytes = payload.getValue(name)
-      if (target.isFile && target.length() == bytes.size.toLong()) continue
-      // 写不进去就让它抛：静默失败会让人以为自己跑的是新编的库。
-      FileOutputStream(target).use { it.write(bytes) }
-    }
-    System.load(File(dir, NATIVE_FILES[0]).absolutePath)
-  }
-
-  /**
-   * 解压目录：`<base>/<内容哈希>`。
-   *
-   * **不能固定一个路径**：DLL 一旦被 `System.load` 就锁住、覆盖写会失败，而 Gradle
-   * 会复用测试 worker，上一个进程加载过的库还占着文件 —— 固定路径下「改了 C++、
-   * 重编、重跑」拿到的还是旧库（实测踩过：日志里的新代码根本没生效）。
-   * 按内容哈希分目录后，新库天然落在新目录里，旧目录锁着也不影响。
-   *
-   * 顺手把*别的*哈希目录清掉（只清名字长这样的，别的一律不碰）；清不掉的多半是
-   * 还被别的进程加载着，忽略了就行。
-   */
-  private fun nativeDir(payloads: Collection<ByteArray>): File {
-    val digest = MessageDigest.getInstance("SHA-256")
-    payloads.forEach(digest::update)
-    val tag = digest.digest().take(6).joinToString("") { "%02x".format(it) }
-
-    val base = File(userDataDir.parentFile ?: userDataDir, "native")
-    val dir = File(base, tag)
-    if (!dir.isDirectory && !dir.mkdirs() && !dir.isDirectory) {
-      throw IllegalStateException("无法创建原生库解压目录：$dir")
-    }
-    base.listFiles()?.forEach { sibling ->
-      if (sibling.name != tag && sibling.isDirectory && HASH_DIR.matches(sibling.name)) {
-        runCatching { sibling.deleteRecursively() }
-      }
-    }
-    return dir
+    jniLoadLibrary("webview")
   }
 
   // ---------------------------------------------------------------------
@@ -398,11 +354,7 @@ public object NativeWebView {
    * 直接丢掉）。给个上限把「永远挂着」变成一次明确的 null。
    */
   private const val SCRIPT_TIMEOUT_MS = 15_000L
-  private val NATIVE_FILES = arrayOf("webview.dll", "WebView2Loader.dll")
   private val EMPTY_STRINGS = emptyArray<String>()
-
-  /** 我们自己生成的解压目录名（12 位十六进制），清理时只认这个形状。 */
-  private val HASH_DIR = Regex("^[0-9a-f]{12}$")
 
   /** 后台任务的一次结果收件人。 */
   internal interface BackgroundSink {

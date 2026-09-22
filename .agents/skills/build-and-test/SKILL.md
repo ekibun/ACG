@@ -3,7 +3,7 @@ name: build-and-test
 description: >-
   构建与验收的入口：Gradle 与 JDK 的关系（启动 gradlew 的 JAVA_HOME、daemon 的 toolchain、native 的 jni.h
   是三件互不相同的事）、跑桌面端与 Android 包的命令、改完代码必须过的三条编译闸门、:shared:jvmTest
-  怎么跑与结果为什么读 XML，以及改过 native 后 dll 必须同步到哪三处。
+  怎么跑与结果为什么读 XML，以及改过 native 后 dll 要同步到哪四处、加载时按什么顺序找。
   Use when 要跑构建 / 打包 / 测试、判断"这次改动算不算做完"，或改了 cxx/ 下的 native 需要重编与同步 dll 时。
 agent_created: true
 ---

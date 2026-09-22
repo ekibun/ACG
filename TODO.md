@@ -58,16 +58,6 @@
 
 ## B. 已知缺陷，待修
 
-### B1. dll 落位第 3 处仍要手动拷
-
-- **现状**：`desktopApp/build/run/main/classpath/classes/` **没有任何 Gradle 任务写**。
-  第 1 处（`shared/build/processedResources/jvm/test/`，`jvmTestProcessResources`）与
-  第 2 处（`desktopApp/build/resources/main/`，`:desktopApp:processResources`）已自动。
-- **为什么现在没做**：补任务本身是代码改动，本轮只改文档。
-- **完成判据**：补一个 `dependsOn(:desktopApp:buildJni)` 的 copy 任务，把第 3 处并进 Gradle 工具链；
-  之后 skill `build-and-test` 的 `references/dll-sync.md` 与该条一起简化为"三处全自动"。
-- **影响**：漏拷的症状是"改动没生效、连日志都没有"，最容易被误判成代码问题。
-
 ### B3. 测试报错 / 日志存在非英文输出
 
 - **现状**：未审计。Windows 控制台按代码页解码，中文输出会变乱码，误导排查。
