@@ -118,12 +118,253 @@
   而不是关键帧附近"；②"第一条真正上屏的音频时间戳 ≥ 目标"。判据不要读时钟（播放节流会污染），
   视频读送显像素的亮度 —— 标定见探针。
 - **为什么现在没做**：往仓库里加二进制测试资源要用户点头。探针、媒体与生成命令已留在本机
-  `.workbuddy/tmp/seek-probe/`（`ZzSeekDropProbe.kt`、`ZzSeekDiagProbe.kt`、`ramp.mp4`、`ramp.ts`、
-  `gen2.log`、`land-mp4.txt` / `land-ts.txt` 是 ffprobe 的落点实测）。
+  `.workbuddy/ref/seek-probe/`（`ZzSeekDropProbe.kt`、`ZzSeekDiagProbe.kt`、`ramp.mp4`、`ramp.ts`、
+  `land-mp4.txt` / `land-ts.txt` 是 ffprobe 的落点实测；生成日志 `gen2.log` 已随临时目录清理）。
 - **⚠️ 探针的已知局限**：探针里的假音频**模拟不了真声卡的实时消费**，所以"主时钟被音频拉回"
   这个现象在探针里复现不出来（实测：假音频下整个 12 秒的文件 100ms 内就被消费完，视频框框全过）。
   音频侧的时间戳只能从 `AvPlayback.flushFrame` 里那行 `println("PTS ...")`（落在
   `build/test-results/jvmTest/*.xml` 的 `<system-out>`）里看。**要真正验收 A/V 交互只能在真机上跑。**
+
+### B9. 退帧在「落点正好是 GOP 首帧」时退不动
+
+- **现状**：**已修**（2026-09-22，路线 C）。空探步长由 `1µs` 改成 **3/4 × 已缓存的帧间隔**
+  （新字段 `FFPlayer.frameIntervalUs`，在 `resumeImpl` 里靠相邻两帧的差值更新 ——
+  必须**另存**，不能跟 `prevFrameTs` 混用：卡住时后者本身就是 `null`）。KDoc 已同步。
+  A/B 实测（同一场景、两份只差容器时基的素材，表见下面「A/B 实测」）：改前 `-1f` 返回 `false`、
+  画面停在 `4_000_000`；改后返回 `true` 且退到 `3_958_333`（正好一帧），再按一次退到 `3_916_666`。
+- **原写法为什么退不动**（`seekTo(maxOf(current - 1, 0))`，**实测不成立**，保留作依据）：
+- **确切机制（有出处）**：
+  1. mp4/mov 只实现 `read_seek`（不是 `read_seek2`），`avformat_seek_file` 会把 min/max 窗口
+     整个丢掉，落点必然是「不晚于 ts 的最近关键帧」（见 `AvFormat.seekTo` 的注释）。
+  2. `cxx/ffmpeg/ffmpeg/libavformat/seek.c` 的 `seek_frame_internal`：
+     `timestamp = av_rescale(timestamp, st->time_base.den, AV_TIME_BASE * st->time_base.num);`
+     而 `av_rescale` = `av_rescale_rnd(..., AV_ROUND_NEAR_INF)`（`libavutil/mathematics.c`），
+     `AV_ROUND_NEAR_INF` = 四舍五入、半数远离零（`libavutil/mathematics.h`）。
+  3. ⇒ `current - 1` 微秒**折回当前帧自己那一格**（半格以内一律如此），容器给出同一个关键帧，
+     收敛一帧都不丢，`lastDropped` 空 ⇒ `prevFrameTs` 空 ⇒ 返回 `false`、画面不动。
+- **实测数据**：半格 = 0.5 × 1e6 × tb.num/tb.den —— `test.mp4`（tb 1/100000）= **5µs**、
+  `ramp2.mp4`（tb 1/12288）= **41µs**，两条素材都吞掉 1 微秒；`ramp2.mp4` 的关键帧恰好在
+  0/2/4/6/8/10s，`seekTo(4_000_000)` 正落在关键帧上，与「卡住」的前提吻合。
+- **症状**：seek 到关键帧落点上（例如恰好 4.0s、GOP 2 秒）再按「-1f」不动，连按只是原地重画
+  同一帧（探针实测 `连点 后退×5` → `lumas=[105,105,105,105,105]`）。
+- **正解的方向**：让探测目标在**流的时基**里严格早于当前帧（约束 `半格 < ε < 一个帧间隔`）。
+  容器落到上一个关键帧、收敛落点仍是当前帧（画面不动），而被丢掉的最后一帧恰好是真正的前一帧，
+  随后那句 `seekTo(prevFrameTs)` 就是精确落点。**这条链已实测成立**（边界见下面的「实测数据」）。
+  **2026-09-22 已拍板走 C**（ε = 3/4 × 已缓存的帧间隔，不碰 native）；三条路线的取舍保留如下：
+  - **A（严格，推荐）**：native 暴露 `AvStream.time_base`（`getStreamsNative` 那处手里就有
+    `stream->time_base`，加两个 int 即可），ε 按半格算。代价：动 `cxx` ⇒ 要走 `buildJni`
+    与 dll 同步。注意「半格」要按 ffmpeg 实际用的那条流算（`seek_frame_internal` 用
+    `av_find_default_stream_index` 选出的默认流），保险取各流里最粗的时基。
+  - **B（一步到位，语义变更更大）**：目标直接取 `current - 一个帧间隔`，收敛的落点本身就是
+    前一帧，第二次 `seekTo` 与 `prevFrameTs` 那套记账都能精简。但帧间隔只能从已观测的相邻帧对
+    里学，VFR 下估小会退回卡住、估大会退两帧；严格版同样要 native 暴露（`AVFrame::duration`）。
+  - **C（不碰 native）**：ε 取「已观测到的相邻帧间隔 × 3/4」（间隔由相邻两帧的 `lastFrameTs`
+    差值缓存而来）。⚠️ **原先这里写的「取间隔 ÷ 2、下界自动满足」已被实测推翻**：÷2 的下界条件是
+    「时基频率 > 帧率」，而 `tb == 1/帧率` 的文件（实测 `ramp3.mp4`，`-video_track_timescale 24`）
+    让半格**恰好等于**间隔/2 —— 该素材上 ε=20833 失败、ε=20834 才成功，而间隔/2 = 20833.3 正好
+    卡在下界上。改取 **3/4**：「半格 ≤ 间隔/2 < 3/4·间隔 < 间隔」，**只要帧在容器里能用整数 tick
+    表示（tick ≤ 间隔，否则两帧同戳）就恒在窗口内**；对间隔估计的容差是 `(2/3)·间隔 < Î < (4/3)·间隔`
+    （±33%），比 ÷2 那版「差一点点就翻车」宽得多。两个缺口不变：① 卡住时 `prevFrameTs` 本身
+    就是 `null`，所以**间隔必须另存**，不能跟它混用一个字段；②「冷启动直接 seek 到关键帧」时
+    一个间隔都观测不到，只能回退到常数余量 —— 那就又回到 A 的必要性。
+
+- **⚠️ 两段式与一段式对 ε 的要求正好相反**：**记账（`prevFrameTs`）正是「让不准的估计变得无害」
+  的那个东西**，砍掉它等于拿精度换记账。
+  - **两段式（保 `prevFrameTs`，= A / C）**：ε ∈ `(半格, 真实间隔)`。**偏小无害** —— 只要过了半格，
+    前一帧仍是从「真正解码出来又被丢掉的那一帧」里读出来的，**不是算出来的**，所以估计不准不影响
+    结果；偏大到越过前一帧 ⇒ 退两帧。
+  - **一段式（砍掉 `prevFrameTs`，直接 `seekTo(current - ε)` 落到前一帧）**：ε **直接决定落点**，
+    必须 ∈ `[真实间隔, 真实间隔 + 前一帧的间隔)`。**偏小 ⇒ 画面完全不动**（且不重试放大就不会自己
+    变好）；偏大越过再前一帧 ⇒ 退两帧。
+  - ⇒ 一段式对间隔估计的要求是**宁可偏大**，两段式是**宁可偏小**；两者都不能零误差免俗。
+  - **实测**（两张表一致）：一段式的临界正好是 **ε ≥ 一个帧间隔** —— 41666µs 时画面仍停在
+    4_000_000 不动、41667µs 时才落到 3_958_333。所以「砍掉 `prevFrameTs`、取间隔/2」这条路
+    **必然退不动**（间隔/2 恒小于间隔）。
+- **实测数据**（2026-09-22 探针 `ZzSeekEpsProbeTest`）：两份素材内容逐帧相同、只差容器时基，
+  都从关键帧落点 `4_000_000µs`（第 96 帧）上开始，先用 `seekTo(4_000_000 - ε)` 看 `prevFrameTs`
+  学到没有，再按一次 `stepBack()` 看最终停在哪一帧（按整帧亮度反查帧号）：
+
+  | 素材 | 容器时基 | 半格 | 学到 `prevFrameTs` 的最小 ε | 退两帧的起点 |
+  | --- | --- | --- | --- | --- |
+  | `ramp2.mp4` | 1/12288 | 40.69µs | 41µs | 41667µs |
+  | `ramp3.mp4` | 1/24 | 20833.3µs | 20834µs | 41667µs |
+
+  两条边界都与推导吻合（下界 = 半格、上界 = 一个帧间隔 41666.7µs）；ε ≤ 半格的每一行
+  `stepBack()` 都返回 `false` 且画面停在原帧（症状复现）。**固定常数 ε 因此不成立**：1µs 在两张
+  表上都失败，1ms 只在 `ramp2` 上成功、在 `ramp3` 上被半格吞掉。
+- **A/B 实测**（2026-09-22 探针 `ZzStepBackEpsTest`，`report7.txt`）：两份素材都先 seek 到关键帧
+  落点 `4_000_000µs`（此时 `prevFrameTs` 为空 ⇒ 走空探），然后连按两次 `-1f`：
+
+  | 素材 | 容器时基 | 空探步长 | `-1f` #1 | 落点 `lastFrameTs` | `-1f` #2 | 落点 `lastFrameTs` |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | `ramp2.mp4` | 1/12288 | 1µs（旧） | `false` | 4_000_000 | `false` | 4_000_000 |
+  | `ramp2.mp4` | 1/12288 | 3/4 间隔（新） | `true` | 3_958_333 | `true` | 3_916_666 |
+  | `ramp3.mp4` | 1/24 | 1µs（旧） | `false` | 4_000_000 | `false` | 4_000_000 |
+  | `ramp3.mp4` | 1/24 | 3/4 间隔（新） | `true` | 3_958_333 | `true` | 3_916_666 |
+- **顺带该独立修的一条**：现在「已在第一帧」与「没探出来」共用 `return false`。前者对，后者在
+  掩盖问题 —— 返回值应以 `lastFrameTs` 是否变化为准。
+- **完成判据**：入库一个用例：seek 落到关键帧上之后 `stepBack()` 返回 `true` 且 `lastFrameTs` 变小。
+- **探针与素材**：留在本机 `.workbuddy/ref/step-probe/`（`ZzStepProbeTest.kt.saved`、`ramp2.mp4`、
+  `_genmedia.py`、`report4.txt`；ε 扫描的 `ZzSeekEpsProbeTest.kt.saved`、`ramp3.mp4`、
+  `_genmedia3.py`、`report5.txt`；A/B 的 `ZzStepBackEpsTest.kt.saved`、`report7.txt`；
+  重叠/送显核对的 `ZzOverlapProbeTest.kt.saved`、`report6.txt`），做法与 B8 同源
+  （探针跑完移出源集、媒体不进仓库）。
+
+### B10. 送显像素与该帧时间戳不符（花屏）：三处已修，仍有一段未定位
+
+- **已排除的三层**（2026-09-22，探针 `ZzRoundTeardownProbeTest`，`report9.txt` / `report10.txt`）：
+  - **渲染侧**：桌面 `Playback.jvm.kt` 把 `Image` 交给 Compose 之后立刻 `close()`，看着像
+    use-after-free —— 反编译 `ui-graphics-desktop` 可见 `toComposeImageBitmap()` 内部是
+    `allocPixels` + `Canvas.drawImage` + `setImmutable`，Compose 手里那张 `Bitmap`
+    **自己独占像素**，所以 `close()` 是安全的；
+  - **轮次收尾**：`late=0`（入口返回之后没有迟到的送显）、`foreign=0`（抄走的缓冲就是这一帧
+    自己写进去的）、`closedUse=0`（没有已归还却还在用的帧）；
+  - **素材**：ffmpeg CLI 独立解码这 288 帧逐帧对亮度，与 `mod(N*5,200)+28` **全部吻合**。
+- **已修之一：被作废的轮次会「复活」**（`FFPlayer.resumeImpl`）。`isPlaying()` 原来只判
+  `pts == this.pts && pts.playing`，而 `resume()` / `stepForward()` **复用同一个 `PTS` 对象**
+  （只有 seek / `play` 才换新的）—— 新一轮把 `playing` 置回 true 时，上一轮正卡在「等视频
+  追上主时钟」里的那个作业会继续往下走、补一次 `flushFrame`，而缓冲里此刻已经是**这一轮**
+  写进去的像素 ⇒ 那一帧显示成后面的帧。现在判据带上轮次号（`roundSeq == round`）。
+  **证据**：post / flush 两个序列对照，同一帧被 `postFrame` **两次而只 `flush` 一次**。
+- **已修之二：EAGAIN 会静默丢包**（`cxx/ffmpeg/ffmpeg.cpp` 的 `sendPacketAndGetFramesNative`）。
+  `avcodec_send_packet` 返回 `EAGAIN`（解码器输入队列满）时原代码**不重发、直接往下走**，
+  调用方随后把这个包 close 掉 ⇒ 码流里少一帧的数据。2026-09-22 复测时把它从「最多重发 4 次、
+  不成就算了」改成 **重发 16 次 + 出声**：
+  - `EAGAIN` 耗尽 ⇒ 一行 `AV_LOG_ERROR`（`连续 N 次 EAGAIN，包被丢弃：stream=… size=…`）。
+    **这是判「花屏是不是这条路造成的」的一线仪器**：桌面端没装 `av_log` 回调
+    （`JNI_OnLoad` 里那份在 `#ifdef ANDROID` 内），所以它走 **stderr** —— `:desktopApp:run` 的
+    重定向输出里直接可见（同一条通路已实测：测试 JVM 的原生 `[swscaler …]` 就是这么被抓到的）。
+  - 其他 `ret < 0`（非 EOF）同样打 ERROR，并把**本批已解出的帧照样交出去**。
+  ⚠️ **它没能消除下面那段残留** —— 丢包必然伤参考链，这条是真缺陷，但**不是**残留的成因。
+- **残留（未定位）**：探针里（只有视频流 ⇒ 主时钟没人推，解码跑到约 100fps）偶发：显示的是
+  **早 1~2 帧**的像素，而**像素本身是完整帧**（整帧同值、`uni=1.0`，不是半帧被改写也不是
+  解码残影）；短段 2~3 帧自愈，长段（20+ 帧）总在**关键帧**（第 144 / 192 帧，`-g 48`）处
+  愈合。逐次步进恒为 0。修完上面两条后降到「190 帧里 0~3 帧」，但 `playing + stepForward x3`
+  仍偶发 25 帧。
+  ⚠️ 探针**没有音频时钟**，这段**可能就是非实时播放造出来的伪影**，真机（音频推时钟）未必复现
+  —— 这一点没实测前不要把残留当成真缺陷。
+- **已排除之四：送显管线逐字节正确（2026-09-22 复测，带音轨 + 实时节奏）。**
+  探针 `ZzFlushPixelProbeTest`（归档在 `.workbuddy/ref/flush-probe/`）驱动**真实连续播放**
+  （`test.mp4`，VIDEO+AUDIO，1786 帧 / 1308x736 / 60fps），把每一帧
+  `flushVideoBuffer` 拿到的 `ByteArray` 与「串行解码 + 立即转换」的参考逐帧比对
+  （整帧哈希 + 逐行哈希）：
+  `送显 1786 帧；与参考逐像素完全相同 1786；不匹配 0`。
+  ⇒ **解码 → `sws_scale` → `getBuffer` → 送显这一段当前是干净的**，本条的残留不在它上面。
+  （报告里的「28 次 ts 非单调」是按内容哈希对齐在**静止画面重复帧**上的歧义，不是顺序错误。）
+- **已排除之五：渲染侧第二次确认。** 反编译 `ui-graphics-desktop-1.12.0` 的
+  `Actuals.skikoExcludingWeb.kt`：`internal actual fun Image.toBitmap()` 是
+  `Bitmap.allocPixels(ImageInfo.makeN32(...))` + `Canvas.drawImage(this, 0f, 0f)` +
+  `setImmutable()` —— **自己独占像素**；`toComposeImageBitmap()` 拿到的就是这张独立 Bitmap。
+  所以 `Playback.jvm.kt` 里 `frame.close()` 紧跟其后**不构成悬垂引用**。
+- **已排除之六：截图的形态学判据。** `QQ20260922-191623.png`（2080x1390）量化结果：
+  梯度**不落在** 8/16/32 周期上（比值 0.87 / 0.53，网格线反而比其余位置更平滑）、
+  相邻行最佳位移**恒为 0**（无 stride 斜切）、三通道相关性正常（R-G 0.94 / G-B 0.93 / R-B 0.80）、
+  各通道取值档位基本齐满（无量化丢位）。
+  ⇒ 「宏块对齐的遮错马赛克」「stride 不符」「通道误配」三类**都没有证据**。
+  ⚠️ 但那是**整窗**截图（含 UI，主色淡紫 `aea0cc` / `ede4f5`），**无法确认花屏区就是视频区**
+  —— 这条判据只说明"截图里看不出那三类结构"，不能反推"花屏不是那三类"。
+- **已修之三：失败路径上的帧泄漏**（同一函数）。`ret < 0 && ret != AVERROR_EOF` 时原代码直接
+  `return empty;`，而 `out` 里**已经收出来的帧没有 `av_frame_free`** ⇒ 每命中一次泄漏若干帧。
+  现在不再提前返回，一律走完 `receiveAll()` 并把已解出的帧交出去。
+- **已排除之七：跳转路径本身没有破链点。** 用户 2026-09-22 的判断是「肯定是跳转的问题」，
+  于是把 `FFPlayer.seekToRound` 逐行核过：它在 `super.seekTo` **之前**对**每个** codec 调了
+  `flush()`（丢参考帧历史与重排缓冲，`FFPlayer.kt:204-208`），`resyncTo` 的丢帧收敛又排在
+  送显**之前**、且对每条流都成立；`frames` 清队只关「不在飞行中」的帧，在飞的由各自
+  `invokeOnCompletion` 归还。⇒「seek 后解码器还拿着旧参考帧」「先上屏再决定丢不丢」
+  「清队与飞行中帧抢所有权」三条**都不成立**，跳转路径里**没有**能解释花屏的破链点。
+- **用户实测补充（2026-09-22）**：花屏出现在**视频画面内**（不是 WebView 页面）、
+  形态是**持续成块、只有跳转才恢复**、播放源是**本地文件**（不走 HTTP）。
+  ⇒ 原「待查方向」③ 已答（是视频）；① 里的 HTTP 通路排除。「持续到下次关键帧才愈合」
+  正是**参考链断裂**的特征形状，与「已修之二」的丢包机理吻合 —— 但探针（带音轨、实时节奏）
+  一次都没复现出丢包，所以**这条还没有一线证据**，要靠上面那行 ERROR 在真机上抓。
+- **已定位（2026-09-22，一线证据）：`resumeImpl` 的读包循环会「吞包」—— 就是花屏的成因。**
+  读包循环里 `getPacket` 之后有一条早退分支：`if (!isPlaying()) { packet.close(); break }`。
+  要害是 **`av_read_frame` 没有"放回去"这一说**：`getPacket` 走 [AvFormat] 的归属 dispatcher
+  （另一条 `avformat` 线程，`withPtr` 会真的 `withContext` 过去），所以「包已读出、轮次却在这
+  期间作废」是个**真实窗口**；此时 `close()` **不是归还，是从码流里永久吞掉一个包**
+  （**本次 pass 内不可恢复**；跨 seek 会被重读，见下面的口径修正）—— 解码器少一个参考帧，
+  其后每一帧都带着错参考解，**一直错到下一个 IDR**（即「继续算会继续花屏」）。
+  **实测**（探针 `ZzStepRapidProbeTest`，`test.mp4` seek 到 1/3 处；证据 `report18-test.txt` +
+  `probe18-test-stdout.txt`，判读脚本 `.workbuddy/tmp/analyze_drops2.py` / `analyze_drops4.py`）：
+  - 70 次 `DROP_PACKET`（`playing=false`，就是本条早退分支）里 **64 次在该次 pass 的解码序列上
+    留下 2 帧缺口**（`delta≈33300µs`，正常帧间隔 16660µs）；缺口正好落在最后一次
+    `DECODED` 与下一轮第一个 `DECODED` 之间，且 `queued=9` 说明命中的是读前量位置。
+  - ⚠️ **口径修正（2026-09-22 复核）**：「吞掉整整一帧」只对**同一次 pass** 成立，**不是全片
+    永久缺席**。把整个日志（含 D / A / F / H 四个场景）的 `DECODED` 时间戳去重后与 ffprobe 的
+    1786 帧逐个比对：**一帧不缺、也没有多余**（`analyze_drops3.py`）。原因是后面几个场景又 seek
+    回同一段、把那一段重读重解了一遍。原先写的「ref 606 从解码序列里消失」措辞过强，已改。
+  - **场景 D 的对齐**：seek 落点 = IDR `#480`（8.003s，`av_seek_frame` 只落目标之前的关键帧），
+    丢帧收敛后从 `#596` 起显示；被吞的是 `#606`/`#607` 那一格（探针报第一帧坏帧在显示下标 10，
+    即 `#606`，与 607 差 1 —— 这一格没核）。全片 GOP **恒 120 帧**、IDR 在
+    `0/120/…/600/720/…`，下一个 IDR = `#720`（12.0043s）⇒ `720 − 607 = 113`
+    **正好等于探针实测的未命中帧数 113**，坏帧一路错到 IDR 才愈合。
+  - 坏帧的像素判据是**「与全片 1786 帧的哈希全不匹配」**（不是「显示成早一帧的完整帧」）
+    —— 即解码输出本身就是错的，与「参考链断了」相符。
+  - **场景 F（60 次顺序步进）**：逐轮统计解码推进 `#608 → #610 → #612 …`，**每步解码走 2 帧、
+    显示只走 1 帧** ⇒ 每步真的少解一帧 —— 这就是用户那句「跳过了一帧解码」在一线上的样子；
+    坏帧从 `#606` 起一路到探针停止，从未愈合（没走到 `#720`）。
+  - 对照 **H（不 seek、播放期间不作废轮次）= 0 未命中**；场景 A（10 个并发 stepForward，
+    被轮次闸收敛成 1 轮）= 1 帧、0 未命中。
+  - **未解的一处**：全程 `decode_error_flags` 恒为 0（`DECODE_ERROR 行数 = 0`），而这个字段
+    在 native 侧确实接通了（`cxx/ffmpeg/ffmpeg.cpp:226` 把 `frame->decode_error_flags` 传给了
+    `AvFrame`）。若 libavcodec 真的报了 `FF_DECODE_ERROR_MISSING_REFERENCE`，这里应该非 0。
+    ⇒ 要么 h264 的「参考帧不存在」这条路不置这个位，要么坏帧成因比「少一个参考帧」更复杂。
+    **改完复测时顺手核对这一条**（修复若真有效，113 → 0 就足以定性；这一位仍为 0 则说明它
+    对这个场景不敏感，别再拿它当判据）。
+  ⇒ B10 原先「丢包不是残留的成因」（依据：native 那条 EAGAIN 通路没复现）**结论要改**：
+  残留的形态（「长段总在关键帧处愈合」）与这条吞包完全吻合 —— 在 ramp 素材上每帧亮度只差 5，
+  错参考解出来的样子就是「像早 1~2 帧的完整帧」（在真实素材 `test.mp4` 上则表现为**像素与全片
+  任何一帧都不匹配**，见上面场景 D 的判据）。
+- **已修（2026-09-22）**：`FFPlayer` 加了一个字段 `pendingPacket` —— 那条早退分支不再 `close()`，
+  而是**把包留着**；读包循环开头**先喂留下的包**、再去 `getPacket`；`seekToRound` / `closeAsync`
+  两处才真的归还（那两处它确实会被重读 / 不会再开新轮）。改法由用户给出并定调：**不「就地送解码」**
+  —— 那是在「轮次已作废」的语境里去动解码器与 `frames`，多出一件说不清的事；留着、由下一轮按
+  正常路径喂，包序与帧序都不变。
+- **复测（同一探针、同一素材；三条编译闸门 + `:shared:jvmTest` 全绿）**：
+
+  | 场景 | 修前未命中 | 修后未命中 |
+  |---|---|---|
+  | D（seek 后纯播放） | 113 | **0**（送显 1189 → 1190） |
+  | F（乱点 10 并发 → 顺序 60 步） | 52 | **0**（送显 62） |
+  | A（10 并发 stepForward） | 0 | 0 |
+  | H（不 seek 对照） | 0 | 0 |
+
+  F 的「逐帧命中下标」从「`596..605` 之后整片 `-1`」变成 `596..657` **完全连续** ——
+  **每步正好一帧，不再跳帧**。证据：`.workbuddy/ref/step-probe/before-pending-fix/`（修前）
+  与同目录 `report18-test.txt`（修后）。`decode_error_flags` 修后仍全程为 0，印证了
+  「它对这个场景不敏感」，别再拿它当判据。
+- **待查方向**（重排后）：
+  ① ~~真机带日志复现~~ / ~~改~~ —— **已在一线钉住并修完**（见上面「已定位」「已修」两条）：
+     成因是读包循环吞包，与 native 那条 EAGAIN 通路无关；修法是 `pendingPacket`（留着包、
+     下一轮开头再喂）。复测：D / F 的未命中 113 / 52 → **0**，F 的命中下标 `596..657` 连续。
+  ② 渲染之后那一段（Skia → Swing/Compose → GPU），探针只抓到 `ByteArray`，看不到上屏像素。
+  ③ 素材规格（10bit / HEVC / Interlaced / 高码率）。
+- **完成判据**：上面①里「出日志」与「不出日志」二者有一个被实测钉住 —— 出日志则顺着日志修；
+  不出日志则写明「解码通路已由日志证伪」，把本条收窄到渲染侧。或证明确属探针伪影后降为「不修」。
+- **探针与素材**：`.workbuddy/ref/step-probe/`（`ZzRoundTeardownProbeTest.kt.saved`、
+  `ZzStepRapidProbeTest.kt.saved` + `report18-test.txt` / `png18-test/`、
+  `report9.txt` / `report10.txt`；`_verify_material.py` 是素材的独立核对）、
+  `.workbuddy/ref/flush-probe/`（`ZzFlushPixelProbeTest.kt.saved`、`report12.txt`）。
+
+### B11. FFmpeg 关着 `--disable-asm`：解码与色彩空间转换全无 SIMD
+
+- **现状**：`cxx/ffmpeg/ffmpeg.cmake` 的 configure 带 `--disable-asm` ⇒ `HAVE_X86ASM=0`。
+  构建产物里 `libavcodec/x86/` **目录都不存在**（而 `libavcodec/x86/Makefile` 有 130 行
+  `X86ASM-OBJS`）；`libswscale/x86/yuv2rgb.c` 的函数体被 `#if HAVE_X86ASM` 整段圈掉，
+  `ff_yuv2rgb_init_x86` 恒返回 NULL ⇒ YUV420P→RGBA 落到 C 回退路径。
+- **功能不受影响**，只是慢，且每次初始化 sws 上下文会打一条
+  `No accelerated colorspace conversion found from yuv420p to rgba.`。
+- **已顺带修掉的放大器**（不是本条主体）：`postFrameVideo` 的 `_srcVideoFormat` 漏回写，
+  使那个缓存条件**逐帧成立**、sws 上下文逐帧重建。同一探针：修前 **4996 条**警告
+  （≈ 每帧一条），回写后 **5 条**（= 该次运行开的播放器数）。规则已写进
+  [cxx/AGENTS.md](./cxx/AGENTS.md) 的 ffmpeg 一节，证据见
+  `.workbuddy/ref/swscale-probe/`。
+- **为什么没直接改**：去掉这个 flag 属"改构建配置"，且**要求构建机上装 x86 汇编器**
+  （yasm 或 nasm）—— 本机 MSYS2 的 `/usr/bin`、`/mingw64/bin` 里都没有。
+- **完成判据**：构建机装 yasm/nasm → 去掉 `--disable-asm` → 重编 → 验证两点：警告消失、
+  `libavcodec/x86/` 下出现 `.o`；再用探针跑一遍确认**解码输出逐帧不变**（像素哈希与修前一致），
+  才谈保留。
+- **影响**：H.264 解码与 YUV→RGBA 都是逐帧热点，纯 C 与 SIMD 通常差数倍。
 
 ## C. 事实未实测，文档里暂无据
 

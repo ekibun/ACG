@@ -216,11 +216,15 @@ static jobjectArray newAvFrameArray(JNIEnv* env, jint size) {
 
 static jobject newAvFrame(JNIEnv* env, AVFrame* frame, AVStream* stream) {
   jclass cls = env->FindClass("soko/ekibun/ffmpeg/AvFrame");
-  jmethodID constructor = env->GetMethodID(cls, "<init>", "(JJII)V");
+  jmethodID constructor = env->GetMethodID(cls, "<init>", "(JJIII)V");
+  // decode_error_flags 是「画面有没有因为解码错误而遮错」的直接证据
+  // （FF_DECODE_ERROR_MISSING_REFERENCE 就是花屏的成因）。探针用，见
+  // AvFrame.kt。
   return env->NewObject(cls, constructor, (jlong)frame,
                         (jlong)(frame->best_effort_timestamp *
                                 av_q2d(stream->time_base) * AV_TIME_BASE),
-                        (jint)frame->width, (jint)frame->height);
+                        (jint)frame->width, (jint)frame->height,
+                        (jint)frame->decode_error_flags);
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL
@@ -232,26 +236,54 @@ Java_soko_ekibun_ffmpeg_AvCodec_sendPacketAndGetFramesNative(
   auto empty = newAvFrameArray(env, 0);
   if (!empty) return nullptr;
 
+  std::vector<AVFrame*> out;
+  // 把解码器里已经解出的帧全部收出来（顺带给 send_packet 腾出输入队列）
+  auto receiveAll = [&]() {
+    while (true) {
+      auto frame = av_frame_alloc();
+      if (!frame) break;
+      int r = avcodec_receive_frame(ctx, frame);
+      if (r == 0) {
+        out.push_back(frame);
+        continue;
+      }
+      av_frame_free(&frame);
+      // AVERROR(EAGAIN)：需要继续喂包；AVERROR_EOF：drain 完成
+      break;
+    }
+  };
+
   // drain 阶段：packet == 0 表示冲刷解码器内部缓存的尾帧
   int ret = avcodec_send_packet(ctx, packet ? (AVPacket*)packet : nullptr);
-  if (ret < 0 && ret != AVERROR_EOF && ret != AVERROR(EAGAIN)) {
-    // 真错误：结束不了就如实返回空，避免把错误静默成"没有帧"
-    return empty;
+  // EAGAIN = 输入队列满：**这个包没被收进去**，必须先收帧腾出位置再重发。
+  // 包一丢，码流就少了这一帧的数据，之后整个 GOP 都拿不到正确的参考帧 ——
+  // 画面成块马赛克，要到下一个关键帧才恢复。（2026-09-22：这正是「持续成块、
+  // 跳转才恢复」那条症状的形状，所以这一路绝不能静默。）
+  //
+  // FFmpeg 的契约保证「输出的帧全部读完之后再送，不会再返回 EAGAIN」，所以正常
+  // 情况下第二发就成；给足次数是为了真的卡住时还能吵出来，而不是悄悄把包扔掉。
+  const int kMaxSendRetry = 16;
+  for (int i = 0; ret == AVERROR(EAGAIN) && packet != 0 && i < kMaxSendRetry;
+       ++i) {
+    receiveAll();
+    ret = avcodec_send_packet(ctx, (AVPacket*)packet);
+  }
+  if (ret == AVERROR(EAGAIN)) {
+    // 收帧重发都收不进去：**如实表错**。这一包会被调用方 close 掉，
+    // 也就是参考链从此刻断——没有日志的话，外面只会看到"画面花了"。
+    av_log(ctx, AV_LOG_ERROR,
+           "avcodec_send_packet 连续 %d 次 EAGAIN，包被丢弃：stream=%d size=%d "
+           "（此后到下一个关键帧的画面都会是错的）\n",
+           kMaxSendRetry, pstream->index,
+           packet ? ((AVPacket*)packet)->size : 0);
+  } else if (ret < 0 && ret != AVERROR_EOF) {
+    av_log(ctx, AV_LOG_ERROR,
+           "avcodec_send_packet 失败 ret=%d（stream=%d，本批已解出 %d "
+           "帧，照样交出）\n",
+           ret, pstream->index, (int)out.size());
   }
 
-  std::vector<AVFrame*> out;
-  while (true) {
-    auto frame = av_frame_alloc();
-    if (!frame) break;
-    ret = avcodec_receive_frame(ctx, frame);
-    if (ret == 0) {
-      out.push_back(frame);
-      continue;
-    }
-    av_frame_free(&frame);
-    // AVERROR(EAGAIN)：需要继续喂包；AVERROR_EOF：drain 完成
-    break;
-  }
+  receiveAll();
 
   auto arr = newAvFrameArray(env, (jint)out.size());
   if (!arr) {
@@ -381,6 +413,14 @@ int64_t postFrameVideo(SWContext* ctx, AVFrame* frame) {
         // 与上面给 ctx->_videoData 定尺寸、填数据时用的是同一个格式常量，
         // 否则 sws_scale 写进来的布局与当初分配的缓冲区对不上。
         AV_PIX_FMT_RGBA, SWS_POINT, nullptr, nullptr, nullptr);
+    // ⚠️ 这个缓存键必须回写：上面那个 if
+    // 拿它判断「源像素格式变没变」，不回写就永远停在初值
+    // AV_PIX_FMT_NONE，于是条件**每一帧都成立**，sws 上下文被逐帧释放重建 ——
+    // 每帧一次 sws_getContext 的分配与初始化，视频越往下放越白烧。swscale 里的
+    // "No accelerated colorspace conversion" 警告正是随每次 sws_getContext
+    // 打印的，所以日志会被它刷满。音频路径一直是这么写的，见 postFrameAudio
+    // 里的 _srcAudioFormat。
+    ctx->_srcVideoFormat = (AVPixelFormat)frame->format;
   }
   if (!ctx->_swsCtx) return -1;
   sws_scale(ctx->_swsCtx, frame->data, frame->linesize, 0, frame->height,

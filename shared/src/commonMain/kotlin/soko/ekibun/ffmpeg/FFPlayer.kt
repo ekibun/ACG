@@ -87,6 +87,41 @@ class FFPlayer(
   private val maxResyncDropDistance = 10 * AV_TIME_BASE.toLong()
 
   /**
+   * 轮次序号：每开一轮 +1（见 [openRound]）。只在 [playerDispatcher] 上读写。
+   */
+  private var roundSeq = 0L
+
+  /**
+   * 开一轮独占播放：先把上一轮作废、等它收干净，再让自己这一轮开跑。
+   *
+   * 硬约束是 native 侧**每种流只有一块输出缓冲**（`SWContext::videoBuffer`）：
+   * [AvPlayback.postFrame] 整体改写它、后一步 [AvPlayback.flushFrame] 才把像素抄给平台。
+   * 两轮同时走到这对调用中间，上一轮的送显就会读到这一轮写进去的像素 —— 所以同一时刻
+   * 只允许一轮在飞。
+   *
+   * ⚠️ 这道闸**不是** 2026-09-21 那次「画面整体串一帧」的成因。那条已定位在 [resumeImpl]
+   * 的帧管道顺序上（`postFrame` 排在 `lastUpdate?.join()` 之前，纯播放 204 帧里 180 帧
+   * 送显的是**下一帧**的像素；把顺序倒过来之后降到 1 帧以内）。闸的价值在上面那条硬约束
+   * 与「后来者顶掉先到者」的语义本身 —— 探针里唯一直接测两轮抢缓冲的信号
+   * （`postFrame` 落在上一帧还没 flush 的窗口里）会被「投出即放弃的帧」误报，
+   * 单独不足以证明串帧。
+   *
+   * 用 `Mutex` 是错的方向：它是**排队** —— 后到的调用等前一轮跑完再上，于是上一次跳转的结果
+   * 照样先落地一次、再被下一次覆盖（「都做一遍」，不是「后来者顶掉先到者」）；而且它只盖得住
+   * 被包住的那几个入口，`seekTo` / `play` / `resume` 全都裸奔。
+   *
+   * 语义是**后到者顶掉先到者**：[pause] 把上一轮标记作废并 join 到它真的收干净；这段时间里
+   * 若有更晚的调用进来，[roundSeq] 就变了，本次直接放弃、什么都不做 —— 不排队、不重复落地。
+   *
+   * 只能在 [playerDispatcher] 上调：序号自增必须和后面的检查落在同一段不被打断的序列里。
+   */
+  private suspend fun openRound(): Boolean {
+    val seq = ++roundSeq
+    pause()
+    return seq == roundSeq
+  }
+
+  /**
    * 单帧步进用的两个时间戳：画面上那一帧（[lastFrameTs]）、它的前一帧（[prevFrameTs]）。
    *
    * 退帧为什么不能"seek 到当前帧再往回挪一点"：容器级 seek 只落关键帧（见类文档），
@@ -102,6 +137,15 @@ class FFPlayer(
   private var lastFrameTs: Long? = null
   private var prevFrameTs: Long? = null
 
+  /**
+   * 最近一次真的看到「连续两帧」时量到的**帧间隔**（微秒）。[stepBack] 空探那一跳靠它定步长。
+   *
+   * 只在拿得准的时候更新（见 [resumeImpl]）：顺序播放是 [prevFrameTs] → 当前帧，
+   * 跳转后的收敛是「最后一个被丢掉的帧」→ 当前帧。所以只要跳过一次 GOP 它就有值；
+   * 还不知道时空探只能退回 1µs —— 老行为，会被粗时基的半格吞掉（见 [stepBack]）。
+   */
+  private var frameIntervalUs: Long? = null
+
   /** 用户是否显式暂停过。seek 后据此决定要不要恢复播放。 */
   private var paused = false
 
@@ -109,11 +153,11 @@ class FFPlayer(
     streams: Map<Int, AvStream>,
     seek: Long? = null,
   ) = withContext(playerDispatcher) {
-    pause()
+    if (!openRound()) return@withContext
     val p = seek ?: pts?.now(playback?.speedRatio() ?: 1f) ?: 0
     pts = PTS(streams).also { it.playing = true }
     paused = false
-    seekTo(p)
+    seekToRound(p, resumeAfter = true)
   }
 
   suspend fun pause() =
@@ -133,11 +177,23 @@ class FFPlayer(
     maxTs: Long,
     flags: Int,
   ) = withContext(playerDispatcher) {
-    val oldPts = pts ?: throw Exception("no pts data")
-    val pauseAtSeekTo = oldPts.playing
-    pause()
-    if (pts != oldPts) return@withContext
+    // 「本来在播吗」必须在 [openRound] 之前读：它会把上一轮作废（`pts.playing = false`），
+    // 之后再读就永远是假，跳转完就不会接着播了。
+    val resumeAfter = pts?.playing == true
+    if (!openRound()) return@withContext
+    seekToRound(ts, stream, minTs, maxTs, flags, resumeAfter)
+  }
 
+  /** [seekTo] 的实现体：轮次闸已经开过，这里只做跳转本身。 */
+  private suspend fun seekToRound(
+    ts: Long,
+    stream: AvStream? = null,
+    minTs: Long = Long.MIN_VALUE,
+    maxTs: Long = Long.MAX_VALUE,
+    flags: Int = 0,
+    resumeAfter: Boolean,
+  ) = withContext(playerDispatcher) {
+    val oldPts = pts ?: throw Exception("no pts data")
     val newPts = PTS(oldPts.streams, ts, base = ts)
     pts = newPts
     // 清掉缓存的帧，并把它们归还：只关得掉**不在飞行中**的（`processing` 为空）——
@@ -145,6 +201,10 @@ class FFPlayer(
     // 见 updateJob 的 invokeOnCompletion），在这里关就是 use-after-free。
     frames.values.forEach { list -> list.filter { it.processing == null }.forEach { it.close() } }
     frames.clear()
+    // 上一轮留下的那个包属于**跳转之前**的位置，留着只会喂错位置；新的位置会从关键帧把
+    // 这一段重新读出来，所以这里是真的归还（见 [pendingPacket]）。
+    pendingPacket?.close()
+    pendingPacket = null
     // flush codec：丢弃解码器内部的参考帧历史 / 重排缓冲。
     // 与 drain（sendPacket(NULL) 取残余尾帧）是两件事，不能互相替代。
     codecs.forEach {
@@ -153,17 +213,24 @@ class FFPlayer(
     if (pts != newPts) return@withContext
     playback?.stop()
     // seek：即使传了 stream，mp4/mov 也只会落关键帧（见类注释）。
-    // 落点靠下面的"丢帧收敛"补齐。
+    // 落点靠下面的丢帧收敛补齐。
     if (pts != newPts) return@withContext
     super.seekTo(ts, stream, minTs, maxTs, flags)
     // 跳到下一帧
     if (pts != newPts) return@withContext
     if (newPts.streams.containsKey(AVMediaType.VIDEO)) {
-      resume(!pauseAtSeekTo)
+      resumeRound(stopOnNextFrame = !resumeAfter)
     }
   }
 
   suspend fun resume(stopOnNextFrame: Boolean = false) =
+    withContext(playerDispatcher) {
+      if (!openRound()) return@withContext
+      resumeRound(stopOnNextFrame)
+    }
+
+  /** [resume] 的实现体：轮次闸已经开过。 */
+  private suspend fun resumeRound(stopOnNextFrame: Boolean) =
     withContext(playerDispatcher) {
       if (stopOnNextFrame) {
         val newPts = pts
@@ -184,53 +251,101 @@ class FFPlayer(
    * 前进一帧：解出并显示下一帧，然后停住。
    *
    * 机制是现成的 —— [resume] 的 `stopOnNextFrame`（视频不等主时钟、送显后立刻 `pause()`）。
-   * 先 [pause] 是为了收干净上一轮：两个播放轮次同时从 [frames] 取帧会各显示一半。
+   * 整段走 [openRound]：它先把上一轮作废并 join 干净，再开这一轮。**并发进来的第二次调用是
+   * 顶掉而不是排队**（理由见 [openRound] 的文档）。
    */
   suspend fun stepForward() =
     withContext(playerDispatcher) {
       val p = pts ?: return@withContext
-      // 纯音频没有"下一帧画面"，而且 [resume] 的停止信号只由视频帧给出 ——
+      // 纯音频没有「下一帧画面」，而且 [resume] 的停止信号只由视频帧给出 ——
       // 不拦这一下会一路解到 EOF 才回来（seekTo 里也是同一道判断）。
       if (!p.streams.containsKey(AVMediaType.VIDEO)) return@withContext
-      pause()
-      resume(stopOnNextFrame = true)
+      if (!openRound()) return@withContext
+      resumeRound(stopOnNextFrame = true)
     }
 
   /**
    * 后退一帧：跳回画面上那一帧的前一帧，然后停住。
    *
    * 目标是 [prevFrameTs]，即前一帧自己的时间戳 —— 收敛会丢掉所有早于目标的帧，
-   * 所以落点正是它，而不是"目标附近的关键帧"。先 [pause] 是为了让 [seekTo] 里的
-   * `pauseAtSeekTo` 为假，从而由 `resume(stopOnNextFrame = true)` 落在目标帧上停住；
-   * 否则 [seekTo] 会按"本来在播"把它接着播下去。
+   * 所以落点正是它，而不是「目标附近的关键帧」。[openRound] 先把上一轮停干净，两跳都走
+   * `resumeAfter = false`，于是 [seekToRound] 结尾用 `resumeRound(stopOnNextFrame = true)`
+   * 落在目标帧上停住；否则它会按「本来在播」接着播下去。
    *
-   * 前一帧无从得知时（上一次跳转正好落在关键帧上、收敛一帧都没丢）先空探一次：目标取
-   * 当前帧之前一微秒，收敛丢掉的最后那一帧就是真正的前一帧 —— 而空探本身不动画面
-   * （收敛的落点是"第一个 >= 目标"的帧，仍是当前帧）。没有这一步，退帧会停在关键帧上
-   * 再也退不动：前一帧只能从丢帧里学，而卡住之后不会再有帧显示，[prevFrameTs] 再也填不上。
+   * 前一帧无从得知时（上一次跳转的落点正好是某个 GOP 的首帧、收敛一帧都没丢）这里先空探
+   * 一次，指望从丢帧里学到前一帧 —— ⚠️ **这一步曾经实测不成立**（2026-09-22）：当时目标是
+   * `current - 1` 微秒，而 `av_seek_frame` 会把它用 `av_rescale`（= `AV_ROUND_NEAR_INF`，
+   * 四舍五入）折进流的时基 —— **半格以内一律折回当前帧自己那一格**，于是容器又给出同一个
+   * 关键帧，一帧都丢不掉，探完 [prevFrameTs] 仍是空 ⇒ 本次直接返回 `false`、画面停住不动。
+   * 症状：seek 到某个关键帧落点上（例如恰好 4.0s、GOP 2 秒）再按「-1f」不动，连按只是原地
+   * 重画同一帧。实测半格（= 0.5 × 1e6 × tb.num/tb.den）：`test.mp4`（tb 1/100000）= 5µs、
+   * `ramp2.mp4`（tb 1/12288）= 41µs —— 1 微秒必然被吞掉。
+   *
+   * 正解是让目标在**流的时基**里严格早于当前帧：ε 要同时大于「半格」、小于「一帧间隔」
+   * （`半格 < ε < 一帧间隔`）。于是容器落到上一个关键帧、收敛落点仍是当前帧（画面不动），
+   * 而被丢掉的最后一帧恰好是真正的前一帧 —— **边界已实测**（2026-09-22，两份内容逐帧相同、
+   * 只差容器时基的素材）：临界 ε 就落在半格上（tb 1/12288 → 40/41µs 之间，半格 40.69µs；
+   * tb 1/24 → 20833/20834µs 之间，半格 20833.3µs），上界也精确等于一个帧间隔
+   * （41666µs 有效、41667µs 起会一次退两帧）。
+   *
+   * ⚠️ 因此**固定常数 ε 不成立**：1ms 在 tb 1/12288 上够用、在 tb 1/24 上被半格吞掉。
+   * 取「半格 + 1µs」最省，但那要把 `time_base` 从 native 暴露出来；这里改用
+   * **ε = 3/4 × 已缓存的帧间隔**（[frameIntervalUs]）—— 3/4 天然落在那段区间里
+   * （半格 ≤ 间隔/2 < 3/4 间隔 < 间隔），用不着知道时基。
    *
    * @return 是否真的移动了。还没显示过任何帧、或已经在文件第一帧上时为 `false`。
    */
   suspend fun stepBack(): Boolean =
     withContext(playerDispatcher) {
       val current = lastFrameTs ?: return@withContext false
-      pause()
+      if (!openRound()) return@withContext false
       if (prevFrameTs == null) {
-        // 文件开头取 max：探不出结果，下面统一返回 false
-        seekTo(maxOf(current - 1, 0))
+        // 文件开头取 max：探不出结果，下面统一返回 false。
+        // 步长取**帧间隔的 3/4**（[frameIntervalUs]）：ε 必须同时大于「半格」、小于
+        // 「一帧间隔」（边界见上面的实测），3/4 帧间隔天然落在这段区间里
+        // （半格 ≤ 间隔/2 < 3/4 间隔 < 间隔）—— 用不着知道流的 time_base。
+        // 还不知道帧间隔时只能退回 1µs（老行为），那种容器上会照样探不出来。
+        val eps = frameIntervalUs?.let { it * 3 / 4 } ?: 1
+        seekToRound(maxOf(current - eps, 0), resumeAfter = false)
       }
       val target = prevFrameTs ?: return@withContext false
-      seekTo(target)
+      seekToRound(target, resumeAfter = false)
       true
     }
 
   private val codecs = HashMap<Int, AvCodec>()
   private val frames = HashMap<Int, ArrayList<AvFrame>>()
 
+  /**
+   * 已经从 demuxer 读出来、但**读到它之后这一轮才被作废**的那个包。
+   *
+   * `av_read_frame` 没有「放回去」这一说（[AvFormat] 只有 `av_seek_frame`），所以轮次作废时
+   * 就地 `close()` **不是归还、是把这一包从码流里删掉** —— 解码器因此少一个参考帧，其后每一帧
+   * 都带着错参考解，一直错到下一个 IDR（就是花屏，实测见 [resumeImpl] 的读包循环）。
+   *
+   * 所以改成**留着**：下一轮开头先把它喂给解码器，包序与帧序都不变。两种情况下不成立、
+   * 就地归还：**跳转**（包属于跳转前的位置，新的位置会自己重读）与**关闭**（不会再有下一轮了）。
+   *
+   * 只在 [resumeImpl] / [seekToRound] / [closeAsync] 三处碰它，三处都在 [playerDispatcher] 上。
+   */
+  private var pendingPacket: AvPacket? = null
+
   private suspend fun resumeImpl(onNextFrame: CancellableContinuation<Boolean>?) =
     withContext(playerDispatcher) {
       val pts = pts ?: return@withContext
-      val isPlaying = { pts == this@FFPlayer.pts && pts.playing }
+      // 本轮的轮次号 —— [isPlaying] **必须**带上它，否则被作废的那一轮会在下一轮复活：
+      // [resume] / [stepForward] 复用同一个 [PTS] 对象（只有 seek / [play] 才换新的），
+      // 于是 `pts.playing` 再次置 true 时，上一轮正卡在「等视频追上主时钟」里的那个作业
+      // 会继续往下走、补一次 [AvPlayback.flushFrame] —— 而缓冲里此刻已经是**这一轮**写进去
+      // 的像素，那一帧就显示成了后面的帧。实测（2026-09-22，ramp 素材逐帧反查帧号）：
+      // 同一帧被 postFrame 两次而只 flush 一次，画面上表现为重复帧 + 之后整体落后两帧。
+      // 带上轮次号之后，作废轮次的作业在它的下一个检查点就退出，不再补送显。
+      val round = roundSeq
+      val isPlaying = { pts == this@FFPlayer.pts && pts.playing && roundSeq == round }
+      // 本轮是不是「单帧步进」轮。判据只能取**轮次级**的：看 `onNextFrame?.isActive`
+      // 不行 —— 那个信号在视频帧刚送显的那一刻就翻了，而轮次要等 `pause()` 落地才停，
+      // 中间这段窗口里音频帧会漏出去（实测每步恰好漏 1 帧进声卡）。
+      val stepMode = onNextFrame != null
       // seek 后要把画面从关键帧"快进"到目标时间：主时钟先停在目标时间，
       // 所有 PTS 落后于它的视频帧解码后立刻丢弃（对应 ffplay 的 frame_drops_early），
       // 直到第一帧追上目标才撤掉这个标记、回到正常同步。
@@ -260,13 +375,19 @@ class FFPlayer(
               lastUpdateJob =
                 async(playerDispatcher) updateJob@{
                   if (!isPlaying()) return@updateJob
-                  val muteOnNextFrame = {
-                    codecType == AVMediaType.AUDIO && onNextFrame?.isActive == true
-                  }
-                  // 解码帧
-                  if (!muteOnNextFrame()) playback?.postFrame(codecType, frame)
+                  // 步进轮里的音频**整轮**静音（见 [stepMode]）：既不解码后送显，也不送声卡。
+                  val muted = stepMode && codecType == AVMediaType.AUDIO
+                  // **先等上一帧送显完，再写这一帧** —— 顺序不能反。
+                  // native 每种流只有**一块**输出缓冲（`SWContext::videoBuffer`），
+                  // `postFrame` 会整体改写它，`flushFrame` 才是把缓冲抄走的那一步。
+                  // 先 postFrame 再 join 的话，本帧先覆写了缓冲，而上一帧的 flush 还等着抄 ——
+                  // 于是**上一帧显示成本帧的像素**。下面"等视频追上主时钟"那个 `delay` 是真挂起点，
+                  // 排队中的下一帧正好趁这个空档写进来，所以症状是**每一帧都显示成它的下一帧**
+                  // （实测 mp4 纯播放：送显像素恰好领先自称时间戳一帧，204 帧里 180 帧不符）。
                   lastUpdate?.join()
                   if (!isPlaying()) return@updateJob
+                  // 解码帧
+                  if (!muted) playback?.postFrame(codecType, frame)
                   // seek 后的丢帧收敛（ffplay frame_drops_early）：
                   //   diff = dpts - master_clock;  主时钟 == resyncTo
                   //   |diff| < AV_NOSYNC_THRESHOLD && diff < 0  ->  解码后立刻丢
@@ -304,7 +425,7 @@ class FFPlayer(
                       if (!isPlaying()) return@updateJob
                     }
                   }
-                  if (muteOnNextFrame()) {
+                  if (muted) {
                     consumed = true
                     return@updateJob
                   }
@@ -313,11 +434,24 @@ class FFPlayer(
                   if (!isPlaying()) return@updateJob
                   if (timeStamp >= 0) pts.update(timeStamp)
                   if (codecType == AVMediaType.VIDEO) {
+                    // 花屏定性探针（2026-09-22）：`decodeErrorFlags` 非 0 说明解码器这一帧
+                    // 是**遮错**出来的（`2` = 参考帧缺失），画面成块的马赛克就是这么来的 ——
+                    // 那与协程调度无关，要往码流 / 包层面查。全程为 0 就反过来证明
+                    // 花屏属于「整帧错位」那一类。
+                    if (frame.decodeErrorFlags != 0) {
+                      println("DECODE_ERROR ${frame.timeStamp} ${frame.decodeErrorFlags}")
+                    }
                     // 单帧步进的位置记录（见 [prevFrameTs]）：本轮收敛过，前一帧就用
                     // 丢帧结果补；没收敛（顺序播放）时，前一帧就是上一次的当前帧。
                     prevFrameTs = if (converging) lastDropped else lastFrameTs
                     converging = false
                     lastFrameTs = frame.timeStamp
+                    // 帧间隔只在「真看到连续两帧」时可信：上面刚把 [prevFrameTs] 摆到
+                    // 当前帧的前一帧，差值就是间隔（[frameIntervalUs] 的用途）。
+                    val prev = prevFrameTs
+                    if (prev != null && frame.timeStamp > prev) {
+                      frameIntervalUs = frame.timeStamp - prev
+                    }
                     if (onNextFrame?.isActive == true) {
                       pts.update(frame.timeStamp)
                       onNextFrame.resumeWith(Result.success(true))
@@ -357,14 +491,20 @@ class FFPlayer(
         }
       try {
         pts.playing = true
-        playback?.resume()
+        // 步进轮不碰音频设备：真实实现里 `resume()` 就是 `line.start()`，而 `pause()` 的
+        // `line.stop()` **不丢弃**已排队的 PCM —— 每步 start 一次，就把上一次播放留在
+        // 缓冲里的那一段声音原样放出来（实测每步各一次 resume）。
+        if (!stepMode) playback?.resume()
         var sendingPacket = 0
         while (isPlaying()) {
           if (sendingPacket > 10 || frames.map { it.value.size }.sum() > 100) {
             delay(1.milliseconds)
             continue
           }
-          val packet = getPacket(pts.streams.values)
+          // 上一轮作废时留下的那个包先喂（见 [pendingPacket]）：它已经离开 demuxer 了，
+          // 丢掉等于从码流里删掉一帧。
+          val packet =
+            pendingPacket?.also { pendingPacket = null } ?: getPacket(pts.streams.values)
           if (packet == null) {
             if (frames.map { it.value.size }.sum() == 0) {
               break
@@ -373,8 +513,13 @@ class FFPlayer(
             continue
           }
           if (!isPlaying()) {
-            // 提前退出：这个 packet 不会送到解码器了，就地归还
-            packet.close()
+            // 提前退出。⚠️ 这个 packet **不能就地归还**：它已经被 `av_read_frame` 从 demuxer
+            // 里取出来了，没有「放回去」的 API（后果见 skill `project-traps` 的 silent-failures）。
+            // 丢掉的代价是解码器少一个参考帧 —— 其后每一帧都带着错参考解，一直错到下一个 IDR，
+            // 症状就是花屏（实测：seek 到 1/3 后 113 帧像素与全片任何一帧都不匹配）。
+            // 所以留着，等下一轮开头先喂给解码器（[pendingPacket]）。
+            pendingPacket?.close()
+            pendingPacket = packet
             break
           }
           sendingPacket++
@@ -449,6 +594,9 @@ class FFPlayer(
       // 作业还过了，此刻留在队列里的都是没人要的（轮次停下时就地留下的那些）。
       frames.values.forEach { list -> list.forEach { it.close() } }
       frames.clear()
+      // 同上：不会再有下一轮了，留下的包只能在这儿归还。
+      pendingPacket?.close()
+      pendingPacket = null
       super.closeDeferred().await()
       // 每个 codec 有自己的归属 dispatcher：这里要等**归还真的落地**，
       // 而不是投出去就返回 —— 所以 await 各自的 closeDeferred()。

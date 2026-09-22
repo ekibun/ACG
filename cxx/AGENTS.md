@@ -106,6 +106,17 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
   （`av_image_get_buffer_size` / `av_image_fill_arrays` / `sws_getContext` 三处必须用同一个
   格式常量，否则 `sws_scale` 写进来的布局与缓冲区对不上）。Kotlin 侧已无像素格式常量，
   也没有 `AvPlayback.videoFormat` —— 平台实现只负责把 RGBA 字节贴到自己的渲染面。
+- **整棵 FFmpeg 都没有 x86 SIMD**：`ffmpeg.cmake` 的 configure 带 `--disable-asm`，于是
+  `HAVE_X86ASM=0`，所有 `X86ASM-OBJS` 一律不编 —— 构建产物里连 `libavcodec/x86/` 目录都不存在
+  （而 `libavcodec/x86/Makefile` 里有 130 行 `X86ASM-OBJS`），H.264 解码全程走纯 C。
+  要不要启用是单独一次决策，见 [../TODO.md](../TODO.md) B11 —— **不要**在没定之前顺手改这个 flag。
+- **`SwsContext` / `SwrContext` 都按「源格式 + 尺寸」缓存，缓存键必须回写**：`postFrameVideo`
+  比的是 `_srcVideoFormat`（对应 `postFrameAudio` 的 `_srcAudioFormat` + 声道布局 + 采样率）。
+  漏了回写**编译和调用都不会失败**，只会让那个条件**每一帧都成立** → 逐帧
+  `sws_getContext` / `swr_init`，白烧 CPU 并把日志刷满：`No accelerated colorspace conversion found from yuv420p to rgba.`
+  是 `sws_init_context` 路径里的 `ff_yuv2rgb_get_func_ptr` 打出来的，**它的条数就等于 sws
+  上下文被重建的次数** —— 日志里刷出几千条时先查上下文缓存，别去查颜色空间
+  （2026-09-22：这条线索把 `_srcVideoFormat` 漏回写钉了出来）。
 - 音频不一样：`AvPlayback.audioFormat` 仍是平台**要求** native 输出什么采样格式，
   语义见 [../AGENTS.md](../AGENTS.md) §4。
 - 自定义 AVIO 下的 seek 能力由 `HttpIO.seek` 的模拟质量决定（`aviobuf.c` 会因 seek 回调非空
