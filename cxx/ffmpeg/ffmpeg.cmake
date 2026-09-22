@@ -14,7 +14,6 @@ set(FFMPEG_CONFIGURE_COMMAND
         --disable-doc
         --disable-filters
         --disable-avfilter
-        --disable-asm
         )
 if (${CMAKE_HOST_SYSTEM_NAME} MATCHES "Windows")
     set(BASH_EXEC ${CMAKE_CURRENT_LIST_DIR}/../exec)
@@ -25,8 +24,11 @@ if (ANDROID)
             mediandk
             android
             z)
+    # 安卓侧维持 `--disable-asm`：x86/x86_64 的手写汇编要 nasm，NDK 不自带，
+    # 交叉编译时 configure 找不到它会直接报错退出。桌面端已不关，见 TODO.md 的 B11。
     set(FFMPEG_CONFIGURE_COMMAND
             ${FFMPEG_CONFIGURE_COMMAND}
+            --disable-asm
             --arch=${CMAKE_ANDROID_ARCH}
             --target-os=android
             --enable-jni

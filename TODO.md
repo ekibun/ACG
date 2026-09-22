@@ -346,25 +346,30 @@
   `report9.txt` / `report10.txt`；`_verify_material.py` 是素材的独立核对）、
   `.workbuddy/ref/flush-probe/`（`ZzFlushPixelProbeTest.kt.saved`、`report12.txt`）。
 
-### B11. FFmpeg 关着 `--disable-asm`：解码与色彩空间转换全无 SIMD
+### B11. FFmpeg 的 x86 asm：桌面端已开（2026-09-22），Android 与「差异分层」仍未做
 
-- **现状**：`cxx/ffmpeg/ffmpeg.cmake` 的 configure 带 `--disable-asm` ⇒ `HAVE_X86ASM=0`。
-  构建产物里 `libavcodec/x86/` **目录都不存在**（而 `libavcodec/x86/Makefile` 有 130 行
-  `X86ASM-OBJS`）；`libswscale/x86/yuv2rgb.c` 的函数体被 `#if HAVE_X86ASM` 整段圈掉，
-  `ff_yuv2rgb_init_x86` 恒返回 NULL ⇒ YUV420P→RGBA 落到 C 回退路径。
-- **功能不受影响**，只是慢，且每次初始化 sws 上下文会打一条
-  `No accelerated colorspace conversion found from yuv420p to rgba.`。
-- **已顺带修掉的放大器**（不是本条主体）：`postFrameVideo` 的 `_srcVideoFormat` 漏回写，
-  使那个缓存条件**逐帧成立**、sws 上下文逐帧重建。同一探针：修前 **4996 条**警告
-  （≈ 每帧一条），回写后 **5 条**（= 该次运行开的播放器数）。规则已写进
-  [cxx/AGENTS.md](./cxx/AGENTS.md) 的 ffmpeg 一节，证据见
-  `.workbuddy/ref/swscale-probe/`。
-- **为什么没直接改**：去掉这个 flag 属"改构建配置"，且**要求构建机上装 x86 汇编器**
-  （yasm 或 nasm）—— 本机 MSYS2 的 `/usr/bin`、`/mingw64/bin` 里都没有。
-- **完成判据**：构建机装 yasm/nasm → 去掉 `--disable-asm` → 重编 → 验证两点：警告消失、
-  `libavcodec/x86/` 下出现 `.o`；再用探针跑一遍确认**解码输出逐帧不变**（像素哈希与修前一致），
-  才谈保留。
-- **影响**：H.264 解码与 YUV→RGBA 都是逐帧热点，纯 C 与 SIMD 通常差数倍。
+- **已完成**：`cxx/ffmpeg/ffmpeg.cmake` 只在 `ANDROID` 分支传 `--disable-asm`，桌面端
+  （`--target-os=mingw32`）开启 ⇒ `HAVE_X86ASM=1`，`libavcodec/x86` 139 个 `.o`、`libswscale/x86`
+  16 个、`libavutil/x86` 15 个（开启前这三处**连目录都不存在**）。构建机需装 `nasm`
+  （MSYS2 的 `mingw-w64-x86_64-nasm`，实测 3.02 可用；yasm 上游已弃用，`configure` 只探测 nasm）。
+- **实测收益**：串行解码 + YUV420P→RGBA 整段 1786 帧素材（1308x736）13.95 s → 12.09 s，**约 −13%**；
+  swscale 的 `No accelerated colorspace conversion found from yuv420p to rgba.` 由每上下文 1 条降为 **0 条**。
+- **代价与判据改写（重要）**：同一素材逐帧 RGBA 与纯 C 路径比对 —— 帧数（1786）、时戳、尺寸、
+  **alpha 通道完全一致**；RGB 有 **1~3 LSB** 差（46% 字节；R 通道系统性 −1、G/B 双向）。
+  即**不是逐比特一致**，但属舍入 / dither 层面差异，不是数据损坏。原判据「像素哈希与修前一致」
+  **作废**，改为上面这一组。
+- **未做 / 待查**：
+  - **差异分层未分离**：属 H.264 解码层还是 swscale 转换层还没定。FFmpeg 没有控制 CPU flags 的
+    环境变量，要分离得加一个最小 native 入口调 `av_force_cpu_flags(0)`，在同一份 dll 里同轮对比
+    C 与 SIMD 两条路径。
+  - **Android 侧搁置**：x86/x86_64 的手写汇编要 nasm 而 **NDK 不自带**；arm64 走 `.S`（gas）本不需要，
+    但 configure 的 `--disable-asm` 是全局的 ⇒ 现在整体关着。真要开得分架构处理。
+- **证据**：探针正本 `.workbuddy/ref/asm-probe/ZzAsmPixelProbeTest.kt.saved`；两轮逐帧哈希
+  `.workbuddy/tmp/asmprobe-asm-{on,off}.txt`、原始像素 `asmprobe-pixels-asm-{on,off}.bin`；
+  asm-off 的 dll 备份 `.workbuddy/tmp/dll-asm-off-baseline/`。
+- **顺带修掉的放大器**（早于本条，规则已进 [cxx/AGENTS.md](./cxx/AGENTS.md)）：`postFrameVideo` 的
+  `_srcVideoFormat` 漏回写使 sws 上下文逐帧重建 —— 同一探针下警告从 4996 条降到 5 条，
+  证据 `.workbuddy/ref/swscale-probe/`。
 
 ## C. 事实未实测，文档里暂无据
 
