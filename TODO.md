@@ -295,12 +295,10 @@
     坏帧从 `#606` 起一路到探针停止，从未愈合（没走到 `#720`）。
   - 对照 **H（不 seek、播放期间不作废轮次）= 0 未命中**；场景 A（10 个并发 stepForward，
     被轮次闸收敛成 1 轮）= 1 帧、0 未命中。
-  - **未解的一处**：全程 `decode_error_flags` 恒为 0（`DECODE_ERROR 行数 = 0`），而这个字段
-    在 native 侧确实接通了（`cxx/ffmpeg/ffmpeg.cpp:226` 把 `frame->decode_error_flags` 传给了
-    `AvFrame`）。若 libavcodec 真的报了 `FF_DECODE_ERROR_MISSING_REFERENCE`，这里应该非 0。
-    ⇒ 要么 h264 的「参考帧不存在」这条路不置这个位，要么坏帧成因比「少一个参考帧」更复杂。
-    **改完复测时顺手核对这一条**（修复若真有效，113 → 0 就足以定性；这一位仍为 0 则说明它
-    对这个场景不敏感，别再拿它当判据）。
+  - **花屏定性探针（`decodeErrorFlags` 字段 + `DECODE_ERROR` 日志）已于 2026-09-23 删除**：
+    实测全程 `decode_error_flags` 恒为 0、对该场景不敏感，留着只是死代码，故连同
+    `AvFrame.kt` 字段、`FFPlayer.kt` 探针、`ffmpeg.cpp` 的 `newAvFrame` 第 5 个构造参数一起撤掉；
+    JNI 构造签名 `(JJIII)V` → `(JJII)V`，`ffmpeg.dll` 已重编（见同 commit）。
   ⇒ B10 原先「丢包不是残留的成因」（依据：native 那条 EAGAIN 通路没复现）**结论要改**：
   残留的形态（「长段总在关键帧处愈合」）与这条吞包完全吻合 —— 在 ramp 素材上每帧亮度只差 5，
   错参考解出来的样子就是「像早 1~2 帧的完整帧」（在真实素材 `test.mp4` 上则表现为**像素与全片

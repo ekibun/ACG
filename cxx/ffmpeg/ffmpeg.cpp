@@ -216,15 +216,11 @@ static jobjectArray newAvFrameArray(JNIEnv* env, jint size) {
 
 static jobject newAvFrame(JNIEnv* env, AVFrame* frame, AVStream* stream) {
   jclass cls = env->FindClass("soko/ekibun/ffmpeg/AvFrame");
-  jmethodID constructor = env->GetMethodID(cls, "<init>", "(JJIII)V");
-  // decode_error_flags 是「画面有没有因为解码错误而遮错」的直接证据
-  // （FF_DECODE_ERROR_MISSING_REFERENCE 就是花屏的成因）。探针用，见
-  // AvFrame.kt。
+  jmethodID constructor = env->GetMethodID(cls, "<init>", "(JJII)V");
   return env->NewObject(cls, constructor, (jlong)frame,
                         (jlong)(frame->best_effort_timestamp *
                                 av_q2d(stream->time_base) * AV_TIME_BASE),
-                        (jint)frame->width, (jint)frame->height,
-                        (jint)frame->decode_error_flags);
+                        (jint)frame->width, (jint)frame->height);
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL

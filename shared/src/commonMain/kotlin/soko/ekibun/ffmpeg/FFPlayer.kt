@@ -434,13 +434,6 @@ class FFPlayer(
                   if (!isPlaying()) return@updateJob
                   if (timeStamp >= 0) pts.update(timeStamp)
                   if (codecType == AVMediaType.VIDEO) {
-                    // 花屏定性探针（2026-09-22）：`decodeErrorFlags` 非 0 说明解码器这一帧
-                    // 是**遮错**出来的（`2` = 参考帧缺失），画面成块的马赛克就是这么来的 ——
-                    // 那与协程调度无关，要往码流 / 包层面查。全程为 0 就反过来证明
-                    // 花屏属于「整帧错位」那一类。
-                    if (frame.decodeErrorFlags != 0) {
-                      println("DECODE_ERROR ${frame.timeStamp} ${frame.decodeErrorFlags}")
-                    }
                     // 单帧步进的位置记录（见 [prevFrameTs]）：本轮收敛过，前一帧就用
                     // 丢帧结果补；没收敛（顺序播放）时，前一帧就是上一次的当前帧。
                     prevFrameTs = if (converging) lastDropped else lastFrameTs

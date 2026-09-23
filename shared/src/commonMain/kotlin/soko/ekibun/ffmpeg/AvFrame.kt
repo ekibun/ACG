@@ -8,18 +8,6 @@ class AvFrame(
   val timeStamp: Long,
   val width: Int,
   val height: Int,
-  /**
-   * 解码器为这一帧报的错，来自 `AVFrame.decode_error_flags`（libavutil/frame.h）。
-   *
-   * 位与含义：`1` 码流非法 / `2` **参考帧缺失** / `4` 解码器在遮错（concealment）/
-   * `8` 切片解码失败。**非 0 就是「画面出现花屏」的直接证据** —— 那种成块的花屏
-   * 正是解码器拿不到参考帧、只能就地遮错的结果，与协程调度无关。
-   *
-   * 它是 2026-09-22 为定性「还有花屏」而加的探针字段：`FFPlayer` 在视频帧送显前
-   * 发现非 0 会打一行 `DECODE_ERROR …`。定性完可以撤，撤的时候连同
-   * `cxx/ffmpeg/ffmpeg.cpp` 的 `newAvFrame` 一起改。
-   */
-  val decodeErrorFlags: Int,
 ) : Pointer(nativePtr) {
   /** 标记该帧正在被哪个 PTS 播放轮次消费，避免同一帧被重复取用。 */
   var processing: FFPlayer.PTS? = null
