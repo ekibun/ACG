@@ -133,6 +133,9 @@ open class AvFormat(
           packet.close()
           return@withPtr null
         }
+        // `streams.isEmpty()` 也收下：那是**下载器模式**（不看画面、只要数据），
+        // 调用方没有任何流可筛，此时要把每个包都读出来推进读取。
+        // 别把它当成冗余判断删掉，否则下载会一包都读不到。
         if (streams.isEmpty() || streams.firstOrNull { it.index == ret } != null) {
           packet.streamIndex = ret
           break

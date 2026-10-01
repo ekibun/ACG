@@ -9,7 +9,14 @@ class AvFrame(
   val width: Int,
   val height: Int,
 ) : Pointer(nativePtr) {
-  /** 标记该帧正在被哪个 PTS 播放轮次消费，避免同一帧被重复取用。 */
+  /**
+   * 标记该帧正在被某个播放轮次消费 —— **不为 null 就别碰**，避免同一帧被重复取用。
+   *
+   * 只判空、**不比对是哪个 [FFPlayer.PTS]**：判据问的是「有没有人在用」，不是「谁在用」。
+   * 上一轮的 `updateJob` 可能还没收尾（它是投给播放线程的排队任务，[FFPlayer.pause] 的
+   * `playingJob.join()` 等不到它），此时帧上的标记仍是上一轮的对象 —— 判 `!= 当前 pts`
+   * 就会把它取走，与本轮作业撞同一帧。
+   */
   var processing: FFPlayer.PTS? = null
 
   companion object {
