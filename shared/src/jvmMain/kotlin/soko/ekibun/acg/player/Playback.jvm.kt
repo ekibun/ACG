@@ -1,13 +1,11 @@
 package soko.ekibun.acg.player
 
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.toComposeImageBitmap
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
+import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.ColorAlphaType
 import org.jetbrains.skia.ColorType
-import org.jetbrains.skia.Image
 import org.jetbrains.skia.ImageInfo
 import soko.ekibun.ffmpeg.AvFormat
 import java.nio.ByteBuffer
@@ -19,7 +17,8 @@ import javax.sound.sampled.DataLine
 import javax.sound.sampled.SourceDataLine
 
 /**
- * 桌面端播放实现：音频走 javax.sound.sampled，视频渲染为 ImageBitmap 交给 Compose 绘制。
+ * 桌面端播放实现：音频走 javax.sound.sampled；视频写进**复用的 skiko 位图**（[frame]），
+ * 由 `VideoSurface.jvm.kt` 用 nativeCanvas 直接画 —— 不每帧新建对象，理由见 [nextFrameBitmap]。
  *
  * [soko.ekibun.ffmpeg.AvPlayback] 的 native 侧会按构造时传入的 audioFormat 用 swr_convert
  * 转码输出，因此这里的 audioFormat = AV_SAMPLE_FMT_FLT 意味着拿到的是 float32。
@@ -30,6 +29,11 @@ class DesktopPlayback(
   onFrame: (Long?) -> Unit,
 ) : Playback(onFrame) {
   private val playbackDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+
+  private companion object {
+    /** 送显位图池深度：写入块与「刚发布出去的那块」至少隔这么多帧才可能撞上。 */
+    const val FRAME_POOL = 4
+  }
 
   override val sampleRate: Int = 48000
   override val channels: Int = 2
@@ -51,14 +55,16 @@ class DesktopPlayback(
 
   var frameWrite = 0L
 
-  override suspend fun flushAudioBuffer(buf: ByteArray): Int =
+  override suspend fun flushAudioBuffer(buf: ByteBuffer): Int =
     withContext(playbackDispatcher) {
       val out = line
       // 对应 Android 端的 audio.playState != PLAYSTATE_PLAYING 时自动 play()。
       // 必须用 isRunning：向未 start 的 line 写入，缓冲区满后会永久阻塞。
       if (!out.isRunning) out.start()
 
-      val floats = ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
+      // `buf` 是 native 内存上的 direct buffer（零拷贝来的），这里只读它；顺序必须显式设成
+      // LITTLE_ENDIAN（native 侧给的是主机字节序），否则 float 会被读反。
+      val floats = buf.order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
       val frames = floats.limit() / channels
       if (frames > 0) {
         val mute = channels == 2 && isMuteVoice
@@ -82,30 +88,69 @@ class DesktopPlayback(
 
   private fun toPcm16(value: Float): Short = (value.coerceIn(-1f, 1f) * 32767f).toInt().toShort()
 
-  private val imageState = mutableStateOf<ImageBitmap?>(null)
+  /**
+   * 送显位图池 —— **复用**，不再每帧新建 skiko 对象。
+   *
+   * 为什么非池化不可：skiko 的 `Image`/`Bitmap` 是 native 内存、靠 `Cleaner` 回收，而 Cleaner 要等
+   * 一次 GC 才会被触发；本进程 Java 堆只有几十 MB、上限却是 GB 级 ⇒ GC 十秒才来一次，于是每帧
+   * 3.67 MB 的位图会攒到 **1.3~2.2 GB**（实测 RSS 锯齿；而且回收后 free 空间留在 native 堆里，
+   * RSS 也不还）。池化之后每帧只有一次 memcpy，**零分配**。
+   *
+   * 池里轮换 [FRAME_POOL] 块：写入的那块必然不是刚发布出去的那块（Compose 那边可能还在画它，
+   * 撕裂窗口 = 池深 × 帧间隔），同时池一直强引用着它们 ⇒ 不进 Cleaner、RSS 有上界。
+   */
+  private val framePool = ArrayList<Bitmap>()
+  private var framePoolWidth = 0
+  private var framePoolHeight = 0
+  private var framePoolIndex = 0
 
-  /** 最新一帧，供 Compose 绘制 */
-  val image: ImageBitmap? get() = imageState.value
+  private val frameState = mutableStateOf<Bitmap?>(null)
+
+  /**
+   * 最新一帧，供 Compose 绘制。
+   *
+   * ⚠️ 它是**复用**的位图（内容每帧被覆写），不是快照 —— 绘制方要留住像素必须自己拷一份
+   * （见 `VideoSurface.jvm.kt`）。靠「换块」让引用变化，Compose 据此重组 + 重绘。
+   */
+  val frame: Bitmap? get() = frameState.value
+
+  private fun nextFrameBitmap(
+    width: Int,
+    height: Int,
+  ): Bitmap {
+    if (framePoolWidth != width || framePoolHeight != height) {
+      framePool.forEach { it.close() }
+      framePool.clear()
+      framePoolWidth = width
+      framePoolHeight = height
+      framePoolIndex = 0
+    }
+    if (framePool.isEmpty()) {
+      repeat(FRAME_POOL) {
+        framePool +=
+          Bitmap().apply {
+            allocPixels(ImageInfo(width, height, ColorType.RGBA_8888, ColorAlphaType.OPAQUE))
+          }
+      }
+    }
+    framePoolIndex = (framePoolIndex + 1) % framePool.size
+    return framePool[framePoolIndex]
+  }
 
   override fun flushVideoBuffer(
-    buf: ByteArray,
+    buf: ByteBuffer,
     width: Int,
     height: Int,
   ) {
     if (width <= 0 || height <= 0) return
     updateAspectRatio(width, height)
-    // makeRaster 会复制像素，得到不可变快照，可安全跨线程发布
-    val frame =
-      Image.makeRaster(
-        ImageInfo(width, height, ColorType.RGBA_8888, ColorAlphaType.OPAQUE),
-        buf,
-        width * 4,
-      )
-    try {
-      imageState.value = frame.toComposeImageBitmap()
-    } finally {
-      frame.close()
-    }
+    val src = addressOf(buf)
+    if (src == 0L) return
+    val target = nextFrameBitmap(width, height)
+    val dst = target.peekPixels()?.addr ?: return
+    // 一次 memcpy 写进复用位图（native 输出就是 RGBA_8888/不透明，与池里那块的 ImageInfo 一致）
+    copyPixels(src, dst, width * 4 * height)
+    frameState.value = target
   }
 
   override suspend fun resume() =
@@ -131,7 +176,9 @@ class DesktopPlayback(
 
   override fun close() {
     super.close()
-    imageState.value = null
+    frameState.value = null
+    framePool.forEach { it.close() }
+    framePool.clear()
     lineRef?.let {
       it.stop()
       it.flush()

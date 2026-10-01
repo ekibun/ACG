@@ -130,16 +130,17 @@
   - 原判据 `if (!isPlaying())`，而 `isPlaying = pts == 当前 pts && pts.playing` —— 它把
     **「PTS 对象换了」（= 换了位置，包确实该丢）** 和 **「只是暂停」（= 位置没变，包一点问题没有）**
     混在同一个布尔里，于是后者只能靠一个额外的字段接住。
-  - 拆开之后两种情形各归各，一个字段都不需要：
+  - 拆开之后两种情形各归各，一个字段都不需要。这个写法**现在仍是现状**：`FFPlayer` 的读循环
+    留在 `resumeImpl` 里，判据 `this@FFPlayer.pts != pts` → `close + break`（中途有一版把它
+    换成常驻读循环 + `demuxerPos`，那一版已不在代码里，见下文「第二件」的现状段）：
 
     ```kotlin
-    if (this@FFPlayer.pts != pts) { packet.close(); break }   // 换了位置 → 包属旧位置，就地归还
+    if (this@FFPlayer.pts != pts) { packet.close(); break }   // 【历史】换了位置 → 包属旧位置，就地归还
     // 否则（含"只是暂停"）：不停在这里，照常送进解码器入队 —— 这就是暂停期间的"预读缓存"
     ```
 
-    判据只取**对象身份**、不含 `pts.playing`，与 `isPlaying()` 的取舍**正好相反**：那边判假要停，
-    这边判真要继续。`while` 会在下一轮条件处自然退出，`pause()` 的 `playingJob.join()` 等本轮
-    收干净，帧都留在 `frames` 里，恢复时照常消费 ⇒ **一帧不丢**。
+    这两条**思路**至今成立，别丢：① 判据不掺 `pts.playing`（暂停不是"不要解码"，只是"先别送显"）；
+    ② 换位置产生的陈旧包要**就地归还** —— `av_read_frame` 已消费、补不回来。
   - 上面那条「别改成就地送解码」的告诫**依然成立**：这里也没有"就地送解码"，是**照常走正常
     入队路径**（和没暂停时同一行代码），只是不再有一个"先把包留着"的特殊状态。
   - **为什么原来那版会丢帧**：`resume` / `stepForward` 当时会**换 `PTS` 对象**（`PTS.fork()`），
@@ -148,3 +149,69 @@
     `play` / `seekImpl`）。
   - **实测（2026-10-01，探针：6 轮「暂停 → 恢复」后读 `lastFrameTs`）**：
     `jumps=0 stuck=0 backwards=0` —— 帧序列无缺口。旧的 `fork` 版对照是 `discarded=2`（真丢了两批帧）。
+
+  **2026-10-01 第二件（⚠️ 这一版已不在代码里）：读循环整个搬出 `resumeImpl`，成了常驻 `readLoop`**
+  —— 退出条件只有 `closed`，seek 改投 `SeekRequest`、陈旧包判据换成局部 `demuxerPos`。
+  它要解决的问题是**真的**：`pause()` 的 `playingJob.join()` 等的是**整轮**，而读循环就在那一轮里
+  ⇒ 暂停一到它照样退出，「暂停期间继续缓存」实际不存在。实测（探针 `ZzPauseCacheProbeTest`，
+  判据 = 私有字段 `frames` 的总长度）：
+
+  | 版本 | 暂停那一刻 | 暂停后 6 次采样 | 结论 |
+  | --- | --- | --- | --- |
+  | 修前（`readAlive` 版） | 106 | `106,106,106,106,106,106` | **不涨** —— 一个包都不读 |
+  | 修后（常驻 `readLoop`） | 100 | `110,110,110,110,110,110` | **涨到 110 就稳** —— 缓存生效，且节流闸管住了上界 |
+
+  **现状（2026-10-02 复核）：「暂停期间继续缓存」改由 `AvFormat` 的 packet 预读通道承担**
+  （`PREFETCH_PACKETS` 个包，通道满则读作业停在 `send` 上 —— 那就是回压）。它本来就不在
+  `FFPlayer` 里，天然不受 `pause()` 影响；`FFPlayer` 侧回到「读循环留在 `resumeImpl`、
+  条件 `while (isPlaying())`」，判据仍是对象身份 + `close + break`。
+  - **demuxer 仍然只有读者碰**：`seekTo` 先 `resetChannel()`（cancel 掉通道 ⇒ 读作业在 `send`
+    上退出），而这一句与 `seekToNative` 在**同一段不可打断的 `withPtr` 块**里、又都落在
+    `avformat` 那条单线程上 ⇒ 没有并发访问者。
+  - 代价：seek / close 那次 join 要等读作业**从 `send` 上醒来**（靠 cancel），不像常驻读循环
+    那样「最多等一次 `getPacket` 返回」；但 `getPacket` 在 EOF 之后是**粘住的**（立刻返回 null），
+    所以不会挂死（这正是 2026-10-02 修掉的那个 1~2 GB / 收不掉 的坑）。
+
+- **把 `try` 的本体搬走，`finally` 就会立刻执行（Kotlin / 协程）** → 「开关」在没人撑的时候
+  静默熄灯，**不报错、只是什么也不发生**。`FFPlayer.resumeImpl` 原先是这样：
+
+  ```kotlin
+  val playJobs = pts.streams.map { async(playerDispatcher) { while (isPlaying()) { ... } } }
+  try {
+    pts.playing = true          // 开灯
+    if (!stepMode) playback?.resume()
+    while (readAlive()) { ...读包循环（整轮）... }   // ← 本体在这里，它跑多久灯就亮多久
+  } finally {
+    pts.playing = false         // 熄灯
+  }
+  playJobs.joinAll()
+  ```
+
+  「这盏灯的寿命」= 读包循环的寿命，而这件事**没有任何一行文字写出来**。2026-10-01 把读循环
+  搬去常驻的 `readLoop` 之后，`try` 里只剩两行，`finally` 当场跟上来：
+
+  ```
+  [DBG] resumeImpl enter, playing=false same=true
+  [DBG] playJobs created, playing=false
+  [DBG] before joinAll, playing=false     ← try 跑完了，灯却是灭的
+  [DBG] playJob start, isPlaying=false    ← 消费侧一个判据都过不去
+  ```
+
+  ⇒ 症状是**一帧都不送显**（`FFPlayerStepTest` 超时在「等第一帧上屏」那一步），而不是崩或报错。
+  对策：把 `playJobs.joinAll()` 放进 `try` —— 让**消费侧**顶替读循环去撑这盏灯
+  （「本轮什么时候结束」本来就是消费侧的事）。
+
+  ⇒ 通用判据：**`try { 开灯 } finally { 熄灯 }` 这种写法，`try` 里必须有一个「撑住整轮的
+  挂起点」**（循环 / `await` / `join`）。把本体抽走时，要同时问一句「现在谁在撑这盏灯」。
+
+- **每帧新建 skiko 对象 ⇒ native 内存攒到 GB 级，而 JVM 堆看起来「很干净」**（2026-10-02 实测）。
+  桌面送显原来每帧 `Image.makeRaster(...)` + `Image.toComposeImageBitmap()`：两个 3.67 MB 的
+  native 对象，**都是 skiko `Managed`、靠 `Cleaner` 回收**。而 Cleaner 要等一次 GC 才会被触发，
+  本进程 Java 堆只有几十 MB、上限却是 GB 级 ⇒ **GC 十秒才来一次** ⇒ RSS 涨到 1.3~2.2 GB 再成批
+  放掉（锯齿）；而且**回收之后 RSS 也不还** —— free 空间留在 native 堆里。
+  症状形状：`jcmd <pid> GC.heap_info` 显示堆只有几十 MB，任务管理器却是 GB 级；
+  `GC.class_histogram` 里 `org.jetbrains.skia.impl.CleanableImpl` / `Managed$CleanerThunk` 有几百个
+  （wrapper 已经没了、native 还没还）。**改前 900MB↔2.2GB 锯齿，改成复用位图池后稳定 280 MB**。
+  对策：**别在每帧路径上分配 skiko 对象** —— 复用 `Bitmap`（池化）+ `peekPixels()?.addr` +
+  `memcpy` 写入 + 让 Compose 从复用位图读（本地做法：`DesktopPlayback.framePool` 与
+  `VideoSurface.jvm.kt` 的 `nativeCanvas.drawImageRect`）。

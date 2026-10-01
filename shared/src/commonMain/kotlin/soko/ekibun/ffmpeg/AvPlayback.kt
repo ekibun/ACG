@@ -2,6 +2,7 @@ package soko.ekibun.ffmpeg
 
 import soko.ekibun.Pointer
 import soko.ekibun.jniLoadLibrary
+import java.nio.ByteBuffer
 
 abstract class AvPlayback(
   val onFrame: (Long?) -> Unit,
@@ -35,11 +36,37 @@ abstract class AvPlayback(
       frame: Long,
     ): Int
 
+    /**
+     * 取本轮输出缓冲 —— **DirectByteBuffer，零拷贝零分配**，直接指向 native 那块内存
+     * （`SWContext::videoBuffer` / `audioBuffer`）。下一帧会就地覆写它，所以调用方
+     * **必须同步消费**，不得留存引用（见 [flushFrame]）。
+     */
     @JvmStatic
     private external fun getBuffer(
       ctx: Long,
       codecType: Int,
-    ): ByteArray
+    ): ByteBuffer?
+
+    /** DirectByteBuffer 背后的 native 地址（0 = 不是 direct）。给「零拷贝包成 Skia Data」用。 */
+    @JvmStatic
+    private external fun bufferAddress(buffer: ByteBuffer): Long
+
+    /** [bufferAddress] 的包装：桌面端拿它取 native 缓冲的地址。 */
+    internal fun addressOf(buffer: ByteBuffer): Long = bufferAddress(buffer)
+
+    /** native→native 原样拷贝（给桌面端把 RGBA 写进复用位图，见 `DesktopPlayback`）。 */
+    @JvmStatic
+    private external fun copyPixelsNative(
+      src: Long,
+      dst: Long,
+      bytes: Int,
+    )
+
+    internal fun copyPixels(
+      src: Long,
+      dst: Long,
+      bytes: Int,
+    ) = copyPixelsNative(src, dst, bytes)
 
     @JvmStatic
     private external fun closeNative(ctx: Long)
@@ -80,6 +107,10 @@ abstract class AvPlayback(
    * 视频没有这个概念 —— 视频路径恒返回 `-1`，送显只是它的副作用。
    * 所以调用方**不能**用这个返回值去判断视频帧的时间戳：丢帧收敛要用
    * [FFPlayer] 那边的 `AvFrame.timeStamp`（单位同样是 `AV_TIME_BASE` 微秒）。
+   *
+   * ⚠️ 交给平台的 `ByteBuffer` 是 **native 内存上的 direct buffer**（零拷贝）：实现必须
+   * **在同一调用里同步消费**，不能留存、不能跨帧使用 —— 下一帧 `sws_scale` / `swr_convert`
+   * 会就地覆写这块内存。要留住像素，自己拷一份。
    */
   suspend fun flushFrame(
     codecType: Int,
@@ -89,20 +120,22 @@ abstract class AvPlayback(
     return withPtr { ptr ->
       when (codecType) {
         AVMediaType.AUDIO -> {
-          val offset = flushAudioBuffer(getBuffer(ptr, codecType))
-          println("PTS ${frame.timeStamp} ${frame.timeStamp - offset * AvFormat.AV_TIME_BASE / sampleRate}")
+          val offset = flushAudioBuffer(getBuffer(ptr, codecType) ?: return@withPtr -1)
           return@withPtr if (offset < 0) -1 else frame.timeStamp - offset * AvFormat.AV_TIME_BASE / sampleRate
         }
-        AVMediaType.VIDEO -> flushVideoBuffer(getBuffer(ptr, codecType), frame.width, frame.height)
+        AVMediaType.VIDEO ->
+          getBuffer(ptr, codecType)?.let { flushVideoBuffer(it, frame.width, frame.height) }
       }
       -1
     }
   }
 
-  abstract suspend fun flushAudioBuffer(buf: ByteArray): Int
+  /** 见 [flushFrame] 的 ⚠️：`buf` 是 direct buffer，必须同步消费。 */
+  abstract suspend fun flushAudioBuffer(buf: ByteBuffer): Int
 
+  /** 见 [flushFrame] 的 ⚠️：`buf` 是 direct buffer，必须同步消费。 */
   abstract fun flushVideoBuffer(
-    buf: ByteArray,
+    buf: ByteBuffer,
     width: Int,
     height: Int,
   )

@@ -146,9 +146,6 @@ class FFPlayer(
    */
   private var frameIntervalUs: Long? = null
 
-  /** 用户是否显式暂停过。seek 后据此决定要不要恢复播放。 */
-  private var paused = false
-
   suspend fun play(
     streams: Map<Int, AvStream>,
     seek: Long? = null,
@@ -156,13 +153,11 @@ class FFPlayer(
     if (!takeOverPlayback()) return@withContext
     val p = seek ?: pts?.now(playback?.speedRatio() ?: 1f) ?: 0
     pts = PTS(streams).also { it.playing = true }
-    paused = false
     seekImpl(p, resumeAfter = true)
   }
 
   suspend fun pause() =
     withContext(playerDispatcher) {
-      paused = true
       pts?.playing = false
       playback?.pause()
       playingJob?.join()
@@ -248,7 +243,6 @@ class FFPlayer(
         }
       if (hitFrame) pause()
     } else {
-      paused = false
       playingJob = async(playerDispatcher) { resumeImpl(null, resyncTo) }
     }
   }
@@ -491,7 +485,7 @@ class FFPlayer(
       if (!stepMode) playback?.resume()
       var sendingPacket = 0
       while (isPlaying()) {
-        if (sendingPacket > 10 || frames.map { it.value.size }.sum() > 100) {
+        if (sendingPacket > 3 || (frames.map { it.value.size }.minOrNull() ?: 0) > 3) {
           delay(1.milliseconds)
           continue
         }

@@ -323,6 +323,16 @@
   与「只是暂停」混在一个布尔里），`pendingPacket` 只是替它兜底。拆成两种情形后不再需要该字段：
   `this@FFPlayer.pts != pts` → `close + break`（换位置），否则**照常送入队**（含暂停 ⇒ 预读缓存）。
   `PTS.fork()` 已一并删除（`resume` / `stepForward` 不再换对象）。实测 6 轮暂停恢复 `jumps=0`。
+  ⚠️ **2026-10-02 复核：上面那段（判据只看对象身份、换位置 `close + break`）又变回现状。**
+  中途有一版把读循环整个搬出 `resumeImpl`、成了常驻 `readLoop`（`SeekRequest` + `demuxerPos`），
+  那一版**没有留在代码里**；现在**预读放在 `AvFormat` 的 packet 通道**（`PREFETCH_PACKETS` 个包，
+  通道满则读作业停在 `send`），于是「暂停期间继续缓存」不再受 `pause()` 影响（它本来就不在
+  FFPlayer 里），`FFPlayer` 侧回到「读循环留在 `resumeImpl`、条件 `while (isPlaying())`」。
+  当初非搬不可的理由仍然成立（`pause()` 的 `playingJob.join()` 等的是**整轮**，读循环就在
+  那一轮里 ⇒ 暂停一到它退出、缓存不存在），实测数字（探针 `ZzPauseCacheProbeTest`，
+  判据 = `frames` 长度：修前 `[106]×6` 不涨、常驻版 `[110]×6`）留着当参照。细节见
+  [`.agents/skills/project-traps/references/silent-failures.md`](./.agents/skills/project-traps/references/silent-failures.md)
+  对应 bullet。
 - **复测（同一探针、同一素材；三条编译闸门 + `:shared:jvmTest` 全绿）**：
 
   | 场景 | 修前未命中 | 修后未命中 |
@@ -374,6 +384,27 @@
 - **顺带修掉的放大器**（早于本条，规则已进 [cxx/AGENTS.md](./cxx/AGENTS.md)）：`postFrameVideo` 的
   `_srcVideoFormat` 漏回写使 sws 上下文逐帧重建 —— 同一探针下警告从 4996 条降到 5 条，
   证据 `.workbuddy/ref/swscale-probe/`。
+
+### B12. `AvIO.read` 返回 0 被 avio/demuxer 当成「读空」，而 `HttpIO` 正靠它表达「数据没到」
+
+- **现状**（2026-10-01 查证，读的是本地 `cxx/ffmpeg/ffmpeg/` 源码）：`HttpIO.read` 在 ktor 缓冲还没
+  追上 `offset` 时返回 0，注释写着「让 avio 稍后重试」——**这句不成立**，链条如下：
+  1. `libavformat/aviobuf.c` 的 `avio_read`：`read_packet` 返回 0 时它自己返回 **0**（不死循环），
+     且 `fill_buffer` 的 `else` 分支**不置 `eof_reached`**；
+  2. `libavformat/utils.c` 的 `append_packet_chunked`：`av_shrink_packet(pkt, prev_size + FFMAX(ret,0))`
+     ⇒ `pkt->size == 0`，`av_get_packet` **返回 0**（不是 `AVERROR_EOF`）；
+  3. `libavformat/mov.c` 的 `mov_read_packet`：重试路径是
+     `if (ret < 0) { if (should_retry(...)) mov_current_sample_dec(sc); }` —— **只认负错误码**；
+     而 `should_retry` 对 `AVERROR_EOF` / `avio_feof` 返回 0。
+  ⇒ 「暂时没有数据」在这条链上**没有任何「稍后重试」的语义**。
+- ⚠️ **尚未逐行核的一环**：`ff_read_packet` 拿到 `read_packet` 返回的 0 之后是跳过这个 sample 还是
+  继续循环（以及 `read_packet_wrapper` 对 0 的处理）。**处置之前先补上这一环**，别照着推断改。
+- **影响形状**：网络稍慢就可能让 demuxer 把一个 sample 读空 —— 与 B10 的「吞包」同类，
+  但这一层在 IO，B10 修的读包循环够不到它。
+- **方向**：`read` 改用 `AVERROR(EAGAIN)`（要配 `AVIO_FLAG_NONBLOCK` 与上层的重试），或在 IO 层
+  阻塞等数据（更贴近现有「单线程无锁」的模型）。**这同时是「IO 层超前下载」的前置条件** ——
+  先定「没数据怎么表达」，再谈预读窗口。
+- **完成判据**：定下契约并改掉 `HttpIO`；真连一个 HTTP 源播放，不再出现「读空 sample」。
 
 ## C. 事实未实测，文档里暂无据
 

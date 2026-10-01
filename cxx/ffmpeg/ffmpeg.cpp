@@ -1,5 +1,6 @@
 #include <jni.h>
 
+#include <cstring>
 #include <map>
 #include <vector>
 
@@ -448,26 +449,47 @@ Java_soko_ekibun_ffmpeg_AvPlayback_postFrameNative(JNIEnv* env, jobject thiz,
       return -1;
   }
 }
-extern "C" JNIEXPORT jbyteArray JNICALL
+// 把 native 缓冲原样交给 Java：只包一个
+// DirectByteBuffer，不拷贝、不分配。
+//
+// 原先是每帧 NewByteArray + SetByteArrayRegion：
+// 视频 3.67 MB/帧、约 60 帧/s ⇒ 20 s 分配 3250 MB，
+// Java 堆被顶在 -Xmx 上。
+//
+// ⚠️ 调用方必须同步消费这块内存、不能留存引用：
+// 下一帧 sws_scale / swr_convert 会就地覆写。
+extern "C" JNIEXPORT jobject JNICALL
 Java_soko_ekibun_ffmpeg_AvPlayback_getBuffer(JNIEnv* env, jobject thiz,
                                              jlong pctx, jint codec_type) {
   auto ctx = (SWContext*)pctx;
-  jbyteArray arr;
   switch (codec_type) {
     case AVMEDIA_TYPE_AUDIO:
-      arr = env->NewByteArray(ctx->audioBufferSize);
-      env->SetByteArrayRegion(arr, 0, ctx->audioBufferSize,
-                              (jbyte*)ctx->audioBuffer);
-      return arr;
+      if (ctx->audioBufferSize <= 0) return nullptr;
+      return env->NewDirectByteBuffer(ctx->audioBuffer, ctx->audioBufferSize);
     case AVMEDIA_TYPE_VIDEO:
-      arr = env->NewByteArray(ctx->videoBufferSize);
-      env->SetByteArrayRegion(arr, 0, ctx->videoBufferSize,
-                              (jbyte*)ctx->videoBuffer);
-      return arr;
+      if (ctx->videoBufferSize <= 0) return nullptr;
+      return env->NewDirectByteBuffer(ctx->videoBuffer, ctx->videoBufferSize);
     default:
       return nullptr;
   }
 }
+extern "C" JNIEXPORT jlong JNICALL
+Java_soko_ekibun_ffmpeg_AvPlayback_bufferAddress(JNIEnv* env, jobject thiz,
+                                                 jobject buffer) {
+  // 只对 direct buffer 有意义（我们自己的就是）。
+  return (jlong)(intptr_t)env->GetDirectBufferAddress(buffer);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_soko_ekibun_ffmpeg_AvPlayback_copyPixelsNative(JNIEnv* env, jobject thiz,
+                                                    jlong src, jlong dst,
+                                                    jint bytes) {
+  // 纯 memcpy：桌面端把 native 那块 RGBA 直接写进
+  // 复用的位图，避免每帧新建 skiko 对象。
+  // 目标由调用方保证够大（同宽高 allocPixels 出来的）。
+  if (src == 0 || dst == 0 || bytes <= 0) return;
+  memcpy((void*)dst, (const void*)src, (size_t)bytes);
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_soko_ekibun_ffmpeg_AvPlayback_closeNative(JNIEnv* env, jobject thiz,
                                                jlong pctx) {
@@ -475,6 +497,13 @@ Java_soko_ekibun_ffmpeg_AvPlayback_closeNative(JNIEnv* env, jobject thiz,
   if (!ctx) return;
   if (ctx->_swsCtx) sws_freeContext(ctx->_swsCtx);
   if (ctx->_swrCtx) swr_free(&ctx->_swrCtx);
+  // 两个输出缓冲是 av_fast_malloc 出来的，原来没还 ⇒
+  // 每个 AvPlayback 实例漏一份（视频那支最大）。
+  // 音频有**两块**在 audioBuffer 与 _audioBuffer1 之间
+  // 来回换（见 postFrameAudio 末尾），两块都得还。
+  av_free(ctx->audioBuffer);
+  av_free(ctx->_audioBuffer1);
+  av_free(ctx->videoBuffer);
   delete ctx;
 }
 

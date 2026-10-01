@@ -60,3 +60,19 @@ jni.h 怎么从 toolchain JDK 拿到、Git Bash 为什么不能用来编 native 
   安装包里同一批库只存在 `app/resources/` 一份（约省 117 MB）。第 2 处（`build/resources/main`）
   仍由 `processResources` 写，是给 IDE / 直接跑 `MainKt` 走 step 2（file: URL）用的，不进 jar；
   打包态由 `appResourcesRootDir` 提供（step 1）。
+
+## ⚠️ 只跑 `buildJni` 不够：按「怎么跑」刷新对应那份（2026-10-02 实测）
+
+`buildJni` 只写 `cxx/build/bin/`，**别的落位要各自的 Gradle 任务**：
+
+| 怎么跑 App | 实际加载的那份 | 刷它的任务 |
+|---|---|---|
+| `hotRun`（Compose Hot Reload） | `desktopApp/build/run/main/classpath/hot/` | `:desktopApp:hotSnapshotMain` |
+| `:desktopApp:run` / 打包 | `desktopApp/build/compose/tmp/prepareAppResources/` | `:desktopApp:prepareAppResources` |
+| IDE 直接跑 `MainKt` | `desktopApp/build/resources/main/` | `:desktopApp:processResources` |
+| `:shared:jvmTest` | `shared/build/processedResources/jvm/test/` | 跑测试时自动 |
+
+- **一眼判断某份新旧**：比字节数（同一份源码的 dll 大小唯一；差几百字节就是不同构建）。
+  一次性扫：`find . -name ffmpeg.dll -printf "%s  %TH:%TM  %p\n"`。
+- ⚠️ **Hot Reload 换不了 native 库**：`System.load` 是进程启动时做的，热重载只换 Kotlin 类
+  ⇒ 改完 `cxx/` **必须整进程重启**，否则你以为在测新代码，其实跑的是旧 dll（症状：修复「没生效」）。

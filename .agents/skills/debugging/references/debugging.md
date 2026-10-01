@@ -11,6 +11,16 @@
 
 先看 log / 结果目录 mtime 有没有推进，再看 worker 的 CPU 时间是否在涨
 （不涨 = 阻塞而非计算），再用 `jstack.exe <pid>` 抓栈（**重定向到文件再读**）。
+
+**先拿到 test worker 的 pid**：`jps -l` 只列出了 GradleDaemon、**没列出** test worker
+（2026-10-01 实测；原因未核实，别据此断言「没有 worker」）。改从进程表按命令行找：
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='java.exe'" |
+  Select-Object ProcessId,CommandLine | Format-List | Out-File -Encoding utf8 <落盘路径>
+```
+
+认 `CommandLine` 里的 `Gradle Test Executor` 那条。⚠️ PowerShell 的 stdout 不回显，必须落盘再读。
 杀掉卡住的 worker 后 Gradle 会补写部分 XML，卡住那条带 `<skipped/>`、`time` 等于挂死时长。
 
 ### 判「阻塞在哪」：先看**对端**线程，再看主线程（2026-09-20 实测）
@@ -24,6 +34,10 @@
   而 `quickjs` 线程正空转在 `take`。
 
 ### 分步打点：一次把范围缩到**具体语句**
+
+⚠️ **挂起的协程不在任何线程栈上**：jstack 只能证明「没有任务在跑」（所有业务线程都 idle），
+**给不出挂起点**。所以 `withTimeoutOrNull` 包住每个可疑调用、把「卡住」变成可读返回值，是唯一
+直接的办法（2026-10-01 实测：`pause` 正常返回、`stepBack` 超时 —— 线程栈里两者长得一模一样）。
 
 挂死往往只发生在「第二条语句」上，而栈只给到函数名。按语句打点、并**用
 `withTimeoutOrNull` 把「卡住」变成可读的返回值**，比反复 jstack 快得多：
@@ -71,3 +85,23 @@ Chromium 自己的日志才是引擎级问题唯一说得清的东西：设
 ## 快速信号
 
 WebView2 起来了：stdout 出现 `Failed to unregister class Chrome_WidgetWin_0`。
+
+## 量「运行中的 App」的内存（2026-10-02 实测）
+
+App 由 `hotRun` 起时，进程命令行里带 `-Dcompose.reload.argfile=...` 与业务包名，按它找 pid：
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='java.exe'" |
+  Where-Object { $_.CommandLine -like '*soko.ekibun.acg*' } |
+  Select-Object ProcessId, @{n='WS_MB';e={[int]($_.WorkingSetSize/1MB)}}
+```
+
+- **用哪个 jcmd**：App 跑在 Gradle 给的 JDK 上（本机是 `.gradle/jdks/jetbrains_s_r_o_-25-*`），
+  拿同版本或更新的 `jcmd` 去 attach，否则可能 `AttachNotSupportedException`。
+- `jcmd <pid> GC.heap_info` → **Java 堆** committed/used（跟 RSS 分开看，这是第一刀）。
+- `jcmd <pid> GC.class_histogram` → 找 `CleanableImpl` / `Managed$CleanerThunk`：**数它们**就是在数
+  「已失去 wrapper、等 Cleaner 回收的 skiko 对象」（每个 = 一块 native 内存）。
+- 进程 RSS（`WorkingSet64`/`PrivateMemorySize64`）**采样成序列**看形状：
+  **锯齿**（涨→一次性掉，周期十秒级）= 靠 GC/Cleaner 回收的堆积；**单调涨** = 真泄漏。
+- `jcmd <pid> GC.run` 后**立刻**（<200 ms）采样才有意义：间隔久了会被新分配盖掉。
+  注意：**回收 ≠ RSS 下降** —— native 的 free 空间未必还给 OS。

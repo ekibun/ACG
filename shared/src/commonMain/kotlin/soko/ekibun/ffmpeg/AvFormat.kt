@@ -1,5 +1,8 @@
 package soko.ekibun.ffmpeg
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import soko.ekibun.Pointer
 import soko.ekibun.ThreadDispatcher
 import soko.ekibun.jniLoadLibrary
@@ -35,6 +38,15 @@ open class AvFormat(
     const val AV_SAMPLE_FMT_S32 = 2
     const val AV_SAMPLE_FMT_FLT = 3
     const val AV_SAMPLE_FMT_DBL = 4
+
+    /**
+     * 预读通道装多少个 packet。
+     *
+     * ⚠️ 这是**包数**口径，不是字节 —— mpv 的 `--demuxer-max-bytes` 与 ExoPlayer 的
+     * `DEFAULT_MAX_BUFFER_SIZE` 都是字节口径。它同时是「暂停期间还能预读多少」的上界：
+     * 通道满了，读作业就停在 `send` 上等消费侧来取（这就是回压）。
+     */
+    const val PREFETCH_PACKETS = 100
 
     init {
       jniLoadLibrary("ffmpeg")
@@ -119,30 +131,104 @@ open class AvFormat(
     flags: Int = 0,
   ): Unit =
     withPtr { ptr ->
+      resetChannel()
       seekToNative(ptr, ts, stream?.index ?: -1, minTs, maxTs, flags)
     }
 
+  private var packetChannel: Channel<AvPacket?>? = null
+
+  /**
+   * 丢掉当前这条预读通道；下次 [getPacket] 会重建一条（从新位置重新读）。
+   *
+   * ⚠️ **必须用 `cancel()`、不能用 `close()`** —— 2026-10-01 实测两者的收尾完全不同：
+   *
+   * | | 正卡在 `send` 上的读作业 | 队列里已预读的包 |
+   * |---|---|---|
+   * | `close()` | **不唤醒**（随后那个包还会投递成功，落进一条已经没人再收的通道） | 还收得到 |
+   * | `cancel()` | 以 `CancellationException` 收场，包由 `onUndeliveredElement` 归还 | 同样由回调归还 |
+   *
+   * 用 `close()` 的结果是**每次 seek 漏一个 `AVPacket`**（native，无 GC 兜底，见 [AvPacket]）。
+   * 也正因为走 `cancel()`，**不能再**照旧「`close()` + 遍历队列关包」：`cancel()` 之后队列已被
+   * 丢弃，而遍历会抛 `CancellationException`。
+   *
+   * ⚠️ 调用点必须先让消费侧停下（`FFPlayer` 的 `closeAsync` / `seekImpl` 都在 `pause()` 之后才
+   * 调到这里），否则正挂在 `receive` 上的消费侧会以 `CancellationException` 收场。
+   */
+  suspend fun resetChannel() {
+    val oldChannel = packetChannel
+    packetChannel = null
+    oldChannel?.cancel()
+  }
+
+  /**
+   * 取一个 packet 交给上层。
+   *
+   * 读包在后台读作业里做：**首次调用**时建一条容量 [PREFETCH_PACKETS] 的通道，之后一直从它取
+   * （通道满则读作业停在 `send` 上等消费侧来取 —— 这就是回压）。
+   *
+   * ⚠️ **[streams] 只在「建通道那一次」生效**：它决定这条通道读哪些流，之后同一通道存活期间的
+   * 调用传什么都不看。换过滤条件 = 换通道，由 [seekTo] 里的 [resetChannel] 保证（FFPlayer 每轮
+   * 传 `pts.streams.values`，而换位置一定先 seek ⇒ 实际踩不到）。
+   *
+   * 返回 `null` 表示 **EOF**：读作业读到流尾会把通道关掉，此后每次调用都**立刻返回 null**
+   * （粘住的），不挂起、也不抛。
+   */
   suspend fun getPacket(streams: Collection<AvStream>): AvPacket? =
     withPtr { ptr ->
-      val packet = AvPacket()
-      while (true) {
-        val ret = getPacketNative(ptr, packet.ptr)
-        if (ret < 0) {
-          // EOF / 出错：这个 packet 交不出去了，必须就地归还 —— native 侧
-          // 只有 av_packet_free 一个释放点，没有 GC 兜底（见 AvPacket）。
-          packet.close()
-          return@withPtr null
+      val channel =
+        packetChannel ?: run {
+          val channel =
+            Channel<AvPacket?>(PREFETCH_PACKETS, onUndeliveredElement = { packet -> packet?.close() })
+          packetChannel = channel
+          @Suppress("DeferredResultUnused")
+          CoroutineScope(formatDispatcher).async {
+            // 手里那个包还没交出去时，谁都得负责归还它 —— 下面 finally 兜底。
+            var inFlight: AvPacket? = null
+            try {
+              while (true) {
+                val packet = AvPacket()
+                inFlight = packet
+                while (true) {
+                  val ret = getPacketNative(ptr, packet.ptr)
+                  if (ret < 0) {
+                    // EOF / 出错：这个 packet 交不出去了，必须就地归还 —— native 侧
+                    // 只有 av_packet_free 一个释放点，没有 GC 兜底（见 AvPacket）。
+                    packet.close()
+                    inFlight = null
+                    return@async
+                  }
+                  // `streams.isEmpty()` 也收下：那是**下载器模式**（不看画面、只要数据），
+                  // 调用方没有任何流可筛，此时要把每个包都读出来推进读取。
+                  // 别把它当成冗余判断删掉，否则下载会一包都读不到。
+                  if (streams.isEmpty() || streams.firstOrNull { it.index == ret } != null) {
+                    packet.streamIndex = ret
+                    channel.send(packet)
+                    // 交出去了：所有权归通道（没被收走时由 onUndeliveredElement 归还）。
+                    inFlight = null
+                    break
+                  }
+                }
+              }
+            } finally {
+              // 手里还攥着包（读出错 / 被取消）就地归还；再关掉通道 —— 消费侧那个 `for`
+              // 靠它才会结束，不关就是**永久挂起**（挂着的那一方不会自己醒）。
+              inFlight?.close()
+              channel.close()
+            }
+          }
+          channel
         }
-        // `streams.isEmpty()` 也收下：那是**下载器模式**（不看画面、只要数据），
-        // 调用方没有任何流可筛，此时要把每个包都读出来推进读取。
-        // 别把它当成冗余判断删掉，否则下载会一包都读不到。
-        if (streams.isEmpty() || streams.firstOrNull { it.index == ret } != null) {
-          packet.streamIndex = ret
-          break
-        }
+      // 用 `for` 而不是 `receive()`：通道关闭后 `for` 会把缓冲收完再**正常结束**（不抛），
+      // 于是「EOF 之后每次调用都立刻返回 null」是粘住的；`receive()` 则会抛
+      // `ClosedReceiveChannelException`（那异常往上走会被 `playingJob.join()` 吞掉 = 静默失效）。
+      for (v in channel) {
+        return@withPtr v
       }
-      packet
+      null
     }
 
-  override suspend fun releaseImpl(ptr: Long) = destroyNative(ptr)
+  override suspend fun releaseImpl(ptr: Long) {
+    resetChannel()
+    destroyNative(ptr)
+  }
 }
