@@ -49,7 +49,7 @@ class FFPlayerStepTest {
   fun stepForwardAndBackWalkFrames() {
     val url = findVideo()
     if (url == null) {
-      println("跳过：找不到 .workbuddy/test.mp4（素材在 gitignore 里，不随仓库分发）")
+      println("skip: .workbuddy/test.mp4 not found (gitignored, not shipped with the repo)")
       return
     }
     runBlocking {
@@ -72,14 +72,14 @@ class FFPlayerStepTest {
             player.state()
           }
         forward.zipWithNext().forEach { (a, b) ->
-          assertEquals(a.first, b.second, "前一帧应为上一次的当前帧: $a -> $b")
-          assertTrue(b.first!! > a.first!!, "时间戳必须单调前进: $a -> $b")
+          assertEquals(a.first, b.second, "prevFrameTs should be the previous current frame: $a -> $b")
+          assertTrue(b.first!! > a.first!!, "timestamps must move forward: $a -> $b")
         }
 
         // 连续后退：沿原路一帧一帧走回去，连「前一帧」也要对上
         forward.dropLast(1).asReversed().forEach { expect ->
-          assertTrue(player.stepBack(), "退帧应成功")
-          assertEquals(expect, player.state(), "退帧后应回到 $expect")
+          assertTrue(player.stepBack(), "stepBack should succeed")
+          assertEquals(expect, player.state(), "state after stepBack should be $expect")
         }
       } finally {
         player.closeAsync()

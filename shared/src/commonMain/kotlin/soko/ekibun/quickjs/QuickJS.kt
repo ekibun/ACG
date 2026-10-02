@@ -226,7 +226,7 @@ class QuickJS(
 
   private val updateChannel = Channel<Unit>()
 
-  /** runtime 是否还在：销毁之后为 `false`。[onJsThreadQuietly] 靠它决定还能不能归还。 */
+  /** runtime 是否还在：销毁之后为 `false`。[updateChannel] 的泵循环靠它决定还跑不跑下一轮。 */
   private val runtimeAlive = AtomicBoolean(true)
 
   /**
@@ -387,7 +387,9 @@ class QuickJS(
   /**
    * **新操作**的入口（旧 `runOnDispatcher`）：先查 [isClosed] 再在归属线程上跑。
    *
-   * 归还侧**不能**走这扇门，它得用 [onJsThreadQuietly] —— 见那边的注释。
+   * 归还侧**不能**走这扇门：这扇门查 [isClosed]，而归还动作恰恰要能跑在
+   * 「已标记、未销毁」的窗口里（见 [Pointer] 类文档「读指针」一节）——
+   * [releaseValue] / [releaseRef] 直接走 [withPtrSync]。
    */
   private fun <T> runOnJsThread(block: (Long) -> T): T {
     if (isClosed) throw IllegalStateException("QuickJS context is closed")
@@ -613,8 +615,10 @@ class QuickJS(
       // 名额在上一行就抢了（基类那份），这里只管投递 —— 基类保证 [releaseImpl] 只跑一次
       submit {
         updateChannel.close()
-        // 先清算再销毁：销毁之后 onJsThreadQuietly 会因为 runtimeAlive 为 false
-        // 拒绝工作，那一轮归还就全变成空操作，残留反而撑到 JS_FreeRuntime 去 abort。
+        // 先清算再销毁：本函数没有「runtime 没了就拒绝归还」的门（句柄不会清零，
+        // 见 [initPtr] 的说明），销毁之后再走 [releaseValue] 就是对着一具已
+        // JS_FreeRuntime 的指针干活 —— 靠的就是这个顺序：清算（含残留归还）
+        // 排进销毁之前，残留才不会撑到 JS_FreeRuntime 的 gc_obj_list 断言 abort。
         val leaked = collectLeaks()
         withPtr { ptr -> releaseImpl(ptr) }
         leaked

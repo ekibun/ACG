@@ -57,16 +57,17 @@ class FFPlayer(
     val streams: Map<Int, AvStream>,
     private var relate: Long = 0,
   ) {
-    private var absolute: Long = System.currentTimeMillis()
+    // 单调时钟（[monoTimeMs]）：主时钟只用来测「从基准点过了多久」，墙钟会被
+    // NTP 校时 / 手动改时间拨动 —— 突跳一格，画面就是快进一截或干等一截。
+    private var absolute: Long = monoTimeMs()
     var playing: Boolean = false
 
     fun update(relate: Long) {
       this.relate = relate
-      absolute = System.currentTimeMillis()
+      absolute = monoTimeMs()
     }
 
-    fun now(speedRatio: Float): Long =
-      ((System.currentTimeMillis() - absolute) * speedRatio * AV_TIME_BASE / 1000).toLong() + relate
+    fun now(speedRatio: Float): Long = ((monoTimeMs() - absolute) * speedRatio * AV_TIME_BASE / 1000).toLong() + relate
   }
 
   private var pts: PTS? = null
@@ -209,8 +210,15 @@ class FFPlayer(
     super.seekTo(ts, stream, minTs, maxTs, flags)
     // 跳到下一帧
     if (pts != newPts) return@withContext
-    if (newPts.streams.containsKey(AVMediaType.VIDEO)) {
-      resume(stopOnNextFrame = !resumeAfter, resyncTo = ts)
+    when {
+      // 视频轨在：单帧步进轮（暂停中 seek）靠「下一帧画面」停住，正常续播轮
+      // 带上 resyncTo 做丢帧收敛 —— 两条都是视频路径的原语义。
+      newPts.streams.containsKey(AVMediaType.VIDEO) ->
+        resume(stopOnNextFrame = !resumeAfter, resyncTo = ts)
+      // 纯音频没有「下一帧画面」可言（onNextFrame 的信号只由视频帧给出，
+      // stopOnNextFrame 会一路解到 EOF 才停）：本来在播就带 resyncTo 继续
+      // 播（丢帧收敛对音频同样成立，见 resumeImpl），暂停中则停在原地。
+      resumeAfter -> resume(resyncTo = ts)
     }
   }
 

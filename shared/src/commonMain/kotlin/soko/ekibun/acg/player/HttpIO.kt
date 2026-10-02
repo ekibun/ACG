@@ -49,9 +49,12 @@ class HttpIO(
         }
 
     fun read(buf: ByteArray): Int {
+      // InputStream 的 -1 = 本条响应体读完：翻成 AVERROR_EOF（与 FileIO.read 同一
+      // 条契约 —— 0 会被 aviobuf 当成「读空，继续要数据」，错误码会被当成故障）。
+      // 「数据还没到」仍按 B12 的现状返回 0，交给上层重试。
       val ret = stream.read(buf)
       if (ret > 0) offset += ret
-      return ret
+      return if (ret < 0) AvFormat.AVERROR_EOF else ret
     }
 
     fun takeOut(count: Int) {

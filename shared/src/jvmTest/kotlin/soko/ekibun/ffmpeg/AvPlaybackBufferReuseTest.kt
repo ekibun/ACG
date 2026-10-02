@@ -8,6 +8,7 @@ import soko.ekibun.acg.player.FileIO
 import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.Collections
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -33,9 +34,19 @@ class AvPlaybackBufferReuseTest {
     override val sampleRate: Int = 48_000
     override val channels: Int = 2
     override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_S16
-    val videoAddresses = ArrayList<Long>()
+
+    // flushVideoBuffer 跑在播放线程上，测试协程并发读：列表必须是同步的，
+    // 且**迭代只能走快照**（synchronizedList 的迭代器不自带同步 ——
+    // 2026-10-02 实测 ConcurrentModificationException）。
+    val videoAddresses = Collections.synchronizedList(ArrayList<Long>())
+
+    @Volatile
     var allDirect = true
+
+    @Volatile
     var videoBytes = 0L
+
+    fun videoAddressesSnapshot(): List<Long> = synchronized(videoAddresses) { videoAddresses.toList() }
 
     override suspend fun flushAudioBuffer(buf: ByteBuffer): Int {
       if (!buf.isDirect) allDirect = false
@@ -76,7 +87,7 @@ class AvPlaybackBufferReuseTest {
   fun videoBufferIsZeroCopyAndReused() {
     val url = findVideo()
     if (url == null) {
-      println("跳过：找不到 .workbuddy/test.mp4（素材在 gitignore 里，不随仓库分发）")
+      println("skip: .workbuddy/test.mp4 not found (gitignored, not shipped with the repo)")
       return
     }
     runBlocking {
@@ -88,10 +99,14 @@ class AvPlaybackBufferReuseTest {
         withTimeout(20_000) {
           while (sink.videoAddresses.size < 10) delay(5)
         }
-        assertTrue(sink.allDirect, "交给平台的缓冲必须是 direct buffer（零拷贝）")
-        val addresses = sink.videoAddresses.filter { it != 0L }.distinct()
-        assertEquals(1, addresses.size, "送显缓冲必须复用同一块 native 内存：实际 ${addresses.size} 个地址")
-        assertTrue(sink.videoBytes > 0, "缓冲不该是空的")
+        assertTrue(sink.allDirect, "buffers handed to the platform must be direct (zero-copy)")
+        val addresses = sink.videoAddressesSnapshot().filter { it != 0L }.distinct()
+        assertEquals(
+          1,
+          addresses.size,
+          "the frame buffer must reuse one native address, got ${addresses.size} address(es)",
+        )
+        assertTrue(sink.videoBytes > 0, "the frame buffer must not be empty")
         player.pause()
         job.join()
       } finally {

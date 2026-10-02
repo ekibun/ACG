@@ -40,6 +40,12 @@ open class AvFormat(
     const val AV_SAMPLE_FMT_DBL = 4
 
     /**
+     * libavutil/error.h 的 AVERROR_EOF（FFERRTAG('E','O','F',' ')），照抄枚举值：
+     * getPacket 的读作业要区分「读到头」与「读出错」，错误要出声（见 getPacket）。
+     */
+    const val AVERROR_EOF = -541478725
+
+    /**
      * 预读通道装多少个 packet。
      *
      * ⚠️ 这是**包数**口径，不是字节 —— mpv 的 `--demuxer-max-bytes` 与 ExoPlayer 的
@@ -171,7 +177,9 @@ open class AvFormat(
    * 传 `pts.streams.values`，而换位置一定先 seek ⇒ 实际踩不到）。
    *
    * 返回 `null` 表示 **EOF**：读作业读到流尾会把通道关掉，此后每次调用都**立刻返回 null**
-   * （粘住的），不挂起、也不抛。
+   * （粘住的），不挂起、也不抛。读**出错**（非 [AVERROR_EOF] 的负返回值）同样折叠成 null ——
+   * aviobuf 会把 IO 错误毒化成 EOF 状态，API 层分不开；但错误会出声（native 两条 av_log +
+   * 这里的 stderr 一条），不是静默的"播完了"。
    */
   suspend fun getPacket(streams: Collection<AvStream>): AvPacket? =
     withPtr { ptr ->
@@ -195,6 +203,14 @@ open class AvFormat(
                     // 只有 av_packet_free 一个释放点，没有 GC 兜底（见 AvPacket）。
                     packet.close()
                     inFlight = null
+                    // 出错与 EOF 在这里同形收场（通道关闭、消费方拿到 null）：aviobuf
+                    // 的 fill_buffer 对 IO 层任何负返回值都置 eof_reached
+                    // （aviobuf.c:551-558），错误码过后过不来，API 层分不开。
+                    // 分离只能靠出声 —— native 在 read 回调与 getPacketNative 各有
+                    // 一条 av_log，这里补 Kotlin 侧的，JVM 测试才抓得到。
+                    if (ret != AVERROR_EOF) {
+                      System.err.println("[AvFormat] av_read_frame error ret=$ret, folded to EOF")
+                    }
                     return@async
                   }
                   // `streams.isEmpty()` 也收下：那是**下载器模式**（不看画面、只要数据），

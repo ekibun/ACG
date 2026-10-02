@@ -173,7 +173,7 @@ class WebviewJsTest {
       loadInit(
         ctx,
         javaStub { url, _, _ ->
-          assertEquals("https://example.com/play", url, "url 必须原样传到 Kotlin 侧")
+          assertEquals("https://example.com/play", url, "url must reach the Kotlin side unchanged")
           CompletableDeferred<Any?>(
             mapOf(
               "__webview_kind__" to "intercept",
@@ -316,7 +316,7 @@ class WebviewJsTest {
           // 这里把「回调真的送过来了」变成测试线程可以直接 await 的结论。
           if (fn == null) {
             started.completeExceptionally(
-              AssertionError("onInterceptRequest 是函数时必须作为 JSFunction 送到 Kotlin 侧"),
+              AssertionError("a function onInterceptRequest must be delivered to Kotlin as JSFunction"),
             )
           } else {
             started.complete(fn)
@@ -381,9 +381,9 @@ class WebviewJsTest {
       finish.complete(null)
 
       script.join(10_000)
-      assertTrue(!script.isAlive, "webview() 的 Promise 没有被解决，脚本线程还挂着")
+      assertTrue(!script.isAlive, "webview() Promise unresolved; the script thread is still hanging")
       scriptFailure?.let { throw it }
-      assertEquals("undefined", scriptResult, "没命中拦截时 webview() 应给出 undefined")
+      assertEquals("undefined", scriptResult, "webview() must yield undefined when no interception hits")
 
       // `started` 里那一票是 Kotlin 侧自己持有的回调包装，用完还给 runtime
       fn.close()

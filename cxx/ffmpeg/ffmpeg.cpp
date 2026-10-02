@@ -63,15 +63,59 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* res) {
   return JNI_VERSION_1_4;
 }
 
+// initNative 的失败路径拿不到 s：ffmpeg 的 fail: 标签（demux.c:367-374）在
+// avformat_open_input 失败时已经 avformat_free_context 并把 *ps 置 NULL，而
+// CUSTOM_IO 的 pb 在那条路上**不关**（fail: 只关非
+// CUSTOM_IO，demux.c:370-371）。 所以 io_open 里建出来的 pb 得自己记账，opaque
+// 因此从裸 jobject 升级成这个
+// 所有者结构；成功关闭（destroyNative）与打开失败（initNative）都从这里找 pb。
+struct FormatOpaque {
+  jobject thiz;               // AvFormat 实例的 GlobalRef
+  AVIOContext* pb = nullptr;  // io_open 建的 pb（CUSTOM_IO：ffmpeg 不替我们关）
+};
+
+// 还一个 io_open 建出来的 pb：Java 侧 close() → 还 ioCtx 的 GlobalRef →
+// 释放缓冲与上下文本体。两条关闭路（destroyNative / 打开失败）
+// 共用这一份，别让归还逻辑长出两个版本。
+static void closeIoContext(JNIEnv* env, AVIOContext* pb) {
+  if (!pb) return;
+  auto ioCtx = (jobject)pb->opaque;
+  if (ioCtx) {
+    if (jmethodID close =
+            env->GetMethodID(env->GetObjectClass(ioCtx), "close", "()V")) {
+      env->CallVoidMethod(ioCtx, close);
+      if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+      }
+    } else if (env->ExceptionCheck()) {
+      env->ExceptionClear();
+    }
+    env->DeleteGlobalRef(ioCtx);
+  }
+  // ⚠️ **不能用 avio_close**：那是给 avio_open 的 URLContext 系 pb 用的 ——
+  // 它把 s->opaque 当 URLContext* 送去 ffurl_close（avio.c），对我们这个在
+  // opaque 里放 GlobalRef(jobject) 的自定义 pb 是类型混淆，直接访问违例
+  // （2026-10-02 实测：hs_err 落在 avio_close 内 `mov 0x80(%rdx)`）。
+  // 自定义 pb 的正确关法：buffer 由调用方 av_free（avio.h 的契约
+  // 「AVIOContext.buffer … must be later freed with av_free()」），
+  // 上下文本体交 avio_context_free（它只还 struct，不管 buffer）。
+  av_freep(&pb->buffer);
+  avio_context_free(&pb);
+}
+
 extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
     JNIEnv* env, jobject thiz, jstring url) {
   auto ctx = avformat_alloc_context();
-  ctx->opaque = env->NewGlobalRef(thiz);
+  if (!ctx) return 0;
+  auto self = new FormatOpaque{env->NewGlobalRef(thiz), nullptr};
+  ctx->opaque = self;
   ctx->io_open = [](AVFormatContext* s, AVIOContext** pb, const char* url,
                     int flags, AVDictionary** options) {
     JNIEnv* env;
     javaVm->GetEnv((void**)&env, JNI_VERSION_1_4);
-    auto thiz = (jobject)s->opaque;
+    auto self = (FormatOpaque*)s->opaque;
+    auto thiz = self->thiz;
     jclass cls = env->GetObjectClass(thiz);
     jobject io = env->GetObjectField(
         thiz, env->GetFieldID(cls, "io", "Lsoko/ekibun/ffmpeg/AvIO$Handler;"));
@@ -97,6 +141,14 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
           int ret = env->CallIntMethod(ioCtx, method, arr);
           if (ret > 0) env->GetByteArrayRegion(arr, 0, ret, (jbyte*)buf);
           env->DeleteLocalRef(arr);
+          // AvIO 的契约是 **AVERROR_EOF 表示
+          // EOF、其余负数表示出错**（FileIO.read / HttpIO.read 都把各自的 EOF
+          // 翻成了 AVERROR_EOF）。错误在这一层就得出 声：aviobuf 的 fill_buffer
+          // 对任何负返回值都置 eof_reached 并把错误码 记进
+          // s->error（aviobuf.c:551-558），此后 av_read_frame 一律以 EOF 形态
+          // 上浮 —— 不在这里打日志，IO 故障在外面看起来就是"播完了"。
+          if (ret < 0 && ret != AVERROR_EOF)
+            av_log(nullptr, AV_LOG_ERROR, "AvIO read error ret=%d\n", ret);
           return ret;
         },
         nullptr,
@@ -108,22 +160,29 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
               env->GetMethodID(env->GetObjectClass(ioCtx), "seek", "(II)I");
           return env->CallIntMethod(ioCtx, method, offset, whence);
         });
+    // 记账给失败路径与 destroyNative（理由见 FormatOpaque 的注释）。
+    if (*pb) self->pb = *pb;
     return 0;
   };
   ctx->io_close2 = [](AVFormatContext* s, AVIOContext* pb) {
     JNIEnv* env;
     javaVm->GetEnv((void**)&env, JNI_VERSION_1_4);
-    auto ioCtx = (jobject)pb->opaque;
-    jmethodID method =
-        env->GetMethodID(env->GetObjectClass(ioCtx), "close", "()V");
-    env->CallVoidMethod(ioCtx, method);
-    env->DeleteGlobalRef(ioCtx);
+    closeIoContext(env, pb);
     return 0;
   };
   ctx->flags |= AVFMT_FLAG_CUSTOM_IO;
-  jboolean copy;
-  avformat_open_input(&ctx, env->GetStringUTFChars(url, &copy), nullptr,
-                      nullptr);
+  const char* urlChars = env->GetStringUTFChars(url, nullptr);
+  const int ret = avformat_open_input(&ctx, urlChars, nullptr, nullptr);
+  env->ReleaseStringUTFChars(url, urlChars);
+  if (ret < 0) {
+    // ctx 已经被 ffmpeg free 掉了（见 FormatOpaque 的注释），destroyNative
+    // 永远不会再被调 —— 这里的 GlobalRef（thiz 与 ioCtx）与 pb 要照
+    // destroyNative 的口径原地收干净，一个不留。
+    closeIoContext(env, self->pb);
+    env->DeleteGlobalRef(self->thiz);
+    delete self;
+    return 0;
+  }
   return (jlong)ctx;
 }
 
@@ -158,7 +217,16 @@ extern "C" JNIEXPORT void JNICALL
 Java_soko_ekibun_ffmpeg_AvFormat_destroyNative(JNIEnv* env, jobject thiz,
                                                jlong pctx) {
   auto ctx = (AVFormatContext*)pctx;
-  env->DeleteGlobalRef((jobject)ctx->opaque);
+  auto self = (FormatOpaque*)ctx->opaque;
+  // ffmpeg 对 CUSTOM_IO 不替调用方关 pb：avformat_close_input 先把 pb 置成
+  // NULL 再走 ff_format_io_close（demux.c:388-396），io_close2 与 avio_close
+  // 都不会发生 —— pb 连同 io_open 里的 GlobalRef、av_malloc 缓冲、Java 侧
+  // 连接全靠这里收。
+  if (ctx->pb) closeIoContext(env, ctx->pb);
+  if (self) {
+    env->DeleteGlobalRef(self->thiz);
+    delete self;
+  }
   avformat_close_input(&ctx);
 }
 
@@ -182,6 +250,12 @@ extern "C" JNIEXPORT jint JNICALL
 Java_soko_ekibun_ffmpeg_AvFormat_getPacketNative(JNIEnv* env, jobject thiz,
                                                  jlong ctx, jlong packet) {
   int ret = av_read_frame((AVFormatContext*)ctx, (AVPacket*)packet);
+  // 非 EOF 的错误在这里出声：Kotlin 侧（AvFormat.getPacket）会把一切负返回值
+  // 折叠成 EOF 收场，不打日志的话 demux 层的故障看起来就是"播完了"。IO 层
+  // 的错误另有 read 回调里那一条（那层才是 AvIO 契约的边界）。
+  if (ret < 0 && ret != AVERROR_EOF)
+    av_log(nullptr, AV_LOG_ERROR,
+           "av_read_frame error ret=%d（调用方按 EOF 折叠收场）\n", ret);
   return ret ? fmin(ret, -1) : ((AVPacket*)packet)->stream_index;
 }
 extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvCodec_initNative(
@@ -206,9 +280,9 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvCodec_initNative(
 // 一个 packet 在 B 帧/参考帧较多的编码下可能产出 0 帧（帧被解码器内部缓存）
 // 或多帧，所以这里返回的是 AvFrame 数组而不是单帧。
 //
-// 注意：AVCodecContext::opaque 是 FFmpeg 保留的用户数据字段，不能挪作帧缓存。
-// 每次 receive_frame 前都用一个临时 AVFrame，拿到帧就把所有权转交给 Java 侧
-// （由 AvFrame.closeNative -> av_frame_free 释放）。
+// 注意：这里没有在 AVCodecContext 上挂帧缓存（`opaque` 是上游留给用户的
+// 字段，本工程没用到它）；每次 receive_frame 前都用一个临时 AVFrame，拿到帧
+// 就把所有权转交给 Java 侧（由 AvFrame.closeNative -> av_frame_free 释放）。
 static jobjectArray newAvFrameArray(JNIEnv* env, jint size) {
   jclass cls = env->FindClass("soko/ekibun/ffmpeg/AvFrame");
   if (!cls) return nullptr;

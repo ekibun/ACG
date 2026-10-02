@@ -1290,6 +1290,11 @@ static void destroyView(HWND hwnd) {
     view->controller->Close();
     view->controller.Reset();
   }
+  // 输入队列的摘除要赶在 DestroyWindow 之前、且要在这里做：本函数开头已经把
+  // view 从 g_views 摘掉，WM_DESTROY 里那句 detachThreadInput 靠 findView 是
+  // 查不到的（它兜的是另一半 —— 窗口被系统先销毁、destroyView 没机会跑时
+  // view 还在册的那条路）。
+  detachThreadInput(view, hwnd);
   if (view->hwnd && IsWindow(view->hwnd)) {
     // 注意：可见视图的窗口是 AWT 组件的子窗口。如果 AWT 那侧先没了，窗口会被
     // 系统一起销毁 —— 所以组合层必须在组件 dispose 之前调 `destroyView`
@@ -2167,7 +2172,9 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
       KillTimer(hwnd, WV_TIMER_FOCUS);
       // 摘开输入队列再关窗口 —— 见 [ensureThreadAttached]。漏了会留下
-      // 「AWT 线程还接着一个已经死了的线程」的脏状态。
+      // 「AWT 线程还接着一个已经死了的线程」的脏状态。这里能查到 view 的
+      // 前提是窗口被**系统**先销毁（destroyView 没机会跑，view 还在册）；
+      // destroyView 自己发起的销毁在它内部摘（那边 view 已出册）。
       detachThreadInput(findView(hwnd), hwnd);
       if (hwnd == g_dispatcher.load()) PostQuitMessage(0);
       return 0;
@@ -2554,6 +2561,14 @@ WV_JNI(jlong, nativeCreateView)(JNIEnv* env, jobject, jstring userAgent,
             if (FAILED(hr)) destroyView(hwnd);
           },
           5000)) {
+    // 与 nativeRun 同款兜底：任务可能已经建好窗口、只是被堵住没跑完
+    // （比如上一个视图的 controller->Close() 占着泵）。别让这个视图漏在
+    // g_views 里，补投一个销毁 —— 消息泵一空出来它自然会跑到。
+    WV_LOG("nativeCreateView: 建窗口/控制器同步任务超时");
+    if (view->hwnd) {
+      const HWND stale = view->hwnd;
+      postTask([stale] { destroyView(stale); });
+    }
     return 0;
   }
   return static_cast<jlong>(reinterpret_cast<intptr_t>(view->hwnd));

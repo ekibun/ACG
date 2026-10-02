@@ -8,8 +8,12 @@ import soko.ekibun.ffmpeg.AvIO
  * 本地文件的 [AvIO] 实现。
  *
  * 与 [HttpIO] 的差别全在数据来源：本地文件能直接定位到任意偏移，所以这里既没有
- * "网络游标"、也没有重试 —— [read] 读到 EOF 返回 0（avio 的 `read_packet` 契约里
- * 0 就是 EOF），出错返回 -1；[seek] 直接把文件指针移过去。
+ * "网络游标"、也没有重试 —— [read] 读到 EOF 返回 [AvFormat.AVERROR_EOF]、出错返回 -1。
+ *
+ * ⚠️ **EOF 必须翻成 [AvFormat.AVERROR_EOF]，不能返回 0**：aviobuf 的 `fill_buffer`
+ * 只把 `AVERROR_EOF` / 负数当终止（aviobuf.c:551-558），返回 0 会被当成「读空，继续
+ * 要数据」—— wav/pcm 这类没有重试逻辑的 demuxer 会在文件尾**无限空转**（2026-10-02
+ * 实测：合成的 wav 播到文件尾，avformat 线程 100% CPU，GC 被每次 32 KB 的分配拖垮）。
  *
  * ⚠️ 受 [AvIO.seek] 的 `Int` 签名与 native 侧 `(II)I` 方法描述符限制，本实现只对
  * **小于 2 GiB** 的文件正确（偏移在 JNI 边界上就被截成了 32 位）。
@@ -31,16 +35,17 @@ class FileIO(
 
   override fun read(buf: ByteArray): Int {
     val file = file ?: return -1
-    return try {
-      val ret = file.read(buf)
-      if (ret > 0) offset += ret
-      // `read` 用 -1 表示 EOF，而 avio 的 read_packet 契约是 **0 表示 EOF、负数表示出错**；
-      // 直接透传会把"文件读完了"变成"读失败"。
-      if (ret < 0) 0 else ret
-    } catch (e: Throwable) {
-      e.printStackTrace()
-      -1
-    }
+    // 异常先接住（返回 -1 = 出错），EOF 与数据分开翻：
+    // -1（RandomAccessFile 的 EOF）→ AVERROR_EOF；正数原样。
+    val ret =
+      try {
+        file.read(buf)
+      } catch (e: Throwable) {
+        e.printStackTrace()
+        return -1
+      }
+    if (ret > 0) offset += ret
+    return if (ret < 0) AvFormat.AVERROR_EOF else ret
   }
 
   override fun seek(

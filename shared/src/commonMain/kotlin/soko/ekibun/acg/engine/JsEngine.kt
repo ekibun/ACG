@@ -74,85 +74,97 @@ class JsEngine {
   }
 
   private var quickjsDelegate: QuickJS? = null
+
+  /**
+   * 惰性初始化的锁：首建是一段 check-then-act（建 runtime、求值 init、赋值），
+   * 两个协程并发首访会各建一个 [QuickJS]，后赋值者覆盖先前 —— 那一个永不
+   * [close][QuickJS.close]（runtime + 归属线程泄漏）。锁里那些 `runBlocking`
+   * 没有死锁风险：等的是 QuickJS 的归属线程，而归属线程上的回调（
+   * `handleJSInvokable` / 反射派发）都不进这把锁。
+   */
+  private val quickjsLock = Any()
+
   private val quickjs: QuickJS
     get() =
-      quickjsDelegate ?: run {
-        val moduleHandler = { module: String ->
-          val modulePath =
-            if (module == "@init") {
-              "files/js/init.js"
-            } else {
-              "files/js/module/" + module.replaceFirst(".js$".toRegex(), "") + ".js"
-            }
-          runBlocking {
-            try {
-              Res.readBytes(modulePath).decodeToString()
-            } catch (_: Exception) {
-              null
+      synchronized(quickjsLock) {
+        quickjsDelegate ?: run {
+          val moduleHandler = { module: String ->
+            val modulePath =
+              if (module == "@init") {
+                "files/js/init.js"
+              } else {
+                "files/js/module/" + module.replaceFirst(".js$".toRegex(), "") + ".js"
+              }
+            runBlocking {
+              try {
+                Res.readBytes(modulePath).decodeToString()
+              } catch (_: Exception) {
+                null
+              }
             }
           }
-        }
-        val ctx1 = QuickJS(moduleHandler = moduleHandler)
-        quickjsDelegate = ctx1
-        // 声明成 JSInvokable 会丢掉 AutoCloseable -> 这个工厂函数再也关不掉，
-        // 每个引擎实例固定漏 1 票，reset() 的泄漏报告随之永久带一条噪音。
-        // JS 侧没有别的引用持有它，调用完即可归还。
-        // 这里在属性 getter 里，不是协程上下文，只能阻塞等这一次求值 ——
-        // evaluate 本身是挂起的（它要把求值搬到 QuickJS 的归属线程上）。
-        val init =
-          runBlocking { ctx1.evaluate(moduleHandler("@init")!!, "<init>") } as JSFunction
-        try {
-          init(
-            object : JSInvokable {
-              override fun invoke(
-                vararg argv: Any?,
-                thisVal: Any?,
-              ): Any? {
-                val obj = argv[0]
-                return if (obj is String) {
-                  // 按名称实例化引擎插件类。包名必须跟随本工程的实际包名，
-                  // 而不是从别处拷来的 `soko.ekibun.nekomp.*`。
-                  val className = "$ENGINE_PACKAGE.$obj"
-                  val cls =
-                    javaClass.classLoader?.loadClass(className)
-                      ?: throw JSError("cannot load class '$className'")
-                  val ctorArgs = argv.sliceArray(1 until argv.size)
-                  // 按实参个数选构造函数，不要盲取 constructors[0]（顺序无保证，
-                  // 且多个构造函数时会选错）。
-                  val ctor =
-                    cls.constructors.firstOrNull { it.parameterCount == ctorArgs.size }
-                      ?: throw JSError(
-                        "no constructor of '$className' accepts ${ctorArgs.size} argument(s)",
-                      )
-                  ctor.isAccessible = true
-                  ctor.newInstance(*ctorArgs)
-                } else {
-                  val methodName = argv[1] as String
-                  val objWrap = (obj ?: this@JsEngine)
-                  val callArgs = argv.sliceArray(2 until argv.size)
-                  // 重载时 declaredMethods 里会有多个同名方法，`first{}` 可能选错。
-                  // 用"名字 + 参数个数"匹配，仍不唯一时再按参数类型宽容匹配。
-                  val candidates =
-                    objWrap.javaClass.methods
-                      .filter { it.name == methodName && it.parameterCount == callArgs.size }
-                  val method =
-                    candidates.firstOrNull { m ->
-                      m.parameterTypes.withIndex().all { (i, t) -> acceptsArg(t, callArgs[i]) }
-                    } ?: candidates.firstOrNull()
-                      ?: throw JSError(
-                        "no method '$methodName' with ${callArgs.size} argument(s) " +
-                          "on ${objWrap.javaClass.name}",
-                      )
-                  method.isAccessible = true
-                  method.invoke(objWrap, *callArgs)
+          val ctx1 = QuickJS(moduleHandler = moduleHandler)
+          quickjsDelegate = ctx1
+          // 声明成 JSInvokable 会丢掉 AutoCloseable -> 这个工厂函数再也关不掉，
+          // 每个引擎实例固定漏 1 票，reset() 的泄漏报告随之永久带一条噪音。
+          // JS 侧没有别的引用持有它，调用完即可归还。
+          // 这里在属性 getter 里，不是协程上下文，只能阻塞等这一次求值 ——
+          // evaluate 本身是挂起的（它要把求值搬到 QuickJS 的归属线程上）。
+          val init =
+            runBlocking { ctx1.evaluate(moduleHandler("@init")!!, "<init>") } as JSFunction
+          try {
+            init(
+              object : JSInvokable {
+                override fun invoke(
+                  vararg argv: Any?,
+                  thisVal: Any?,
+                ): Any? {
+                  val obj = argv[0]
+                  return if (obj is String) {
+                    // 按名称实例化引擎插件类。包名必须跟随本工程的实际包名，
+                    // 而不是从别处拷来的 `soko.ekibun.nekomp.*`。
+                    val className = "$ENGINE_PACKAGE.$obj"
+                    val cls =
+                      javaClass.classLoader?.loadClass(className)
+                        ?: throw JSError("cannot load class '$className'")
+                    val ctorArgs = argv.sliceArray(1 until argv.size)
+                    // 按实参个数选构造函数，不要盲取 constructors[0]（顺序无保证，
+                    // 且多个构造函数时会选错）。
+                    val ctor =
+                      cls.constructors.firstOrNull { it.parameterCount == ctorArgs.size }
+                        ?: throw JSError(
+                          "no constructor of '$className' accepts ${ctorArgs.size} argument(s)",
+                        )
+                    ctor.isAccessible = true
+                    ctor.newInstance(*ctorArgs)
+                  } else {
+                    val methodName = argv[1] as String
+                    val objWrap = (obj ?: this@JsEngine)
+                    val callArgs = argv.sliceArray(2 until argv.size)
+                    // 重载时 declaredMethods 里会有多个同名方法，`first{}` 可能选错。
+                    // 用"名字 + 参数个数"匹配，仍不唯一时再按参数类型宽容匹配。
+                    val candidates =
+                      objWrap.javaClass.methods
+                        .filter { it.name == methodName && it.parameterCount == callArgs.size }
+                    val method =
+                      candidates.firstOrNull { m ->
+                        m.parameterTypes.withIndex().all { (i, t) -> acceptsArg(t, callArgs[i]) }
+                      } ?: candidates.firstOrNull()
+                        ?: throw JSError(
+                          "no method '$methodName' with ${callArgs.size} argument(s) " +
+                            "on ${objWrap.javaClass.name}",
+                        )
+                    method.isAccessible = true
+                    method.invoke(objWrap, *callArgs)
+                  }
                 }
-              }
-            },
-          )
-        } finally {
-          init.close()
+              },
+            )
+          } finally {
+            init.close()
+          }
+          ctx1
         }
-        ctx1
       }
 
   /**
@@ -169,8 +181,10 @@ class JsEngine {
   fun reset() {
     // 主动销毁 runtime，而不是只把引用置空等 GC：JS 侧的 Java 对象持有
     // global ref，只有 destroyContext 触发的析构才会把它们还回去。
-    quickjsDelegate?.close()
-    quickjsDelegate = null
+    synchronized(quickjsLock) {
+      quickjsDelegate?.close()
+      quickjsDelegate = null
+    }
   }
 
   @Keep

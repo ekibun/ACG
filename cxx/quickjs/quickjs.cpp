@@ -131,7 +131,17 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
       return 0;
     }
   }
-  return (jlong)JS_NewContext(rt);
+  JSContext* jsc = JS_NewContext(rt);
+  if (!jsc) {
+    // context 建不成（基本只有 OOM）：runtime 同样不能留 —— 与上面
+    // JS_NewClass 失败是同一条清理链，别让 gc_obj_list 断言留到进程退出。
+    JS_SetRuntimeOpaque(rt, nullptr);
+    JS_FreeRuntime(rt);
+    env->DeleteWeakGlobalRef(opaque->thiz);
+    delete opaque;
+    return 0;
+  }
+  return (jlong)jsc;
 }
 extern "C" JNIEXPORT void JNICALL
 Java_soko_ekibun_quickjs_QuickJS_destroyContext(JNIEnv* env, jclass,

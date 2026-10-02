@@ -122,8 +122,6 @@ native（`cxx/`：WebView2 宿主、QuickJS 桥、FFmpeg 解封装+解码+播放
 - `soko.ekibun.acg.engine` 下的类名是对外契约（后果见 §2）。
 - `cxx/ffmpeg/ffmpeg/`、`cxx/quickjs/quickjs/` 是 submodule，**不要动**；需要参考实现
   （如 `fftools/ffplay.c`）**直接读本地文件，不要联网下载**。
-- 代码注释可能已过时甚至被证伪（历史上出现过"必须 jbr-11"这类错误结论）—— 读到先当线索、
-  不当结论，去看调用点或跑一遍。
 
 ---
 

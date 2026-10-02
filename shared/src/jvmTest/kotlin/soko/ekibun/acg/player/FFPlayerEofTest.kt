@@ -45,7 +45,7 @@ class FFPlayerEofTest {
   fun playToEofThenPauseAndCloseReturn() {
     val url = findVideo()
     if (url == null) {
-      println("跳过：找不到 .workbuddy/test.mp4（素材在 gitignore 里，不随仓库分发）")
+      println("skip: .workbuddy/test.mp4 not found (gitignored, not shipped with the repo)")
       return
     }
     runBlocking {

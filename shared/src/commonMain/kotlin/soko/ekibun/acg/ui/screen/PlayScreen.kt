@@ -33,8 +33,9 @@ import soko.ekibun.ffmpeg.FFPlayer
 @Composable
 fun PlayScreen() {
   val playback = remember { mutableStateOf<Playback?>(null) }
+  // 输入框的初始值留空：本页是调试页签，地址由使用者填（别把本机路径写进仓库）。
   val url =
-    remember { mutableStateOf("D:/Work/Self/ACG/.workbuddy/test.mp4") }
+    remember { mutableStateOf("") }
   val player = remember { mutableStateOf<FFPlayer?>(null) }
   val duration = remember { mutableFloatStateOf(0f) }
   val pts = remember { mutableFloatStateOf(0f) }

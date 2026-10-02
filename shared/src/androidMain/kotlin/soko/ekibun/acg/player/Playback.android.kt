@@ -135,7 +135,12 @@ class AndroidPlayback(
 
   var bitmap: Bitmap? = null
 
-  val surface by lazy { Surface(surfaceTexture) }
+  // 显式持有而不是 `by lazy`：close() 要能只还**已经建过**的 Surface ——
+  // `by lazy` 读一次才会建，为了释放去读它就变成"没画过也建一个"。
+  private var surfaceRef: Surface? = null
+
+  val surface: Surface
+    get() = surfaceRef ?: Surface(surfaceTexture).also { surfaceRef = it }
 
   val paint by lazy { Paint() }
 
@@ -183,5 +188,9 @@ class AndroidPlayback(
       stop()
       audio.release()
     }
+    // Surface 是本类从 surfaceTexture 包出来的（TextureView 那侧
+    // onSurfaceTextureDestroyed 恒 false、不代放），所有权在这里收口。
+    surfaceRef?.release()
+    surfaceRef = null
   }
 }

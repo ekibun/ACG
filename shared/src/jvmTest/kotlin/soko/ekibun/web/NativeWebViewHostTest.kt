@@ -82,7 +82,7 @@ class NativeWebViewHostTest {
 
   private fun webViewReady(): Boolean {
     val reason = hostHealth ?: return true
-    println("[NativeWebViewHostTest] 跳过：$reason")
+    println("[NativeWebViewHostTest] skip: $reason")
     return false
   }
 
@@ -124,12 +124,12 @@ class NativeWebViewHostTest {
       )
 
       val main = seen.firstOrNull { it.url.endsWith("/page.html") }
-      assertTrue(main != null, "主框架导航也应该看得到。看到的请求：${seen.map { it.url} }")
-      assertTrue(main.isForMainFrame, "主框架导航的 isForMainFrame 应该是 true")
+      assertTrue(main != null, "main-frame navigation should be visible; seen: ${seen.map { it.url} }")
+      assertTrue(main.isForMainFrame, "main-frame navigation must have isForMainFrame == true")
 
       val sub = seen.first { it.url.endsWith("/sub.js") }
-      assertEquals("GET", sub.method, "method 应该是真的 HTTP 方法")
-      assertTrue(!sub.isForMainFrame, "`<script src>` 不是主框架")
+      assertEquals("GET", sub.method, "method must be the real HTTP method")
+      assertTrue(!sub.isForMainFrame, "<script src> is not a main frame")
       assertTrue(
         sub.headers.isNotEmpty(),
         "子资源的请求头应该是真的（WebView2 的 ICoreWebView2HttpRequestHeaders）",
@@ -155,9 +155,9 @@ class NativeWebViewHostTest {
         }
 
       val scripted = assertIs<WebViewTaskResult.Scripted>(result, "应该走到脚本分支，实际是 $result")
-      val json = scripted.json ?: fail("脚本有返回值时 json 不该是 null")
-      assertTrue(json.contains("\"sub\":true"), "外链脚本应该已经执行过：$json")
-      assertTrue(json.contains("\"imgs\":1"), "图片子资源应该在 DOM 里：$json")
+      val json = scripted.json ?: fail("json must not be null when the script returns a value")
+      assertTrue(json.contains("\"sub\":true"), "the external script should have run: $json")
+      assertTrue(json.contains("\"imgs\":1"), "the image subresource should be in the DOM: $json")
     }
 
   /**
@@ -247,7 +247,7 @@ class NativeWebViewHostTest {
             )
           }
         }
-      assertTrue(handle != 0L, "建不出可见视图 —— 本机 WebView2 可能正在抽风，看原生日志")
+      assertTrue(handle != 0L, "cannot create the visible view - local WebView2 may be misbehaving, check native logs")
 
       val ready = CompletableDeferred<Unit>()
       val loaded = CompletableDeferred<Unit>()
@@ -271,9 +271,9 @@ class NativeWebViewHostTest {
             handle,
             "({ sub: !!window.__subLoaded, imgs: document.images.length })",
           )
-        assertTrue(json != null, "evaluate 应该拿回结果，实际是 null（超时或脚本执行失败）")
-        assertTrue(json.contains("\"sub\":true"), "外链脚本应该已经执行过：$json")
-        assertTrue(json.contains("\"imgs\":1"), "图片子资源应该在 DOM 里：$json")
+        assertTrue(json != null, "evaluate must return a result, got null (timeout or script failure)")
+        assertTrue(json.contains("\"sub\":true"), "the external script should have run: $json")
+        assertTrue(json.contains("\"imgs\":1"), "the image subresource should be in the DOM: $json")
 
         // 「没有返回值」的实际形态是 **字符串 `"null"`**，不是 Kotlin 的 null：
         // WebView2 把结果 JSON 序列化，`undefined` 出来就是 JSON 的 null 四个字符。
@@ -298,7 +298,7 @@ class NativeWebViewHostTest {
     contentType: String,
     body: ByteArray,
   ) {
-    println("[NativeWebViewHostTest] 服务端收到 $requestMethod $requestURI")
+    println("[NativeWebViewHostTest] server got $requestMethod $requestURI")
     responseHeaders.add("Content-Type", contentType)
     sendResponseHeaders(200, body.size.toLong())
     responseBody.use { it.write(body) }

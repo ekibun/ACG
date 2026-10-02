@@ -7,7 +7,8 @@ import kotlin.test.assertEquals
 /**
  * `HttpIO.seek` 的 whence 语义回归。
  *
- * HttpIO 内部自己发网络请求，没法在单测里构造真实响应，因此这里用一个
+ * HttpIO 内部自己发网络请求；起真 HTTP 服务的做法同仓已有（`NativeWebViewHostTest`
+ * 里的 `com.sun.net.httpserver.HttpServer`），要验真实链路走那边 —— 这里用一个
  * 与之同构的纯函数 `Cursor` 锁定公式本身 —— 保证 SEEK_CUR / SEEK_END
  * 不会被"优化"回"都当绝对偏移"。
  */

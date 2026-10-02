@@ -141,7 +141,7 @@ class InitJsTest {
       assertEquals(true, out[1])
       assertEquals(false, out[2])
       // get 返回 value，而不是整个 item 对象
-      assertEquals("4", out[3], "get 应返回 value；set 应就地替换")
+      assertEquals("4", out[3], "get must return value; set must replace in place")
       assertEquals(listOf("a", "a", "b"), (out[4] as Array<*>).toList())
       assertEquals(listOf("1", "2", "4"), (out[5] as Array<*>).toList())
     } finally {
@@ -212,8 +212,8 @@ class InitJsTest {
   @Test
   fun noDartResidue() {
     val src = initSource()
-    assertTrue(!src.contains("_dart"), "init.js 不应再引用 Dart 桥的 _dart")
-    assertTrue(!src.contains("createClass"), "init.js 不应再有 createClass 残留")
+    assertTrue(!src.contains("_dart"), "init.js must not reference the Dart bridge _dart")
+    assertTrue(!src.contains("createClass"), "init.js must not contain createClass leftovers")
     assertTrue(
       !Regex("for\\s*\\(\\s*var\\s+item\\s+in\\s+__items__").containsMatchIn(src),
       "不应再用 for...in 遍历 __items__ 数组",

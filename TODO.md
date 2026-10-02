@@ -14,73 +14,26 @@
 
 ---
 
-## A. 用户明确要求，不可留着
-
-### A1. 清理代码里过时/错误的 AI 注释
-
-- **现状**（2026-09-19）：全仓复查已做完（82 个文件 / 2560 行注释，取证见本机
-  `.workbuddy/comment-review.md`），**已改 30 处**：
-  - 点名样本：`必须 jbr-11`、`HttpIO.offset += ret 是重复累加` 在当前树里**已不存在**；
-    `Tao 后端是唯一选择`、`RequestInterceptor 拦不到子资源` 这两条属历史陈述，
-    已随下一条**整段删掉**。
-  - **对"已移除依赖"的引用 7 处全删**（用户口径：「仓库里没有的东西，注释里就别提」）：
-    `Nucleus` / `Tao` / `dev.nucleusframework:composewebview` / `Nsis` 早就不在任何构建配置里
-    （`git log -S` 可追：`0a75461` 引入 → `f113a56` 换成自研宿主），注释里"以前用的是 X"
-    只会让人以为仓库里还有。涉及 `cxx/webview/webview.cpp` 文件头、
-    `desktopApp/build.gradle.kts`、`shared/build.gradle.kts`、`AcgWebView.kt`、
-    `BackgroundWebView.kt`、`AcgWebView.jvm.kt`、`NativeWebViewHostTest.kt`；
-    现状描述保留（例：`webview.cpp` 文件头直接讲钩子接在 `add_WebResourceRequested` +
-    `AddWebResourceRequestedFilter(L"*", ALL)` 上，不再解释"为什么不用 compose-webview"）。
-  - 事实错误 18 处全部改掉：`ffmpeg/AvFormat.kt` 的"`AVPixelFormat` 只有 0..13"
-    （本地 `libavutil/pixfmt.h` 里 ARGB=25、RGBA=26、BGRA=28 都是合法值，真正原因是
-    通道序不同）、`quickjs/QuickJS.kt` 两处、`cxx/webview/webview.cpp` 六处、
-    桌面 WebView 的 `AcgWebView.jvm.kt` / `NativeWebView.jvm.kt` 共三处、
-    `SeekWindowSemanticsTest` 三处（含一条**恒真断言**已改成真比 `dir`）、
-    构建与配置四处（`build.gradle.kts`、`.editorconfig`、`desktopApp/build.gradle.kts`、
-    `cxx/quickjs/quickjs.cpp`）。
-  - 其中一处**不只是注释错**：`QuickJS.Context.reuseWrapper` 漏了 `dup()`（复用的包装
-    没给调用方记票 → 谁先 `free()` 谁就把别人的包装一起销毁）。已修，并同步订正 skill
-    `quickjs-ownership` 的契约描述。
-- **2026-10-02 清掉的一批（9 处：webview 5 + 测试 4）**：
-  - `webview.cpp`：文件头「事件回调**一律不直接干活**，唯一的例外是请求拦截」→ 改成「**默认**不直接
-    干活，要求当场给结论的是**两处**例外（请求拦截 + 新窗口请求）」；`destroyView` 的「`Close()` 必须
-    不在 COM 回调里调」→「不能**在 WebView2 的事件回调里**调（本函数两条路径都不是回调）」；
-    「**永远到不了我们的宿主**」→ 限定成「落在**页面里**的点击」（落在宿主自己身上的收得到）；
-    「这是「能点不能打字」的**唯一解**」→「**焦点不送进来就是**「能点不能打字」」；`logNowMs` 的
-    「从模块加载算起」→「从**首次调用**算起」。
-  - `NativeWebViewHostTest.kt`：4 处数字（「三件」/「三个用例」/「三次用例」/「三条用例」）改成不写
-    个数的说法（现有 4 个用例），并补上漏掉的第 4 条清单；:311 那句「跨线程失败」随跨线程探针用例
-    一并删除（结论已进 skill `webview2-windows` 第 12 节）。
-- **还没做的**：剩 **3 处**（方向大体不误，但有反例或绝对化）：`ffmpeg.cpp:209`（说 `opaque` 是
-  "FFmpeg 保留" → 上游写明是给用户的）、`SeekWindowSemanticsTest.kt:26`（"整个丢弃" →
-  上游首次失败会拿窗口重试一次）、`HttpSeekSemanticsTest.kt:10-15`
-  （"没法在单测里构造真实响应" → 同仓已有真起 `HttpServer` 的用例）。
-- **完成判据**：上面 3 处改完，A1 结案。
-- **结案后必须做的收尾**（**动手前要先经用户明确确认**）：删掉 `AGENTS.md` **§4 末条**
-  （"代码注释可能已过时甚至被证伪…读到先当线索、不当结论"）—— 一条长期成立的"别信注释"规则
-  本身是坏味道，会训练 agent 忽略有用信号。
-  用户 2026-09-16 晚明确：**注释现在还不完全可信，这条规则先留着**，等他确认后再删；
-  2026-09-19 复查后同样建议留（还剩上面 10 处确凿偏差）。
-
 ## B. 已知缺陷，待修
-
-### B3. 测试报错 / 日志存在非英文输出
-
-- **现状**：未审计。Windows 控制台按代码页解码，中文输出会变乱码，误导排查。
-- **完成判据**：`shared/src/jvmTest/` 下测试的输出全为英文（ASCII）；加一条约定性检查。
 
 ### B4. `commonMain` 里存在平台符号（违反根 AGENTS.md §4 的硬规则）
 
-- **现状**：约定是 `commonMain` 不许出现 `java.*` / `android.*`。**7 个文件 12 处**
-  （2026-09-19 复核；`QuickJS.kt` 的那次线程安全修复加了 `AtomicBoolean` / `AtomicInteger`
-  两个 import，于是从 11 涨到 12）：`quickjs/QuickJS.kt`、
-  `ffmpeg/{AvFrame,AvCodec,AvFormat,FFPlayer}.kt`、`acg/engine/JsEngine.kt` 直接 import `java.*`；
-  另有 `acg/player/HttpIO.kt:52` 的内联 `catch (_: java.io.IOException)`。
-  也就是说 `soko.ekibun.{quickjs,ffmpeg}` 事实上是按 JVM-only 写的。
+- **现状**：约定是 `commonMain` 不许出现 `java.*` / `android.*`。**2026-10-02 复核**（全量
+  grep import 与代码级符号）：**import 9 处、6 个文件** —— `soko/ekibun/jni.kt` ×2
+  （`Executors` / `AtomicBoolean`）、`quickjs/QuickJS.kt` ×3（`Collections` /
+  `IdentityHashMap` / `AtomicBoolean`）、`quickjs/JSRef.kt`（`AtomicInteger`）、
+  `ffmpeg/FFPlayer.kt`（`Executors`）、`ffmpeg/AvPlayback.kt`（`ByteBuffer`）、
+  `acg/engine/JsEngine.kt`（`Charset`）；另有代码级内联：`acg/player/HttpIO.kt:47` 的
+  `catch (_: java.io.IOException)`、`JsEngine.kt` 的 `::class.java`（:64）与
+  `javaClass`（:117）。
+  （2026-09-19 记录的 `ffmpeg/{AvFrame,AvCodec,AvFormat}.kt` 三个文件的 java import 已清掉，
+  本条从原「7 个文件 12 处」改写成当前清单；FFPlayer 的 `System.currentTimeMillis` 三处
+  已随 B17 换成 `monoTimeMs()` 原语。）
+  也就是说 `soko.ekibun.{quickjs,ffmpeg}` 事实上仍按 JVM-only 写。
 - **方向已定**（用户 2026-09-16 晚）：**不给这两个包开例外** —— 规则保持，把这些 Java 语义
   逐处提到外面（`expect` 一个最小原语、两端各 `actual`），`commonMain` 里最终不剩平台符号。
 - **为什么现在没做**：属于独立的一次重构，要和文档改动分开。
-- **完成判据**：上述 12 处全部去掉；`commonMain` 里搜 `java\.` / `android\.` 结果均为 0。
+- **完成判据**：上述各处全部去掉；`commonMain` 里搜 `java\.` / `android\.` 结果均为 0。
 - **完成后必须做的收尾**：删掉 `AGENTS.md` §4 里那句"现状…仍有直接引用…见 `TODO.md` B4"
   的指针（届时规则已无例外），并删掉本条。
 
@@ -398,6 +351,17 @@
   先定「没数据怎么表达」，再谈预读窗口。
 - **完成判据**：定下契约并改掉 `HttpIO`；真连一个 HTTP 源播放，不再出现「读空 sample」。
 
+### B19. Android 端 VideoSurface 生命周期收口（待真机实测）
+
+- **代码已补**（2026-10-02）：`VideoSurface.android.kt` 此前没有 onDispose —— common 契约
+  （`VideoSurface.kt:10-11`）写明的「界面销毁时以 null 回调 `onPlayback`」在 Android 侧从未发生，
+  `AndroidPlayback`（AudioTrack + Surface + SurfaceTexture）随页签切走而漏。现在用状态把 factory
+  回调里建的播放器接出来，onDispose 里回调 null + `close()`；`AndroidPlayback.close()` 顺带
+  release 自己包出来的 Surface（TextureView 那侧 `onSurfaceTextureDestroyed` 恒 false、不代放）。
+- **为什么还留着**：完成判据里的「真机实测」没做过 —— 本机没跑 Android 端。
+- **完成判据**：真机（或模拟器）实测：进播放页 → 播放 → 切到别的页签，AudioTrack 已 release
+  （无持续占用的音频会话）。
+
 ## C. 事实未实测，文档里暂无据
 
 ### C1. Android APK 产物路径
@@ -462,7 +426,8 @@
 ### E5. `viewmodel-compose` 依赖引了但全仓零使用
 
 - **现状**：`shared/build.gradle.kts` 引入了 `viewmodel-compose`，但代码里没有 `ViewModel` / `StateFlow`
-  / `collectAsState`。它会误导 agent 以为"项目选了 MVVM"。
+  / `collectAsState`。它会误导 agent 以为"项目选了 MVVM"。2026-10-02 复核仍零使用，且同处引入的
+  `lifecycle-runtimeCompose` 同样零使用（全仓无 `collectAsState*` / `Lifecycle*` 调用），删依赖时一并评估。
 - **完成判据**：确认确实不需要就删掉依赖；需要就先用起来再留。
 
 ---

@@ -120,10 +120,10 @@ class PointerTest {
   @Test
   fun closeShutsDownOwnerThread() {
     val owner = ThreadDispatcher("closing-owner")
-    assertTrue(owner.thread.isAlive, "构造期那次投递已经把线程起起来了")
+    assertTrue(owner.thread.isAlive, "the constructor-time dispatch must have started the thread")
     owner.close()
     owner.thread.join(5_000)
-    assertFalse(owner.thread.isAlive, "close() 之后归属线程应当退出")
+    assertFalse(owner.thread.isAlive, "the owner thread should exit after close()")
   }
 
   /**
@@ -138,10 +138,10 @@ class PointerTest {
   fun closedDispatcherRejectsFreshDispatch() {
     val owner = ThreadDispatcher("rejecting-owner")
     val probe = Probe(0x7AL, owner)
-    assertEquals(0x7AL, runBlocking { probe.withPtr { it } }, "关之前照常")
+    assertEquals(0x7AL, runBlocking { probe.withPtr { it } }, "read works before close")
 
     owner.close()
-    assertTrue(owner.isClosed, "close() 要先把标记立起来")
+    assertTrue(owner.isClosed, "close() must mark closed first")
 
     // 1) 挂起门：走的是 withContext(d)
     val viaSuspend = assertFailsWith<IllegalStateException> { runBlocking { probe.withPtr { it } } }
@@ -174,7 +174,7 @@ class PointerTest {
       }
     shared.close() // 别家把共享的这条关了
     assertFailsWith<IllegalStateException> { probe.close() }
-    assertEquals(0, released, "归还块没机会跑，漏了就得吵出来")
+    assertEquals(0, released, "release block never ran; a missed release must be loud")
   }
 
   /**
@@ -191,10 +191,10 @@ class PointerTest {
       object : Pointer(0x77L, owner, closeDispatcherOnClose = true) {
         override suspend fun releaseImpl(ptr: Long) = Unit
       }
-    assertTrue(owner.thread.isAlive, "还没关，线程应当活着")
+    assertTrue(owner.thread.isAlive, "not closed yet, the thread should be alive")
     runBlocking { probe.closeDeferred().await() }
     owner.thread.join(5_000)
-    assertFalse(owner.thread.isAlive, "声明独占之后，归还落地就该把线程收掉")
+    assertFalse(owner.thread.isAlive, "with closeDispatcherOnClose the thread must be collected once release lands")
   }
 
   /**
@@ -214,7 +214,7 @@ class PointerTest {
           override suspend fun releaseImpl(ptr: Long) = Unit
         }
       runBlocking { probe.closeDeferred().await() }
-      assertTrue(shared.thread.isAlive, "没声明独占就不该动那条 dispatcher")
+      assertTrue(shared.thread.isAlive, "without closeDispatcherOnClose the shared dispatcher must not be touched")
     } finally {
       shared.close()
     }
@@ -238,7 +238,7 @@ class PointerTest {
       }
     probe.close()
     owner.thread.join(5_000)
-    assertFalse(owner.thread.isAlive, "句柄没建过不代表没欠线程")
+    assertFalse(owner.thread.isAlive, "an uninitialized handle still owes a thread shutdown")
   }
 
   /**
@@ -267,7 +267,7 @@ class PointerTest {
       // 从别的线程读（此刻不在归属 dispatcher 上）：照样就地返回、不投递
       val base = counting.dispatches
       assertEquals(0x1234L, probe.ptr)
-      assertEquals(0, counting.dispatches - base, "裸读不该产生任何调度")
+      assertEquals(0, counting.dispatches - base, "raw ptr read must not dispatch")
 
       // 已经在归属 dispatcher 上同理
       val (value, extra) =
@@ -292,7 +292,7 @@ class PointerTest {
 
       assertEquals(0x1234L, handle)
       assertEquals(counting.thread, ranOn)
-      assertEquals(1, counting.dispatches - base, "跨上下文调用应当只投递一次")
+      assertEquals(1, counting.dispatches - base, "a cross-context call must dispatch exactly once")
     }
 
   @Test
@@ -417,8 +417,8 @@ class PointerTest {
     assertFalse(probe.isClosed)
     runBlocking { probe.closeDeferred().await() }
     assertTrue(probe.isClosed)
-    assertTrue(markedWhenRead, "归还动作必须跑在标记之后")
-    assertEquals(0xBEEFL, seen, "归还拿到的应当就是构造参数交的那个句柄")
+    assertTrue(markedWhenRead, "release must run after the closed mark")
+    assertEquals(0xBEEFL, seen, "release must receive the handle given at construction")
   }
 
   /**
@@ -433,7 +433,7 @@ class PointerTest {
   fun threadBoundSubclassClosesThroughBaseDispatcher() {
     val codec = AvCodec(borrowedStream())
     codec.close()
-    assertTrue(codec.isClosed, "关闭必须先标记，哪怕句柄还没建")
+    assertTrue(codec.isClosed, "close must mark first, even when the handle was never built")
   }
 
   /**
@@ -445,8 +445,8 @@ class PointerTest {
   fun closeSkipsReleaseWhenHandleWasNeverBuilt() {
     val probe = ComputedHandle(256L)
     probe.close()
-    assertTrue(probe.isClosed, "关闭要先标记")
-    assertEquals(0, probe.initPtrCalls, "没建过就别为了归还去建")
+    assertTrue(probe.isClosed, "close must mark first")
+    assertEquals(0, probe.initPtrCalls, "close must not build an uninitialized handle just to release it")
     assertEquals(0, probe.releaseCalls)
   }
 
@@ -479,7 +479,10 @@ class PointerTest {
       // 挂起门：从**别的**线程（测试线程）首次读，求值必须被搬到归属线程上
       val viaSuspend = runBlocking(counting) { ComputedHandle(256L, counting) }
       assertEquals(2560L, runBlocking { viaSuspend.withPtr { it } })
-      assertTrue(owner != Thread.currentThread(), "本用例要有意义，归属线程必须不是调用线程")
+      assertTrue(
+        owner != Thread.currentThread(),
+        "this case only makes sense when the owner thread differs from the caller",
+      )
       assertEquals(owner, viaSuspend.initPtrThread)
       assertEquals(1, viaSuspend.initPtrCalls)
 
@@ -551,7 +554,7 @@ class PointerTest {
     var releaseCalls = 0
     val probe =
       object : Pointer(0L) {
-        override fun initPtr(): Long = error("交了句柄就不该再问 initPtr")
+        override fun initPtr(): Long = error("initPtr must not be called when a handle was given")
 
         override suspend fun releaseImpl(ptr: Long) {
           releaseCalls++
@@ -560,6 +563,6 @@ class PointerTest {
     assertEquals(0L, probe.ptr)
     assertEquals(0L, probe.withPtrSync { it })
     runBlocking { probe.closeDeferred().await() }
-    assertEquals(1, releaseCalls, "拿着 0 也一样欠着一次归还")
+    assertEquals(1, releaseCalls, "a 0 handle still owes one release")
   }
 }

@@ -23,8 +23,9 @@ import kotlin.test.assertTrue
  *    ret = av_seek_frame(s, stream_index, ts, flags | dir);
  *    ```
  *
- *    即 **`min_ts` / `max_ts` 在这里被整个丢弃**，只剩 `dir` 从窗口推出来的
- *    `AVSEEK_FLAG_BACKWARD`。
+ *    即窗口本身**不会传给 `av_seek_frame`**（落点仍是 <= ts 的最近关键帧）；
+ *    它只参与两件事：推出 `dir`，以及首次 seek 失败时拿窗口边缘
+ *    （`dir ? max_ts : min_ts`）重试一次再折回 `ts`（seek.c:706-710）。
  * 3. `av_seek_frame` -> `seek_frame_internal` -> `mov_read_seek`
  *    -> `mov_seek_stream`：用 `av_index_search_timestamp(st, ts, flags)` 在索引里
  *    找关键帧，带 `BACKWARD` 时返回 `a`（<= ts 的候选），非关键帧再靠
