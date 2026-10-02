@@ -32,6 +32,9 @@
   也就是说 `soko.ekibun.{quickjs,ffmpeg}` 事实上仍按 JVM-only 写。
 - **方向已定**（用户 2026-09-16 晚）：**不给这两个包开例外** —— 规则保持，把这些 Java 语义
   逐处提到外面（`expect` 一个最小原语、两端各 `actual`），`commonMain` 里最终不剩平台符号。
+- **建议路径**（2026-10-02 评估）：先按 [E6](#e6-把-jni-绑定层抽成-bindings-模块b4-的前置重构)
+  把绑定层抽成 `:bindings` 模块（搬移本身零语义变化、也不合法化这些 import），摘除在
+  新模块里做 —— 新模块的 API 面就是"纯 common 原语 + 平台 source set 放 Java 细节"。
 - **为什么现在没做**：属于独立的一次重构，要和文档改动分开。
 - **完成判据**：上述各处全部去掉；`commonMain` 里搜 `java\.` / `android\.` 结果均为 0。
 - **完成后必须做的收尾**：删掉 `AGENTS.md` §4 里那句"现状…仍有直接引用…见 `TODO.md` B4"
@@ -362,6 +365,24 @@
 - **完成判据**：真机（或模拟器）实测：进播放页 → 播放 → 切到别的页签，AudioTrack 已 release
   （无持续占用的音频会话）。
 
+### B20. 版本目录里 ktor 的版本别名名不副实
+
+- **现状**（2026-10-02 评估发现）：`gradle/libs.versions.toml` 的版本别名
+  `ktorClientOkhttp = "3.5.2"` 同时喂给 `ktor-client-core` 与 `ktor-client-java`
+  （`version.ref = "ktorClientOkhttp"`）—— 别名以某个具体 artifact 命名，读到
+  `ktor-client-core` 挂着 `ktorClientOkhttp` 会误判升级口径。
+- **完成判据**：别名改名 `ktor`（`[versions]` 一处 + `[libraries]` 三处引用同步），
+  三条编译闸门过。
+
+### B21. 测试配置了空源集
+
+- **现状**（2026-10-02 评估发现）：`shared/build.gradle.kts` 配了 `withHostTest`
+  （`isIncludeAndroidResources = true`）与 `withDeviceTestBuilder`，但 `androidMain`
+  **没有任何测试源**；`commonTest.dependencies` 声明了 `kotlin-test`，`commonTest`
+  **目录不存在**。空配置会误导（以为 Android 单测 / common 测试在跑）。
+- **完成判据**：配置与源集一致 —— 要么删掉空配置，要么真补源（`commonTest` 放与
+  JVM/native 无关的纯用例）。
+
 ## C. 事实未实测，文档里暂无据
 
 ### C1. Android APK 产物路径
@@ -404,6 +425,33 @@
 - **完成判据**：整理出项目专有名词表，或明确决定不维护。**若整理，不要放回 `AGENTS.md`**
   —— 它是"要查的时候才看"的资料，放 `.agents/` 下；`AGENTS.md` 只留一行指针。
 
+### D4. 注释规范对齐 animeko（规则入文件 + 存量分期修正）
+
+- **现状**（2026-10-02 评估）：animeko 的 AGENTS.md 有两条本仓没有的注释规则——
+  ①「注释直接描述当前设计、职责、行为与约束，**不要用"不再…""改为…"等措辞叙述开发过程**」，
+  只在解释兼容/迁移确有必要时才提历史；②「用 import，不用全限定名」。本仓是反向文化：
+  日期戳 + 过程叙述遍布（例：`NativeWebView.jvm.kt`「原来的 DOM 桥 2026-09-15 已整套删除」、
+  根 `build.gradle.kts`「2026-09-17 实测，曾因此留了 4 空格缩进」、`shared/build.gradle.kts`
+  挂着「临时」的常驻调试配置）。
+- **做法分两步**：
+  ① 规则写进根 `AGENTS.md` §1（全限定名那条也一并），新注释即合规；
+  ② 存量**分期**修正——动到哪个文件改哪个；可选一轮窄口径专项，只处理「日期戳且已不承重」
+  的纯流水账（如上面那句「临时调试」）。
+- ⚠️ **不做全量一次性改写**：大量历史注释是**承重的陷阱记录**（钩子禁 `grep` 的事故、
+  焦点闸为何必须留），正确变换是「约束先行、历史一句话作证据」，机械改写会丢陷阱知识，
+  且违背 AGENTS.md §1 外科手术原则。
+- **顺带**：根 `build.gradle.kts:30` 的全限定名 `org.jlleitschuh.gradle.ktlint.KtlintExtension`
+  是规则②的现行反例，写规则时顺手改。
+- **完成判据**：规则已入 `AGENTS.md`；抽查之后新增的注释合规。
+
+### D5. 子系统代码地图（学 animeko `docs/contributing/code/`）
+
+- **现状**（2026-10-02 评估）：`.agents/skills/` 覆盖了构建 / 风格 / 陷阱 / 调试，但缺
+  animeko 那种「改子系统前先读它的文档」的入口——FFPlayer 帧队列、web 包两端的窗口挂接链
+  这类知识散在文件头注释里，质量高但没有代码地图，也没有稳定的阅读入口。
+- **完成判据**：为 player、web 两个最常动的子系统各出一页代码地图（术语 + 类职责 +
+  关键链路），放对应 skill 的 `references/` 下，`AGENTS.md` §7 索引表加指针。
+
 ## E. 结构性改进（需要先决策）
 
 ### E2. `:androidApp` 自身编译未纳入构建闸门
@@ -429,6 +477,53 @@
   / `collectAsState`。它会误导 agent 以为"项目选了 MVVM"。2026-10-02 复核仍零使用，且同处引入的
   `lifecycle-runtimeCompose` 同样零使用（全仓无 `collectAsState*` / `Lifecycle*` 调用），删依赖时一并评估。
 - **完成判据**：确认确实不需要就删掉依赖；需要就先用起来再留。
+
+### E6. 把 JNI 绑定层抽成 `:bindings` 模块（B4 的前置重构）
+
+- **方案**（2026-10-02 评估定案）：新建**单个**模块 `:bindings`（目标 `jvm()` + `android {}`，
+  依赖仅 coroutines，**不引 compose**），搬入 `soko/ekibun/jni.kt` +
+  `soko/ekibun/quickjs/`（6 文件）+ `soko/ekibun/ffmpeg/`（10 文件）；`shared` 以
+  `api(project(":bindings"))` 挂接，**包名不变** ⇒ 业务调用点零改动。
+- **边界修正**（与最初设想不同处，评估已定）：
+  ① `soko.ekibun.web` **不搬** —— commonMain `WebView.kt` 是 Compose 契约，native 桥
+  （`NativeWebView.jvm.kt`）在 jvmMain 本已合法；
+  ② `quickjs/Highlight.kt` **先迁出**到 UI 侧（它 import `androidx.compose.ui.*`，是 CodeScreen
+  的语法高亮器；对 quickjs.dll 的 native tokenize 依赖经 `api` 传递照常可用）；
+  ③ **CInterop 排除** —— JVM 目标没有 CInterop（Kotlin/Native 专属），两端都是 JVM 族，
+  JNI 是唯一公共分母（animeko 的 anitorrent 同为手写 JNI）。
+- **与 B4 的关系**：搬移本身**不**合法化 java.* import（9 处跟着代码走）；先机械搬移
+  （零语义变化），B4 的 expect/actual 摘除在新模块里做。
+- **随迁**：jvmTest 的 dll 注入（`shared/build.gradle.kts` 的 `ProcessResources`）与
+  `soko.ekibun.{quickjs,ffmpeg}` 的测试文件搬到新模块；`desktopApp` 打包的 dll 落位引用同步改。
+- **为什么现在没做**：一次性重构，与业务改动分开。
+- **完成判据**：三条编译闸门 + `:shared:jvmTest` 全绿；`shared` 的源集里不再有
+  `soko.ekibun.{quickjs,ffmpeg}` 源文件。
+
+### E7. cxx 构建接进 Gradle（把「dll 手工同步」变成机器闸门）
+
+- **现状**：`shared/build.gradle.kts` 的 `jvmTestProcessResources` 从 `cxx/build/bin` 抓 dll，
+  运行位落位靠 skill `dll-sync` 的人肉清单；[project-traps](./.agents/skills/project-traps/SKILL.md)
+  把「改过 native 却用着旧 dll」列为头号静默失效。animeko 把 native 做成了 Gradle 模块
+  （anitorrent），我们不需要走到那一步。
+- **分两档**：
+  - **档一（先做，数小时）**：`verifyDll`（比对 `cxx/build/bin` 与各落位的 hash/mtime，
+    过期即 fail）+ `syncDll` 两个 task；skill `build-and-test` / `dll-sync` 改为引用 task。
+  - **档二（可选，1-2 天）**：gradle task 驱动 cmake 编 Windows 目标，产物直接喂
+    jvmTest 资源与 desktopApp 打包 —— 从此「忘记先编 cxx」在构建期就暴露。
+- ⚠️ **不要绑 Android NDK** —— 那是 [E3](#e3-android-侧-native-没有构建入口) 的独立决策，别搭车。
+- **完成判据**：改了 `cxx/` 不重编时，闸门/测试给出**明确的失败**，而不是静默用旧 dll。
+
+### E8. 领域架构落地（数据结构 + WebView 前后台）
+
+- **现状**：设计定稿于 [docs/architecture.md](./docs/architecture.md)
+  （2026-10-02，调研纪要见 [docs/research-2026-10-02.md](./docs/research-2026-10-02.md)），未落地。
+- **落地顺序**（architecture.md §5）：`epochTimeMs()` 墙钟原语 + kotlinx-serialization 依赖
+  （**改依赖需用户确认**）→ `acg.model` 领域类型 → `acg.catalog.bgm`（DTO + mapper + 限流退避）
+  → 持久化分片 + 收藏/历史仓库 → `HtmlParser` 宿主原语 + JS 数据源契约 + Line 绑定 →
+  业务四页 → WebView 投前台（悬浮按钮方案，先 Android 验证、桌面动 C++ 摘 `background` 标志）
+  → P2：AniList mapper / per-episode 精确进度 / animeko 订阅兼容解释器 / 边播边缓存 / torrent。
+- **完成判据**：按 §5 分条验收，每条落地后回来更新本条状态；全部落地后删条目
+  （设计文档随实现修订，不删）。
 
 ---
 
