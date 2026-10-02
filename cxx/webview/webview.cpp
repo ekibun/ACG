@@ -27,10 +27,11 @@
 //      的消息也只会在创建它的线程上派发。JNI 是从随便哪条 JVM 线程进来的，所以
 //      一切「建窗口 / 调 COM」都经由 `postTask()` 投到 WebView 线程执行。
 //
-//   3. WebView2 的事件回调**一律不直接干活**，而是 `postTask` 出去再干 —— 在
+//   3. WebView2 的事件回调**默认不直接干活**，而是 `postTask` 出去再干 —— 在
 //      COM 回调里 `Close()` controller 是文档明确不支持的（可能死锁）。
-//      唯一的例外是请求拦截回调，它必须**同步**给出结论
-//      （见 RequestHandler::Invoke）。
+//      要求在回调里当场给结论的是两处例外：请求拦截（`RequestHandler::Invoke`
+//      必须同步决定放行还是给响应）与新窗口请求（`NewWindowHandler::Invoke`
+//      同步 `put_Handled` 并就地导航）。
 //
 // WebView2Loader.dll 不引入 import lib，运行时按「已加载 → 本 DLL 同目录 →
 // 裸名字」的顺序 `LoadLibrary`。JNI 库是被 `System.load` 到临时目录的，
@@ -94,7 +95,7 @@ static bool debugEnabled() {
   return on || logFile() != nullptr;
 }
 
-/** 日志用的相对时间戳（从模块加载算起）。看时序问题全靠它。 */
+/** 日志用的相对时间戳（从**首次调用**算起）。看时序问题全靠它。 */
 static long long logNowMs() {
   static const auto start = std::chrono::steady_clock::now();
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -102,21 +103,21 @@ static long long logNowMs() {
       .count();
 }
 
-#define WV_LOG(...)                                                 \
-  do {                                                              \
-    if (debugEnabled()) {                                           \
-      if (FILE* lf_ = logFile()) {                                  \
-        std::fprintf(lf_, "[acg-webview +%lldms] ", logNowMs());    \
-        std::fprintf(lf_, __VA_ARGS__);                             \
-        std::fprintf(lf_, "\n");                                    \
-        std::fflush(lf_);                                           \
-      } else {                                                      \
-        std::fprintf(stderr, "[acg-webview +%lldms] ", logNowMs()); \
-        std::fprintf(stderr, __VA_ARGS__);                          \
-        std::fprintf(stderr, "\n");                                 \
-        std::fflush(stderr);                                        \
-      }                                                             \
-    }                                                               \
+#define WV_LOG(...)                                             \
+  do {                                                          \
+    if (debugEnabled()) {                                       \
+      if (FILE* lf_ = logFile()) {                              \
+        std::fprintf(lf_, "[webview +%lldms] ", logNowMs());    \
+        std::fprintf(lf_, __VA_ARGS__);                         \
+        std::fprintf(lf_, "\n");                                \
+        std::fflush(lf_);                                       \
+      } else {                                                  \
+        std::fprintf(stderr, "[webview +%lldms] ", logNowMs()); \
+        std::fprintf(stderr, __VA_ARGS__);                      \
+        std::fprintf(stderr, "\n");                             \
+        std::fflush(stderr);                                    \
+      }                                                         \
+    }                                                           \
   } while (0)
 
 // ---------------------------------------------------------------------------
@@ -656,7 +657,6 @@ struct View {
   RECT pendingBounds{-1, -1, -1, -1};
   bool hasPendingBounds = false;
   std::wstring pendingUrl;
-  std::vector<std::wstring> pendingHeaders;
   /**
    * 还剩几次焦点重试（见 [requestWebViewFocus]）。只在 WebView 线程上读写。
    */
@@ -838,7 +838,7 @@ static bool webViewAlreadyHasKeyboardFocus(HWND host) {
 
 /**
  * 把键盘焦点送进
- WebView2。**这是「能点不能打字」的唯一解**，细节都是探针实测出来的。
+ WebView2。**焦点不送进来就是「能点不能打字」**，细节都是探针实测出来的。
  *
  * ## 为什么必须显式做
  *
@@ -858,8 +858,9 @@ static bool webViewAlreadyHasKeyboardFocus(HWND host) {
  *
  * 点击落在最里层（`WindowFromPoint` 就是 `Chrome_RenderWidgetHostHWND`）。而
  * `WM_MOUSEACTIVATE` / `WM_PARENTNOTIFY` **只到直接父窗口** —— 也就是
- * `Chrome_WidgetWin_0`。它们**永远到不了我们的宿主**（探针里真实点击之后宿主一条都没收到，
- * 只有建控制器时的 `WM_PARENTNOTIFY code=1`(WM_CREATE)）。
+ * `Chrome_WidgetWin_0`。**落在页面里的**点击，这两条消息永远到不了我们的宿主（探针里真实
+ * 点击之后宿主一条都没收到，只有建控制器时的 `WM_PARENTNOTIFY
+ code=1`(WM_CREATE)）。
  * 因此「点击 → 父窗口收消息 → SetFocus」这条经典路子对 WebView2
  是**结构性失效**的，
  * 别再往这个方向使劲。
@@ -874,7 +875,7 @@ static bool webViewAlreadyHasKeyboardFocus(HWND host) {
  焦点桥
  *   整个删掉之后键盘依然正常，说明这条链能独立走通。
  * 2. AWT 组件 `focusGained` → `nativeViewFocus`（见
- `AcgWebView.jvm.kt`），兜底。
+ `WebView.jvm.kt`），兜底。
  *
  * （曾经还有一条「页面侧 DOM 桥」：页面按下/聚焦就 post 一条 `acg:focus` 回来。
  * 它在输入队列**没有**提前接上的年代是唯一能用的路 ——
@@ -1091,7 +1092,6 @@ static const wchar_t* kWindowClass = L"AcgNativeWebViewHost";
  */
 static std::atomic<HWND> g_dispatcher{nullptr};
 static std::thread g_thread;
-static std::atomic<bool> g_threadRunning{false};
 /**
  * WebView 线程的 tid。
  *
@@ -1169,7 +1169,6 @@ enum ViewEvent {
   kViewTitle = 4,    // a = title
   kViewHistory = 5,  // a = "1"/"0" canGoBack, b = canGoForward
   kViewFailed = 6,   // a = 失败原因
-  kViewDestroyed = 7,
 };
 
 static void notifyBackgroundFinished(jlong token, const std::wstring& json,
@@ -1285,7 +1284,8 @@ static void destroyView(HWND hwnd) {
   view->newWindowHandler.Reset();
   view->processFailedHandler.Reset();
   view->env2.Reset();
-  // Close() 必须不在 COM 回调里调 —— 这里已经跑在 postTask 出来的上下文里了。
+  // 不能在 WebView2 的事件回调里调 Close()（官方限制）。本函数的两条调用路径
+  // （postTask 出来的任务、nativeStop 的同步任务）都不是回调。
   if (view->controller) {
     view->controller->Close();
     view->controller.Reset();
@@ -1293,7 +1293,7 @@ static void destroyView(HWND hwnd) {
   if (view->hwnd && IsWindow(view->hwnd)) {
     // 注意：可见视图的窗口是 AWT 组件的子窗口。如果 AWT 那侧先没了，窗口会被
     // 系统一起销毁 —— 所以组合层必须在组件 dispose 之前调 `destroyView`
-    // （`AcgWebView` 的 `onDispose` 就是这个顺序）。这里的 IsWindow 只是兜底，
+    // （`WebView` 的 `onDispose` 就是这个顺序）。这里的 IsWindow 只是兜底，
     // 挡掉「句柄已经失效」的情况。
     DestroyWindow(view->hwnd);
   }
@@ -1820,11 +1820,8 @@ class ProcessFailedHandler final
 struct ViewOptions {
   jlong token = 0;
   std::wstring userAgent;
-  std::wstring script;  // 死字段：既没有赋值点也没有读取点（`opt.script`
-                        // 全文件只此一行）
   // 初始 URL；空 → 不导航（停在 about:blank）
   std::wstring url;
-  std::vector<std::wstring> headers;
   bool enableDevtools = false;
   bool allowNewWindow = false;
   double zoom = 1.0;
@@ -2062,26 +2059,9 @@ static void configureView(const std::shared_ptr<View>& view,
     // 建视图时还没就绪就已经有 loadUrl 调过来了：用它覆盖初始 URL。
     view->webview->Navigate(view->pendingUrl.c_str());
   } else if (!opt.url.empty()) {
-    ComPtr<ICoreWebView2_2> webview2;
-    bool navigated = false;
-    if (view->env2 && !opt.headers.empty() &&
-        SUCCEEDED(webview->QueryInterface(
-            IID_ICoreWebView2_2,
-            reinterpret_cast<void**>(webview2.GetAddressOf())))) {
-      ComPtr<ICoreWebView2WebResourceRequest> request;
-      const std::wstring headerBlock = buildHeaderBlock(opt.headers);
-      if (SUCCEEDED(view->env2->CreateWebResourceRequest(
-              opt.url.c_str(), L"GET", nullptr, headerBlock.c_str(),
-              request.GetAddressOf())) &&
-          request) {
-        navigated =
-            SUCCEEDED(webview2->NavigateWithWebResourceRequest(request.Get()));
-      }
-    }
-    // 没有 ICoreWebView2_2（或那个带头的请求没建出来）就退回普通 Navigate ——
-    // 这条路带不了自定义 header。
-    if (!navigated) navigated = SUCCEEDED(webview->Navigate(opt.url.c_str()));
-    if (!navigated)
+    // 建视图时的初始导航只走无头 Navigate —— 带头那条路在 `nativeViewLoadUrl`
+    // （控制器就绪之后的 `loadUrl`），建视图时没有传 header 的入口。
+    if (FAILED(webview->Navigate(opt.url.c_str())))
       notifyViewEvent(view->hwnd, kViewFailed, L"导航调用失败", L"");
   }
 }
@@ -2273,7 +2253,6 @@ static void webViewThreadMain() {
     CoUninitialize();
     return;
   }
-  g_threadRunning = true;
 
   if (!ensureLoader()) {
     failEnvInit(L"找不到 WebView2Loader.dll（应和 webview.dll 放在同一目录）");
@@ -2317,7 +2296,6 @@ static void webViewThreadMain() {
   g_env.Reset();
   g_dispatcher.store(nullptr);
   g_threadId.store(0);
-  g_threadRunning = false;
   CoUninitialize();
 }
 
@@ -2360,10 +2338,10 @@ static std::wstring ensureStarted(const std::wstring& userDataDir,
 }
 
 // ---------------------------------------------------------------------------
-// JNI 导出。Java 侧：soko.ekibun.acg.web.NativeWebView（Kotlin object）
+// JNI 导出。Java 侧：soko.ekibun.web.NativeWebView（Kotlin object）
 // ---------------------------------------------------------------------------
 #define WV_JNI(ret, name) \
-  extern "C" JNIEXPORT ret JNICALL Java_soko_ekibun_acg_web_NativeWebView_##name
+  extern "C" JNIEXPORT ret JNICALL Java_soko_ekibun_web_NativeWebView_##name
 #define WV_JNI_PARAMS JNIEnv *env, jobject
 
 /** 从 JVM 的 String[] 读摊平的头。 */
@@ -2533,15 +2511,12 @@ WV_JNI(void, nativeCancel)(JNIEnv*, jobject, jlong id) {
  * peer/HWND）之后， 再调 `nativeViewAttach(handle, canvas)` 把它挂上去，由
  * `nativeViewFitToParent` 负责尺寸。
  *
- * `parentHwnd` 保留在签名里只为兼容旧调用点，实际**不用** —— 父窗口是 attach
- * 时现取的（AWT 组件的 peer 在 attach 之前可能都还没建）。
- *
  * 建窗口必须在 WebView 线程上（窗口消息只在创建它的线程派发），所以这里同步等
  * 一下 —— 纯建窗口，没有 COM 调用，正常是微秒级。
  */
-WV_JNI(jlong, nativeCreateView)(JNIEnv* env, jobject, jlong parentHwnd,
-                                jstring userAgent, jstring url,
-                                jboolean enableDevtools, jdouble zoom) {
+WV_JNI(jlong, nativeCreateView)(JNIEnv* env, jobject, jstring userAgent,
+                                jstring url, jboolean enableDevtools,
+                                jdouble zoom) {
   {
     std::lock_guard<std::mutex> lock(g_envMutex);
     if (!g_envDone || !g_envError.empty()) return 0;
@@ -2554,7 +2529,6 @@ WV_JNI(jlong, nativeCreateView)(JNIEnv* env, jobject, jlong parentHwnd,
   opt.url = toWide(env, url);
   opt.enableDevtools = enableDevtools == JNI_TRUE;
   opt.zoom = zoom;
-  (void)parentHwnd;  // 父窗口在 nativeViewAttach 里现取
 
   if (!runSync(
           [view, opt] {
@@ -2707,7 +2681,6 @@ WV_JNI(void, nativeViewLoadUrl)(JNIEnv* env, jobject, jlong handle, jstring url,
     if (!view->ready || !view->webview) {
       // 控制器还没就绪：先存着，configureView 里补上。
       view->pendingUrl = u;
-      view->pendingHeaders = h;
       return;
     }
     if (!h.empty() && view->env2) {
@@ -2726,16 +2699,6 @@ WV_JNI(void, nativeViewLoadUrl)(JNIEnv* env, jobject, jlong handle, jstring url,
       }
     }
     view->webview->Navigate(u.c_str());
-  });
-}
-
-WV_JNI(void, nativeViewLoadHtml)(JNIEnv* env, jobject, jlong handle,
-                                 jstring html) {
-  const HWND hwnd = reinterpret_cast<HWND>(static_cast<intptr_t>(handle));
-  const std::wstring body = toWide(env, html);
-  postTask([hwnd, body] {
-    std::shared_ptr<View> view = findView(hwnd);
-    if (view && view->webview) view->webview->NavigateToString(body.c_str());
   });
 }
 
@@ -2790,111 +2753,6 @@ WV_JNI(void, nativeViewEvaluate)(JNIEnv* env, jobject, jlong handle,
 WV_JNI(void, nativeViewFocus)(JNIEnv*, jobject, jlong handle) {
   const HWND hwnd = reinterpret_cast<HWND>(static_cast<intptr_t>(handle));
   postTask([hwnd] { requestWebViewFocus(hwnd, 2); });
-}
-
-/**
- * 探针：在**另一条** STA + 消息泵的线程上，用「在 WebView 线程上建出来的
- * environment」 建一个控制器。
- *
- * 动机：想把可见视图改成 wvbridge 那样**建在 AWT
- * 线程上**（父子同线程，焦点链天然连通，就不需要 `AttachThreadInput`
- * 那套），同时让后台视图留在 WebView 线程上 （脚本抓页面不该占用 UI
- * 线程）。但两边必须共用**同一个 environment** —— cookie 是按 user data folder
- * 分的，两个 environment 就是两套登录态。
- *
- * 官方文档只写了「控制器必须建在有消息泵的 UI
- * 线程上、所有调用都得在那条线程」，
- * **没写一个 environment 能不能跨两个 UI 线程**。这条探针就是补上这个答案。
- *
- * @return 创建回调收到的 HRESULT；0 (S_OK) = 这个架构可行。
- */
-namespace {
-
-/** 探针等「跨线程建控制器」回调的上界；超时当失败，不让 join 挂死。 */
-#define PROBE_TIMEOUT_MS 25000
-
-std::atomic<HRESULT> g_probeHr{E_FAIL};
-std::atomic<bool> g_probeDone{false};
-
-struct ProbeControllerHandler final
-    : public ComCallback<
-          ICoreWebView2CreateCoreWebView2ControllerCompletedHandler> {
-  ProbeControllerHandler()
-      : ComCallback(
-            IID_ICoreWebView2CreateCoreWebView2ControllerCompletedHandler) {}
-
-  HRESULT STDMETHODCALLTYPE
-  Invoke(HRESULT errorCode, ICoreWebView2Controller* controller) override {
-    WV_LOG(
-        "probe: 跨线程 CreateCoreWebView2Controller 回调 hr=0x%08lX "
-        "controller=%p",
-        static_cast<unsigned long>(errorCode), static_cast<void*>(controller));
-    g_probeHr.store(errorCode);
-    // 探针不留东西：拿到就关掉。Close
-    // 的收尾要继续抽消息，所以下面还会泵一会儿。
-    if (controller) controller->Close();
-    g_probeDone.store(true);
-    return S_OK;
-  }
-};
-
-void probeThreadMain() {
-  CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  struct Uninit {
-    ~Uninit() { CoUninitialize(); }
-  } uninit;
-
-  const HWND hwnd = createViewWindow(nullptr, true);
-  if (!hwnd) {
-    WV_LOG("probe: 建窗口失败 err=%lu", GetLastError());
-    g_probeHr.store(HRESULT_FROM_WIN32(GetLastError()));
-    g_probeDone.store(true);
-    return;
-  }
-
-  auto* handler = new (std::nothrow) ProbeControllerHandler();
-  HRESULT hr = E_FAIL;
-  {
-    std::lock_guard<std::mutex> lock(g_envMutex);
-    if (g_env && handler)
-      hr = g_env->CreateCoreWebView2Controller(hwnd, handler);
-  }
-  if (handler) handler->Release();
-  WV_LOG("probe: CreateCoreWebView2Controller 调用返回 hr=0x%08lX",
-         static_cast<unsigned long>(hr));
-  if (FAILED(hr)) {
-    g_probeHr.store(hr);
-    g_probeDone.store(true);
-  }
-
-  // 回调要靠这条线程自己抽消息才会到 —— 这正是「UI 线程必须有消息泵」的含义。
-  const DWORD deadline = GetTickCount() + PROBE_TIMEOUT_MS;
-  MSG msg{};
-  while (!g_probeDone.load() &&
-         static_cast<int>(GetTickCount() - deadline) < 0) {
-    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-      TranslateMessage(&msg);
-      DispatchMessageW(&msg);
-    }
-    if (!g_probeDone.load())
-      MsgWaitForMultipleObjects(0, nullptr, FALSE, 30, QS_ALLINPUT);
-  }
-  if (!g_probeDone.load()) {
-    WV_LOG("probe: 等不到创建回调（超时 %dms）", PROBE_TIMEOUT_MS);
-    g_probeHr.store(HRESULT_FROM_WIN32(WAIT_TIMEOUT));
-  }
-
-  DestroyWindow(hwnd);
-}
-
-}  // namespace
-
-WV_JNI(jint, nativeProbeCrossThreadController)(JNIEnv*, jobject) {
-  g_probeHr.store(E_FAIL);
-  g_probeDone.store(false);
-  // 线程自己有超时上界，join 不会挂死。
-  std::thread(probeThreadMain).join();
-  return static_cast<jint>(g_probeHr.load());
 }
 
 /**
@@ -2960,7 +2818,6 @@ WV_JNI(void, nativeStop)(WV_JNI_PARAMS) {
       g_thread.detach();
       // 让后续的 postTask 直接失败，而不是静默投给一个已经没人抽的消息泵。
       g_dispatcher.store(nullptr);
-      g_threadRunning = false;
     }
   }
 

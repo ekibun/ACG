@@ -21,10 +21,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import soko.ekibun.acg.web.AcgWebView
-import soko.ekibun.acg.web.AcgWebViewState
-import soko.ekibun.acg.web.WebViewLoadingState
-import soko.ekibun.acg.web.rememberAcgWebViewState
+import soko.ekibun.web.WebView
+import soko.ekibun.web.WebViewLoadingState
+import soko.ekibun.web.WebViewState
+import soko.ekibun.web.rememberWebViewState
 
 /**
  * 固定站点页面的默认地址。换站点只改这一个常量（或从外部传 [WebScreen] 的 homeUrl）。
@@ -32,10 +32,10 @@ import soko.ekibun.acg.web.rememberAcgWebViewState
 const val WEBVIEW_HOME_URL: String = "https://www.bing.com"
 
 /**
- * 跨端 WebView 页面：固定站点 + 顶部进度条 + 前进/后退/刷新工具条。
+ * 跨端 WebView 页面：顶部进度条 + 前进/后退/刷新工具条。首屏加载 [WEBVIEW_HOME_URL]。
  *
  * - Android：[android.webkit.WebView]
- * - 桌面(Windows)：自研 C++ 宿主里的 WebView2（见 `soko.ekibun.acg.web`）
+ * - 桌面(Windows)：自研 C++ 宿主里的 WebView2（见 `soko.ekibun.web`）
  *
  * 桌面端必须跑在**基于 AWT 的窗口**里（compose.desktop 的 `application { Window(...) }`，
  * 见 `desktopApp/main.kt`）：原生视图是个真的 Win32 窗口，靠 JAWT 从 AWT 组件（`SwingPanel`
@@ -51,7 +51,7 @@ fun WebScreen(
   homeUrl: String = WEBVIEW_HOME_URL,
 ) {
   val state =
-    rememberAcgWebViewState(homeUrl) {
+    rememberWebViewState(WEBVIEW_HOME_URL) {
       // F12 开发者工具，调试页面时很有用；发布可关掉。
       enableDevtools = true
       // 页面自己弹新窗口会另开一个原生窗口，这个页面就不受控了。
@@ -60,7 +60,7 @@ fun WebScreen(
 
   Surface(modifier = modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize()) {
-      WebToolbar(state = state, homeUrl = homeUrl)
+      WebToolbar(state = state)
 
       val loading = state.loadingState
       if (loading is WebViewLoadingState.Loading) {
@@ -75,7 +75,7 @@ fun WebScreen(
       Box(
         modifier = Modifier.fillMaxWidth().weight(1f),
       ) {
-        AcgWebView(
+        WebView(
           state = state,
           modifier = Modifier.fillMaxSize(),
         ) {
@@ -89,10 +89,7 @@ fun WebScreen(
 }
 
 @Composable
-private fun WebToolbar(
-  state: AcgWebViewState,
-  homeUrl: String,
-) {
+private fun WebToolbar(state: WebViewState) {
   Row(
     modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
     verticalAlignment = Alignment.CenterVertically,
@@ -109,9 +106,6 @@ private fun WebToolbar(
       onClick = { state.navigateForward() },
     ) {
       Text(">")
-    }
-    TextButton(onClick = { state.loadUrl(homeUrl) }) {
-      Text("home")
     }
     if (state.isLoading) {
       TextButton(onClick = { state.stopLoading() }) {

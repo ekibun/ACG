@@ -102,7 +102,7 @@ git 对**没有执行位的 hook 是静默跳过**的。
 #   shared/build/test-results/jvmTest/TEST-*.xml  ->  tests= / skipped= / failures= / errors=
 
 # 单个类 / 单个方法（路径就是真实包名）—— 只改了某一处、想快点验证时用
-./gradlew :shared:jvmTest --tests "soko.ekibun.acg.web.NativeWebViewHostTest"
+./gradlew :shared:jvmTest --tests "soko.ekibun.web.NativeWebViewHostTest"
 ./gradlew :shared:jvmTest --tests "soko.ekibun.quickjs.QuickJSTest.objectWithVariousTagsRoundTrips"
 ```
 

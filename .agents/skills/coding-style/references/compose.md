@@ -77,7 +77,7 @@ fun FancyButton(
 
 - **UI 状态沿用 `remember { mutableStateOf(...) }` + `by` 委托**，需要跨重组存活的复杂状态放在
   普通 class 里用 `mutableStateOf` + `internal set`，由同文件的 `rememberXxxState()` 工厂创建
-  （参考 `shared/src/commonMain/kotlin/soko/ekibun/acg/web/AcgWebView.kt`）。
+  （参考 `shared/src/commonMain/kotlin/soko/ekibun/web/WebView.kt`）。
 - 本仓库**没有**使用 `ViewModel` / `StateFlow` / `collectAsState`。**不要**为了「架构更正确」而引入
   它们；真有跨屏共享状态需求时先讨论。注意 `shared/build.gradle.kts` 里引了 `viewmodel-compose`
   但全仓零使用 —— 那是遗留依赖，不要把它当成「项目选了 MVVM」的信号。

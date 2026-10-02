@@ -41,15 +41,21 @@
   - 其中一处**不只是注释错**：`QuickJS.Context.reuseWrapper` 漏了 `dup()`（复用的包装
     没给调用方记票 → 谁先 `free()` 谁就把别人的包装一起销毁）。已修，并同步订正 skill
     `quickjs-ownership` 的契约描述。
-- **还没做的**：剩 **10 处「过度断言」**（方向大体不误，但有反例或绝对化，本轮未动）：
-  `webview.cpp:36-38`（"事件回调一律不直接干活，唯一例外…"）、`:1293`（"必须不在 COM 回调里调"）、
-  `:866`（"永远到不了宿主" → 准确说法是"落在**页面上**的到不了"）、`:847`（"唯一解"）、
-  `:103`（"从模块加载算起" → 实为首次调用时起算）、`ffmpeg.cpp:209`（说 `opaque` 是
+- **2026-10-02 清掉的一批（9 处：webview 5 + 测试 4）**：
+  - `webview.cpp`：文件头「事件回调**一律不直接干活**，唯一的例外是请求拦截」→ 改成「**默认**不直接
+    干活，要求当场给结论的是**两处**例外（请求拦截 + 新窗口请求）」；`destroyView` 的「`Close()` 必须
+    不在 COM 回调里调」→「不能**在 WebView2 的事件回调里**调（本函数两条路径都不是回调）」；
+    「**永远到不了我们的宿主**」→ 限定成「落在**页面里**的点击」（落在宿主自己身上的收得到）；
+    「这是「能点不能打字」的**唯一解**」→「**焦点不送进来就是**「能点不能打字」」；`logNowMs` 的
+    「从模块加载算起」→「从**首次调用**算起」。
+  - `NativeWebViewHostTest.kt`：4 处数字（「三件」/「三个用例」/「三次用例」/「三条用例」）改成不写
+    个数的说法（现有 4 个用例），并补上漏掉的第 4 条清单；:311 那句「跨线程失败」随跨线程探针用例
+    一并删除（结论已进 skill `webview2-windows` 第 12 节）。
+- **还没做的**：剩 **3 处**（方向大体不误，但有反例或绝对化）：`ffmpeg.cpp:209`（说 `opaque` 是
   "FFmpeg 保留" → 上游写明是给用户的）、`SeekWindowSemanticsTest.kt:26`（"整个丢弃" →
-  上游首次失败会拿窗口重试一次）、`NativeWebViewHostTest.kt:28/:37/:347`（"三件/三个用例" →
-  现有 5 个）、`:311`（"跨线程失败"）、`HttpSeekSemanticsTest.kt:10-15`
+  上游首次失败会拿窗口重试一次）、`HttpSeekSemanticsTest.kt:10-15`
   （"没法在单测里构造真实响应" → 同仓已有真起 `HttpServer` 的用例）。
-- **完成判据**：上面 10 处改完，A1 结案。
+- **完成判据**：上面 3 处改完，A1 结案。
 - **结案后必须做的收尾**（**动手前要先经用户明确确认**）：删掉 `AGENTS.md` **§4 末条**
   （"代码注释可能已过时甚至被证伪…读到先当线索、不当结论"）—— 一条长期成立的"别信注释"规则
   本身是坏味道，会训练 agent 忽略有用信号。
@@ -77,20 +83,6 @@
 - **完成判据**：上述 12 处全部去掉；`commonMain` 里搜 `java\.` / `android\.` 结果均为 0。
 - **完成后必须做的收尾**：删掉 `AGENTS.md` §4 里那句"现状…仍有直接引用…见 `TODO.md` B4"
   的指针（届时规则已无例外），并删掉本条。
-
-### B6. `ViewOptions::script` 是死字段
-
-- **现状**：`cxx/webview/webview.cpp` 的 `ViewOptions::script` 既没有赋值点也没有读取点
-  （后台视图用的是 `View::script`，见 `nativeRun`；`configureView` 只读 `opt.url`）。
-- **完成判据**：删掉它，或明确它要给谁用。
-
-### B7. 桌面端 `allowNewWindow` 未接
-
-- **现状**：`WebViewConfig.allowNewWindow` 只对 Android 生效（`setSupportMultipleWindows`）；
-  桌面宿主的 `nativeCreateView` 没有这个参数，`ViewOptions::allowNewWindow` 恒为默认 `false`。
-  用户 2026-09-19 拍板**两端都先取 `false`** —— 所以当前行为是对的，只是这个旋钮在桌面端是死的
-  （`AcgWebView.kt` 的 KDoc 已注明）。
-- **完成判据**：真要桌面端也能弹新窗口时，给 `nativeCreateView` 加参数打通；否则保持现状。
 
 ### B8. seek 后的丢帧收敛没有真路径回归测试
 
@@ -449,13 +441,6 @@
   —— 它是"要查的时候才看"的资料，放 `.agents/` 下；`AGENTS.md` 只留一行指针。
 
 ## E. 结构性改进（需要先决策）
-
-### E1. webview 的 JNI 绑定迁移
-
-- **现状**：`NativeWebView.jvm.kt` 仍在 `soko.ekibun.acg.web`，与"所有 native 绑定统一收在
-  `soko.ekibun.*`"的规则不符（`quickjs` / `ffmpeg` / `jni.kt` 已经在那儿）。
-- **完成判据**：迁到 `soko.ekibun` 下。`AGENTS.md` 侧**不用再改** —— 原书写"去掉「待迁移」"，
-  但该措辞已随 2026-09-16 的瘦身清掉（状态词计数已归零），§3 那句现在就是最终形态。
 
 ### E2. `:androidApp` 自身编译未纳入构建闸门
 

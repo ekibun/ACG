@@ -1,4 +1,4 @@
-package soko.ekibun.acg.web
+package soko.ekibun.web
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
@@ -29,7 +29,6 @@ public object NativeWebView {
   public const val EVENT_TITLE: Int = 4
   public const val EVENT_HISTORY: Int = 5
   public const val EVENT_FAILED: Int = 6
-  public const val EVENT_DESTROYED: Int = 7
 
   // ---- 和 webview.cpp 的 nativeViewAction 编号一一对应 ----
   public const val ACTION_BACK: Int = 0
@@ -39,36 +38,59 @@ public object NativeWebView {
   public const val ACTION_DEVTOOLS: Int = 4
 
   /**
+   * App 在启动时显式指定的 user data folder；null 表示用 [defaultUserDataDir] 的
+   * 回退链（测试 / 没有桌面入口的场景）。见 [setUserDataDir]。
+   */
+  private var userDataDirOverride: File? = null
+
+  /**
+   * 在 App 启动时显式指定 user data folder —— 对齐 Android 由 App 提供 `Context`
+   * 的模式：**目录由 App 层决定，web 组件不自己猜**。必须在首次 [ensureStarted]
+   * 之前调用（native 的环境建出来之后目录就定了，之后的调用无效并吭一声）。
+   * 不设置则用 [userDataDir] 的默认回退链。
+   */
+  public fun setUserDataDir(dir: File) {
+    if (startResult != null) {
+      System.err.println("[webview] setUserDataDir 在环境启动之后被调用，已忽略：${dir.path}")
+      return
+    }
+    userDataDirOverride = dir
+  }
+
+  /**
    * user data folder。
    *
    * **可见页和后台页必须共用这一份** —— WebView2 的 cookie 存储是按
    * user data folder 分的，目录不同就是两套登录态。
    *
-   * 位置还必须**稳定**：以前 `LOCALAPPDATA` 取不到就直接退到 `java.io.tmpdir`，
+   * 默认位置还必须**稳定**：以前 `LOCALAPPDATA` 取不到就直接退到 `java.io.tmpdir`，
    * 而在 MSYS2 / Gradle 起的 JVM 里那可能是 `C:\msys64\tmp` —— 每跑一次都是新的
    * cookie 罐子，「可见页与后台页共享登录态」这件事在测试里根本验不出来。
    * 所以改成逐级往下找可写的目录，tmp 只当最后兜底（并且会吭一声）。
+   * 桌面 App 启动时会用 [setUserDataDir] 显式覆盖。
    */
   public val userDataDir: File by lazy {
-    val home = System.getProperty("user.home").orEmpty()
-    val base =
-      listOfNotNull(
-        System.getenv("LOCALAPPDATA")?.takeIf { it.isNotBlank() },
-        home.takeIf { it.isNotBlank() }?.let { File(it, "AppData/Local").path },
-        home.takeIf { it.isNotBlank() },
-      ).map(::File).firstOrNull { it.isDirectory && it.canWrite() }
-        ?: File(System.getProperty("java.io.tmpdir")).also {
-          System.err.println(
-            "[acg-webview] LOCALAPPDATA 与 user.home 都不可用，user data folder 退到 " +
-              "${it.path} —— cookie / 登录态不会跨进程保留",
-          )
-        }
-
-    File(base, "ACG/webview2").also { dir ->
-      if (!dir.isDirectory && !dir.mkdirs() && !dir.isDirectory) {
-        System.err.println("[acg-webview] 建不出 user data folder：${dir.path}")
-      }
+    val dir = (userDataDirOverride ?: defaultUserDataDir()).let { File(it, "webview2") }
+    if (!dir.isDirectory && !dir.mkdirs() && !dir.isDirectory) {
+      System.err.println("[webview] 建不出 user data folder：${dir.path}")
     }
+    dir
+  }
+
+  /** 默认回退链：`LOCALAPPDATA` → `user.home/AppData/Local` → `user.home` → tmp（吭一声）。 */
+  private fun defaultUserDataDir(): File {
+    val home = System.getProperty("user.home").orEmpty()
+    return listOfNotNull(
+      System.getenv("LOCALAPPDATA")?.takeIf { it.isNotBlank() },
+      home.takeIf { it.isNotBlank() }?.let { File(it, "AppData/Local").path },
+      home.takeIf { it.isNotBlank() },
+    ).map(::File).firstOrNull { it.isDirectory && it.canWrite() }
+      ?: File(System.getProperty("java.io.tmpdir")).also {
+        System.err.println(
+          "[webview] LOCALAPPDATA 与 user.home 都不可用，user data folder 退到 " +
+            "${it.path} —— cookie / 登录态不会跨进程保留",
+        )
+      }
   }
 
   internal val callbacks = Callbacks()
@@ -132,16 +154,6 @@ public object NativeWebView {
     runCatching { nativeRuntimeVersion() }.getOrNull()?.takeIf { it.isNotBlank() }
 
   /**
-   * 探针：在**另一条** STA + 消息泵的线程上，用当前这个 environment 建一个控制器，
-   * 返回创建回调的 HRESULT（0 = S_OK）。
-   *
-   * 只为回答一个架构问题：可见视图迁到 AWT 线程、后台视图留在 WebView 线程，
-   * 两者还得共用同一个 environment（否则 cookie 就是两套），这样到底行不行。
-   * 结论出来之后这个入口连同 native 侧那段可以一起删掉。
-   */
-  internal fun probeCrossThreadController(): Int = nativeProbeCrossThreadController()
-
-  /**
    * 进程退出时收摊。
    *
    * WebView 线程是个**可 join 的 `std::thread`**（native 侧静态变量），它到退出时
@@ -152,7 +164,7 @@ public object NativeWebView {
   private fun registerShutdownHook() {
     if (shutdownHookRegistered) return
     shutdownHookRegistered = true
-    Runtime.getRuntime().addShutdownHook(Thread({ runCatching { nativeStop() } }, "acg-webview-stop"))
+    Runtime.getRuntime().addShutdownHook(Thread({ runCatching { nativeStop() } }, "webview-stop"))
   }
 
   private var shutdownHookRegistered = false
@@ -181,13 +193,12 @@ public object NativeWebView {
    * AWT 组件上才会出现。
    */
   internal fun createView(
-    parentHwnd: Long,
     url: String?,
     userAgent: String?,
     enableDevtools: Boolean,
     zoom: Double,
   ): Long {
-    val handle = nativeCreateView(parentHwnd, userAgent, url, enableDevtools, zoom)
+    val handle = nativeCreateView(userAgent, url, enableDevtools, zoom)
     if (handle != 0L) liveViews.add(handle)
     return handle
   }
@@ -242,11 +253,6 @@ public object NativeWebView {
     headers: Map<String, String> = emptyMap(),
   ) = nativeViewLoadUrl(handle, url, headers.toFlatArray())
 
-  internal fun loadHtml(
-    handle: Long,
-    html: String,
-  ) = nativeViewLoadHtml(handle, html)
-
   internal fun viewAction(
     handle: Long,
     action: Int,
@@ -283,13 +289,6 @@ public object NativeWebView {
       scriptResults.remove(token)
     }
   }
-
-  /** 在视图里跑一段脚本；结果按 [token] 回给 [Callbacks.nativeScriptResult]。 */
-  internal fun evaluate(
-    handle: Long,
-    script: String,
-    token: Long,
-  ) = nativeViewEvaluate(handle, script, token)
 
   /** 注册一个视图事件监听；注册前的早期事件会被补发。 */
   internal fun addViewListener(
@@ -481,10 +480,7 @@ public object NativeWebView {
 
   private external fun nativeRuntimeVersion(): String?
 
-  private external fun nativeProbeCrossThreadController(): Int
-
   private external fun nativeCreateView(
-    parentHwnd: Long,
     userAgent: String?,
     url: String?,
     enableDevtools: Boolean,
@@ -515,11 +511,6 @@ public object NativeWebView {
     handle: Long,
     url: String,
     headers: Array<String>,
-  )
-
-  private external fun nativeViewLoadHtml(
-    handle: Long,
-    html: String,
   )
 
   private external fun nativeViewAction(

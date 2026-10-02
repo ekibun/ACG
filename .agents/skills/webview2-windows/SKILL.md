@@ -24,7 +24,7 @@ agent_created: true
 - **键盘焦点全走原生链**（`AttachThreadInput` + `MoveFocus`），不要恢复 DOM 焦点桥 / 脚本注入；
   `requestWebViewFocus` 的幂等闸门不能动。
 - 可见页窗口**必须是 AWT 的** `application { Window(...) }` —— 宿主靠 JAWT 从 AWT 组件取 HWND 挂子窗口。
-  AWT 是重型组件、永远画在 Compose 之上，所以 `AcgWebView` 的 `content` 覆盖层在 Windows 上会被盖住。
+  AWT 是重型组件、永远画在 Compose 之上，所以 `WebView` 的 `content` 覆盖层在 Windows 上会被盖住。
 
 **不要换第三方 KMP WebView 库**：我们的宿主依赖 `WebResourceRequested` 子资源拦截、自定义
 `AdditionalBrowserArguments` 和 CDP 访问，现成的封装把这些钩子挂在导航事件上，换过去能力全丢。

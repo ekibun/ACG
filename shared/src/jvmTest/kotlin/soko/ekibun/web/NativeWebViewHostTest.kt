@@ -1,4 +1,4 @@
-package soko.ekibun.acg.web
+package soko.ekibun.web
 
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.CompletableDeferred
@@ -25,15 +25,16 @@ import kotlin.test.fail
  *
  * 前面那些 WebView 用例（[soko.ekibun.acg.engine.WebviewJsTest]）验的是 JS wrapper，
  * 用桩顶替了 `_java`，碰不到真正的东西。这里反过来：起一个本地 HTTP 服务，把
- * 真的页面喂给真的 WebView2，锁住三件**只有真的跑起来才会坏**的事：
+ * 真的页面喂给真的 WebView2，锁住几件**只有真的跑起来才会坏**的事：
  *
  * 1. **子资源在拦截回调里看得见**（`<script src>`），且 `isForMainFrame == false`、
  *    `method` / `headers` 都是真值。
  * 2. **脚本注入拿得回结果**，且 DOM 里确实有子资源产生的副作用。
  * 3. **cookie 在不同任务之间是共享的** —— 两次任务走的是同一个 environment
  *    （同一份 user data folder）。可见页与后台页共用同一份存储靠的就是这个机制。
+ * 4. **可见视图的 `evaluate` 拿得回结果** —— `nativeScriptResult` 那条管道的收件人接上了。
  *
- * 环境不满足时三个用例都跳过：这测的是集成，不是环境。跳过前会先跑一次
+ * 环境不满足时这几个用例都跳过：这测的是集成，不是环境。跳过前会先跑一次
  * [checkHost] 体检（真导航一个 `about:blank`），并把原因打到 stdout ——
  * 静默跳过容易让人误以为「验过了」。
  *
@@ -48,7 +49,7 @@ class NativeWebViewHostTest {
   private val pageHtml =
     """
     <!doctype html>
-    <html><head><meta charset="utf-8"><title>acg-webview-test</title>
+    <html><head><meta charset="utf-8"><title>webview-test</title>
     <script src="/sub.js"></script></head>
     <body><img src="/sub.png"><p>hello</p></body></html>
     """.trimIndent()
@@ -172,7 +173,7 @@ class NativeWebViewHostTest {
    *   只活在浏览器进程的内存里，Chromium 不会把它落进 `Default/Network/Cookies`。
    *   而**两个后台任务之间一个 WebView 都不存在**时，浏览器进程会把内存态丢掉，
    *   于是第二个视图读不到 —— 当时误判成「cookie 存储没共享」，其实是丢了内存态。
-   *   加 `max-age` 之后立刻通过，`Cookies` 库里也能查到 `acg_probe`。
+   *   加 `max-age` 之后立刻通过，`Cookies` 库里也能查到 `webview_probe`。
    *
    *   对产品的影响是有限的：可见页开着的时候浏览器进程就活着，后台任务照样看得到
    *   它写的 session cookie（登录态的常见路径）。真正会丢的只有「所有视图都关掉、
@@ -190,8 +191,8 @@ class NativeWebViewHostTest {
             WebViewTask(
               url = url("/page.html"),
               script =
-                "document.cookie = 'acg_probe=1; path=/; max-age=3600'; " +
-                  "document.cookie.includes('acg_probe=1')",
+                "document.cookie = 'webview_probe=1; path=/; max-age=3600'; " +
+                  "document.cookie.includes('webview_probe=1')",
             ),
           )
         }
@@ -204,7 +205,7 @@ class NativeWebViewHostTest {
       val read =
         guarded {
           loadBackgroundWebView(
-            WebViewTask(url = url("/page.html"), script = "document.cookie.includes('acg_probe=1')"),
+            WebViewTask(url = url("/page.html"), script = "document.cookie.includes('webview_probe=1')"),
           )
         }
       assertEquals(
@@ -239,7 +240,6 @@ class NativeWebViewHostTest {
         guarded {
           withContext(Dispatchers.IO) {
             NativeWebView.createView(
-              parentHwnd = 0L,
               url = url("/page.html"),
               userAgent = null,
               enableDevtools = false,
@@ -294,37 +294,6 @@ class NativeWebViewHostTest {
       }
     }
 
-  /**
-   * 已验证的**平台限制**：一个 `ICoreWebView2Environment` **只能在创建它的那条 UI
-   * 线程上建控制器**，跨线程稳定失败（实测三次都是 `hr=0x802A000C`）。
-   *
-   * 这条直接否掉了「可见视图建在 AWT 线程（父子同线程 → 焦点链天然连通，不需要
-   * `AttachThreadInput`）、后台视图留在 WebView 线程」这个方案 —— 两者必须共用
-   * 同一个 environment，否则 cookie 就是两套（cookie 按 user data folder 分）。
-   * 而两个 environment 又不能共用同一个 user data folder。
-   *
-   * 所以「同线程」只有一种走法：**所有视图都放在同一条 UI 线程上**，且那条线程
-   * 必须是 AWT 线程（否则父子还是不同线程）。代价是后台任务的回调（含每个子资源的
-   * 拦截）都会落到 UI 线程上。
-   *
-   * 这条用例断言的是「跨线程失败」。**如果哪天它开始通过**，说明新版 WebView2
-   * 放宽了这个限制，「可见视图上 AWT 线程 + 后台留在别的线程」就重新可行了 ——
-   * 那时再评估，别凭印象。
-   */
-  @Test
-  fun environmentIsBoundToItsCreatingUiThread() {
-    if (!webViewReady()) return
-
-    val hr = NativeWebView.probeCrossThreadController()
-    assertTrue(
-      hr != 0,
-      "跨线程建控制器成功了（hr=0）—— 新版 WebView2 放宽了这个限制，" +
-        "可以重新评估「可见视图建在 AWT 线程、后台视图留在 WebView 线程」的方案。" +
-        "当前实测：同一个 environment 只在创建它的那条 UI 线程上可用，hr=0x802A000C。",
-    )
-    println("[NativeWebViewHostTest] 跨线程建控制器确认失败：hr=0x${hr.toUInt().toString(16)}")
-  }
-
   private fun com.sun.net.httpserver.HttpExchange.respond(
     contentType: String,
     body: ByteArray,
@@ -343,7 +312,7 @@ class NativeWebViewHostTest {
     /** 体检里那次 about:blank 的护栏，比 [BACKGROUND_WEBVIEW_TIMEOUT_MS] 稍宽一点。 */
     const val HOST_HEALTH_TIMEOUT_MS = 40_000L
 
-    /** 环境体检结果，`null` 表示健康。三次用例共用，别重复跑。 */
+    /** 环境体检结果，`null` 表示健康。各用例共用，别重复跑。 */
     val hostHealth: String? by lazy { checkHost() }
 
     /**
@@ -355,8 +324,8 @@ class NativeWebViewHostTest {
      * 根本不创建。同一台机器上 `msedge.exe`（同一个 Chromium 版本）无头模式跑得好好的，
      * 所以这是 **WebView2 运行时自己坏了**，不是我们的宿主。
      *
-     * 这种坏法下三条用例都会卡满 30s 再报一堆看不懂的断言失败，纯属噪声；
-     * 体检一次、打印清楚原因、三条一起跳过，才对得起看构建的人。
+     * 这种坏法下这几个用例都会卡满 30s 再报一堆看不懂的断言失败，纯属噪声；
+     * 体检一次、打印清楚原因、这几个一起跳过，才对得起看构建的人。
      *
      * 想绕开体检直接看原始失败，把 [hostHealth] 改成 `null` 即可
      * （或直接看 `cxx/webview/webview.cpp` 的原生日志）。

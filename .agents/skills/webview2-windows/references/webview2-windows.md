@@ -464,6 +464,32 @@ DOM 会冒泡是因为浏览器自己**在命中测试之后**走了祖先链；
 
 ---
 
+## 12. 一个 environment 只能服务创建它的那条 UI 线程
+
+**已实测**：拿一个在 WebView 线程上建出来的 `ICoreWebView2Environment`，到**另一条**
+STA + 消息泵的线程上去 `CreateCoreWebView2Controller` —— **稳定失败**，创建回调拿到
+`hr=0x802A000C`（多次实测一致；当时的探针入口已随结论删除）。
+
+这条直接否掉了一个很诱人的架构：
+
+> 可见视图建在 AWT 线程上（父子同线程 ⇒ 焦点链天然连通，不需要 `AttachThreadInput`），
+> 后台视图留在 WebView 线程上（抓页面不该占 UI 线程）。
+
+它不成立的原因是**两边必须共用同一个 environment**：cookie 按 user data folder 分，
+两个 environment 就是两套登录态，而两个 environment 又**不能**共用同一个 user data folder。
+
+⇒ 「同线程」只有一种走法：**所有视图都放在同一条 UI 线程上**，要父子同线程的话那条线程
+就得是 AWT 的 EDT —— 代价是后台任务的回调（含每个子资源的拦截）全落到 UI 线程上。
+
+本工程当前取的是折中：所有视图都在自研的 WebView 线程上，可见视图与父窗口**不同线程**，
+输入队列靠 [第 9 节](#9-焦点渲染正常点击有反应但打字没反应) 的**长期 `AttachThreadInput`**
+接起来。**不要为了省掉那次 attach 去动线程模型。**
+
+**如果哪天跨线程建控制器开始成功**（`hr=0`），说明新版 WebView2 放宽了限制 —— 那时再评估，
+在此之前不要重试「可见视图上 AWT 线程」。
+
+---
+
 ## 速查清单
 
 1. 记 `ProcessFailed` 的 kind/reason/exit，**只对致命 kind 报警**。
@@ -493,3 +519,5 @@ DOM 会冒泡是因为浏览器自己**在命中测试之后**走了祖先链；
    `hwndFocus`。是 `Chrome_WidgetWin_1` 说明键盘去了页面。
    对照 `GetGUIThreadInfo(GetForegroundWindow() 的 tid)` —— **那个**队列才是收按键的。
    `GetFocus()` 和 `GetActiveWindow()` 都做不到（都按线程），跨进程证明不了任何事。
+10. 别指望「可见视图建在 AWT 线程、父子同线程」这条路 —— 一个 environment 只能在创建它的
+    那条 UI 线程上建控制器（实测 `hr=0x802A000C`），见第 12 节。

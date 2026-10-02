@@ -110,7 +110,7 @@
   放在各自源集的同等包路径下（本项目现状就是这样，保持一致）。
 - 可见性以 `private` 为主；`internal` 只在确实要给同模块的测试或兄弟类用时才用。
 - 一个「契约」一个文件是允许的：把某个功能的 state / controller / `@Composable` 入口放在同一文件
-  （如 `AcgWebView.kt`），符合官方的「语义紧密相关」；但不要靠这个理由把文件堆到上千行。
+  （如 `WebView.kt`），符合官方的「语义紧密相关」；但不要靠这个理由把文件堆到上千行。
 - 格式化与 lint **已配置**：根 `.editorconfig`（ktlint 读它）+ `org.jlleitschuh.gradle.ktlint` 插件
   （挂 `io.nlopez.compose.rules:ktlint` 规则集）。约定由工具执行，**别再靠人守**；
   还没接的是「什么时候跑」，见根 `TODO.md`。

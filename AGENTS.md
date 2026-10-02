@@ -111,7 +111,7 @@ native（`cxx/`：WebView2 宿主、QuickJS 桥、FFmpeg 解封装+解码+播放
   （Android 用 `ENCODING_PCM_8BIT` 是有意为之）。改这里之前先确认方向。
   **视频没有这个自由度**：转码目标在 native 侧写死 `AV_PIX_FMT_RGBA`，Kotlin 侧已无像素格式
   常量与 `videoFormat` 参数（见 [cxx/AGENTS.md](./cxx/AGENTS.md) 的 ffmpeg 一节）。
-- WebView 契约在 `soko.ekibun.acg.web`（Android 用 `android.webkit.WebView`，桌面走自研宿主）。
+- WebView 契约在 `soko.ekibun.web`（Android 用 `android.webkit.WebView`，桌面走自研宿主）。
   **不要引入第三方 KMP WebView 库**，理由见 [cxx/AGENTS.md](./cxx/AGENTS.md)。
   后台页 JS 契约（对齐 BangumiPlugin `assets/modules/http.js`）：
 

@@ -16,7 +16,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import soko.ekibun.acg.ui.screen.CodeScreen
 import soko.ekibun.acg.ui.screen.PlayScreen
 import soko.ekibun.acg.ui.screen.WebScreen
-import soko.ekibun.acg.web.BackgroundWebViewHost
+import soko.ekibun.web.BackgroundWebViewHost
 
 private enum class AppTab(
   val label: String,

@@ -1,6 +1,8 @@
-package soko.ekibun.acg.web
+package soko.ekibun.web
 
 import androidx.compose.runtime.Composable
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 
 // 后台 WebView —— 插件 JS 里 `webview(...)` 的宿主抽象。
 //
@@ -14,7 +16,8 @@ import androidx.compose.runtime.Composable
 // | Android | 命令式建一个无头 `android.webkit.WebView` | `WebViewClient.shouldInterceptRequest`，含全部子资源 |
 // | 桌面 (Windows) | 自研 C++ 宿主（`cxx/webview/webview.cpp`）里 1×1 的隐藏窗口 | `add_WebResourceRequested` + `AddWebResourceRequestedFilter("*", ALL)`，含全部子资源 |
 //
-// 钩子一律接在引擎的 `WebResourceRequested` 上，两端能力对齐。
+// 任务骨架（建 headless 控制器 → 导航 → 等终态 → 超时 → 销毁）在 commonMain 这一份，
+// 平台只按 [createWebViewController] 的 headless 路径提供实现。
 //
 // cookie 也是统一的：桌面端可见页与后台页共用同一个 WebView2 environment
 // （同一份 user data folder），Android 端共用系统 `CookieManager`。在这一页登录过，
@@ -119,11 +122,58 @@ const val BACKGROUND_WEBVIEW_TIMEOUT_MS: Long = 30_000
  *
  * - **桌面**：什么窗口都不用挂（native 自己有隐藏窗口），这里只顺手预热一下环境。
  * - **Android**：顺手把 `Context` 记下来（命令式建 WebView 要用），什么都不画。
+ *   可见 WebView 的 [createWebViewController] 也依赖它，所以两端 App 都必须在
+ *   `setContent` 里调一次。
  */
 @Composable
 expect fun BackgroundWebViewHost()
 
 /**
  * 跑一次后台 WebView 任务；调用方挂起直到页面出结果、命中拦截或超时。
+ *
+ * 骨架在 commonMain 这一份：建 headless 控制器（失败即 [WebViewTaskResult.Failed]）→
+ * 导航 → 等第一个终态事件（拦截命中 / 脚本完成 / 失败）→ 超时兜底 → `finally` 销毁。
+ * 终态只取第一个 —— `CompletableDeferred.complete` 幂等，之后的重复事件自然被忽略
+ * （Android 拦截命中后 `onPageFinished` 仍会到；桌面命中后的 Stop 会引出一个被
+ * native 吞掉的 OperationCanceled）。
  */
-expect suspend fun loadBackgroundWebView(task: WebViewTask): WebViewTaskResult
+suspend fun loadBackgroundWebView(task: WebViewTask): WebViewTaskResult {
+  val outcome = CompletableDeferred<WebViewTaskResult>()
+  val controller =
+    try {
+      createWebViewController(
+        headless = true,
+        config = WebViewConfig(),
+        initialUrl = task.url,
+        initialHeaders = task.effectiveHeaders(),
+        script = task.script,
+        onRequest =
+          task.onInterceptRequest?.let { callback ->
+            { request: WebViewRequest ->
+              callback(request)?.also { hit ->
+                outcome.complete(WebViewTaskResult.Intercepted(hit))
+              }
+            }
+          },
+      ) { event ->
+        when (event) {
+          is WebViewEvent.ScriptFinished -> outcome.complete(WebViewTaskResult.Scripted(event.json))
+          is WebViewEvent.TaskFailed ->
+            outcome.complete(WebViewTaskResult.Failed("后台 WebView 失败：${event.message}"))
+          else -> {}
+        }
+      }
+    } catch (t: Throwable) {
+      return WebViewTaskResult.Failed("后台 WebView 起不来：${t.message ?: t}")
+    }
+
+  try {
+    return withTimeoutOrNull(BACKGROUND_WEBVIEW_TIMEOUT_MS) { outcome.await() }
+      ?: WebViewTaskResult.Failed(
+        "后台 WebView 超时（${BACKGROUND_WEBVIEW_TIMEOUT_MS}ms）：${task.url}",
+      )
+  } finally {
+    // 用完即弃：结果已定（或超时），隐藏视图在这里收掉。
+    controller.dispose()
+  }
+}

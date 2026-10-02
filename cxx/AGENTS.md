@@ -48,14 +48,17 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
 
 ## JNI
 
-- 符号是**不带签名的名称导出**：`Java_soko_ekibun_acg_web_NativeWebView_<name>`。
+- 符号是**不带签名的名称导出**：`Java_soko_ekibun_web_NativeWebView_<name>`。
   改了 Kotlin 侧的方法签名却用着旧 dll，**不会报错**，只会参数错位 ——
   改签名后第一件事是确认 dll 真的刷新到了运行位置。
 - 绑定分别在 `shared/src/{commonMain,jvmMain,androidMain}/kotlin/soko/ekibun/jni.kt`
-  与 `soko.ekibun.{quickjs, ffmpeg}`。
-- **加载方式不统一，别想当然**：`jniLoadLibrary()` 把每个 dll 各解到一个独立临时文件；
-  而 `NativeWebView` 自己做内容哈希分桶目录加载，因为 `webview.dll` 必须与
-  `WebView2Loader.dll` **同级**才能启动。
+  与 `soko.ekibun.{quickjs, ffmpeg}`。webview 的绑定与业务接口同在 `soko.ekibun.web`
+  （2026-10-02 拍板把整个 web 文件夹移出 `acg`，JNI 符号随之从 `_acg_web_` 变 `_web_`）——
+  别再"顺手"单独挪它：那会又改 JNI 导出名，连带重编 dll。
+- **加载方式三个库统一**：都走 `jniLoadLibrary()`，它优先加载**应用资源目录 / classpath 资源目录
+  里的真文件**（打包态与开发态都不解包），两条都不成立才退到 `System.loadLibrary`。
+  ⇒ 「`WebView2Loader.dll` 必须与 `webview.dll` 同级」这条要求由资源布局直接满足 —— 两者在
+  那些目录里本来就挨着，Windows 按 DLL 自己所在目录找得到。
 - native 调用都要回 `dispatcher` 线程（`QuickJS.kt` 里的做法照抄）。
 - **Kotlin 侧 `external fun` 声明在哪，决定 JNI 名**（可见性不影响）：
   - 声明在**类体**里 → 编译成**实例**原生方法，JNI 名就是外层类名
