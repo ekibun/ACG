@@ -91,6 +91,25 @@ tasks.withType<JavaExec>().configureEach {
   }
 }
 
+// JDK 24 起（JEP 472）调用 `System.load` / `System.loadLibrary` 这类 native 方法会打印警告：
+//
+//   WARNING: A restricted method in java.lang.System has been called
+//   java.lang.System::load has been called by org.jetbrains.skiko.LibraryLoader ...
+//   Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+//
+// 警告里的调用方是 Skiko（加载 skiko-awt 自带的 dll），但**本项目自己也会 `System.load`**
+// —— `jniLoadLibrary` 就是这么加载 webview/quickjs/ffmpeg 三个 dll 的，所以把它归给 Skiko
+// 去修是修不完的。未来 JDK 会从"警告"升级成"直接拦截"，因此这里主动声明。
+//
+// 加在不带模块名的 classpath 应用上，对应的就是匿名模块，所以值必须是 `ALL-UNNAMED`。
+// JDK 21 不认识这个选项也不会报错（实测 21.0.11 与 25.0.4.1 都正常），故无需按版本分支。
+// 走 `jvmArgs(...)`（追加）而不是 `jvmArgumentProviders`：Compose Hot Reload 插件在
+// `configureJavaExecTaskForHotReload` 里读 `getJvmArgs()` 再 `plus` 自己的调试参数，追加语义能
+// 与它叠加；实测 `allJvmArgs` 里能稳定看到本参数。
+tasks.withType<JavaExec>().configureEach {
+  jvmArgs("--enable-native-access=ALL-UNNAMED")
+}
+
 // 标准 compose.desktop 打包 DSL。
 //
 // 后端必须是 **AWT 的**（`ComposeWindow` / `ComposePanel`）：可见 WebView 是个真的
