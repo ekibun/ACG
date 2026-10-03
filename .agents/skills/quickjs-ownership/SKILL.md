@@ -14,6 +14,10 @@ agent_created: true
 完整规则在 [`references/quickjs-reference-ownership.md`](./references/quickjs-reference-ownership.md)。
 **动 `JS_FreeValue` / `JS_DupValue` 之前先读它**，按符号查，不要整篇读。
 
+能力桥（`init.js` 那个 `_binding`）的形态依据在
+[`references/ability-bridge.md`](./references/ability-bridge.md) —— 含「为什么不能用反射」
+的取证。**动 `JsEngine` 的派发之前先读它**。
+
 四条最容易踩死、漏了就一定改错的（细节见手册）：
 
 - `JS_DefinePropertyValue` 内部**无条件**消费 `val` 的引用，调用方**不要**再减一次。

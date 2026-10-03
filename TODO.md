@@ -443,6 +443,29 @@
 - **顺带**：根 `build.gradle.kts:30` 的全限定名 `org.jlleitschuh.gradle.ktlint.KtlintExtension`
   是规则②的现行反例，写规则时顺手改。
 - **完成判据**：规则已入 `AGENTS.md`；抽查之后新增的注释合规。
+- **追加口径（2026-10-03 定）——③ 源码正文不用 emoji 符号**：
+  - **实测依据**：animeko 2913 个 `.kt`/`.kts`、60866 行注释里，含 emoji 的只有 **30 行
+    （0.05%）**，且**全是测试数据里的字符串**（番剧标题原文、Figma 稿名），不是注释标记。
+    它的 `⚠️`/`✅`/`❌` 只出现在 3 个 Markdown 文件（`docs/design/media/media-selector-*.md`，
+    15/70/58 处）—— **是设计文档的状态标记，不进源码**；`📌`/`💡`/`🛠` 全仓 0 处。
+    ⚠️ 注意：animeko **没有成文禁这一条**（`code-style.md` 仅 34 行，grep 零命中），
+    「源码零符号」是**事实惯例**。所以要对齐的是**行为**，不是某条款。
+  - **本仓现状**：`shared/` 的 `.kt` 里 55 处 ⚠️ / 14 个文件（`jni.kt` 19、`AvFormat.kt` 6、
+    `JsEngineDispatchTest.kt` 6、`QuickJS.kt` 4、`FFPlayer.kt` 4、`AvPlayback.kt` 3、
+    `Http.kt` 3、`AvFrame.kt` 2、`FileIO.kt` 2、其余 3 个各 1）。**这是本仓自创惯例，
+    不是从 animeko 抄的**，但与①不冲突：①管「说什么」，符号管「标哪句」。
+  - **做法（与①②同一口径：分期，不全量）**：动到哪个文件，就按下面的分工搬。
+    - **可以只去符号、保留裸约束**的：**约束就贴在那个函数旁边、迁走就丢「在哪个函数上」**
+      （典型是 19 处 native 指针所有权、测试自身的写法约束）。做法是删符号、句子照留。
+    - **该把细节迁进文档**的：**约束描述的是一大段机制、或带实测数据**（迁移了正文装不下）。
+      落点按域分：ktor/HTTP 生命周期 → skill `project-traps` 的 `silent-failures.md`；
+      拦截回调时序 → skill `webview2-windows` 的 `webview2-windows.md`；
+      能力桥/JS 侧写法 → skill `quickjs-ownership` 的 `ability-bridge.md`。
+      正文留**一句裸约束 + 指到那份文档的哪一节**。
+  - **文档内的 ⚠️ 不受此限**：`comments.md` 有明确例外——「明确写了『已删除 + 出处』的
+    防回归说明」是刻意留的警告。`ability-bridge.md:58` 那段反射反例即属此例，保留。
+  - **不做专项**：55 处存量不搞一次性改写，跟着①的「动到哪个改哪个」走。
+
 
 ### D5. 子系统代码地图（学 animeko `docs/contributing/code/`）
 

@@ -1,18 +1,31 @@
-async (_java) => {
+// 能力桥只有一个：_binding(method, args) —— 通用派发，args 是那一份实参（不是位置参数）
+async (_binding) => {
+  // FormData 的每一项在 Kotlin 侧被 `Http` 拆成 multipart 的一个 part，
+  // 认的是 `name` / `value` / `type` / `filename` 四个键 —— 这里**只给带
+  // filename 的项写 type**，因为只有文件 part 才有 Content-Type
+  // （`Http` 那边 `type is String && value is ByteArray` 才走文件分支）。
+  // 键名必须与 `Http` 侧逐字一致，少一个字母就静默降级成普通字段。
+  const _formItem = (name, value, filename) => ({
+    name,
+    value,
+    filename,
+    type: filename == null ? null : "application/octet-stream"
+  });
+
   class FormData {
     constructor(data) {
       const _data = data || {}
       this.__js_proto__ = "FormData";
-      this.__items__ = Object.keys(_data).map((k) => ({
-        name: k,
-        value: _data[k].filename ? _data[k].value : _data[k],
-        filename: _data[k].filename
-      }));
+      this.__items__ = Object.keys(_data).map((k) => _formItem(
+        k,
+        _data[k].filename ? _data[k].value : _data[k],
+        _data[k].filename
+      ));
     }
 
     append(name, value, filename) {
       // __items__ 是普通数组，没有 append（那是 FormData 自己的方法）。
-      this.__items__.push({ name, value, filename })
+      this.__items__.push(_formItem(name, value, filename))
     }
 
     delete(name) {
@@ -58,8 +71,8 @@ async (_java) => {
         this.append(name, value, filename);
         return;
       }
-      // 原来写的是 this.splice(...)，但 splice 在 __items__ 上，不在 FormData 上
-      this.__items__.splice(index, 1, { name, value, filename });
+      // splice 只能用在 __items__ 上，不在 FormData 上（this.splice 会静默无效）
+      this.__items__.splice(index, 1, _formItem(name, value, filename));
     }
 
     values() {
@@ -85,7 +98,7 @@ async (_java) => {
       this.encoding = "" + (encoding || "utf-8");
     }
     encode(data) {
-      return _java(null, 'encode', data, this.encoding)
+      return _binding('encode', [data, this.encoding])
     }
   }
 
@@ -94,7 +107,7 @@ async (_java) => {
       this.encoding = "" + (encoding || "utf-8");
     }
     decode(data) {
-      return _java(null, 'decode', data, this.encoding)
+      return _binding('decode', [data, this.encoding])
     }
   }
 
@@ -171,14 +184,12 @@ async (_java) => {
    *   const data = await webview(url, {}, "JSON.stringify(window.__NUXT__)");
    */
   const webview = async (url, header, script, onInterceptRequest) => {
-    const ret = await _java(
-      null,
-      "webviewAsync",
+    const ret = await _binding("webview", [
       "" + (url || ""),
       header || {},
       script == null ? null : "" + script,
       typeof onInterceptRequest === "function" ? onInterceptRequest : null
-    );
+    ]);
     if (!ret || typeof ret !== "object") return undefined;
 
     // Kotlin 侧用这个键区分「命中拦截」与「脚本返回值」；两者都可能是任意对象。
@@ -187,13 +198,11 @@ async (_java) => {
     if (ret.__webview_kind__ === "script") {
       const json = ret.value;
       // 空串/null 表示脚本没有返回值 —— 对齐 http.js 的 `it = it && JSON.parse(it)`。
+      // 没有「非 JSON 就原样返回」的兜底：宿主给的 json 一定是 JSON
+      // （WebView2 的 ExecuteScript 自己序列化，裸文本会被加引号变合法 JSON，
+      // 压根到不了这里），而 `webview.cpp` 在没有脚本时回的是空串。
       if (json == null || json === "") return undefined;
-      try {
-        return JSON.parse(json);
-      } catch (e) {
-        // 不是 JSON（脚本返回裸文本）时原样给出，比丢掉强。
-        return json;
-      }
+      return JSON.parse(json);
     }
 
     return undefined;
@@ -207,20 +216,20 @@ async (_java) => {
     FormData,
     console: {
       log: (...args) => {
-        _java(null, "console", "log", args);
+        _binding('console', ['log', args]);
       },
       info: (...args) => {
-        _java(null, "console", "info", args);
+        _binding('console', ['info', args]);
       },
       debug: (...args) => {
-        _java(null, "console", "debug", args);
+        _binding('console', ['debug', args]);
       },
       error: (...args) => {
-        _java(null, "console", "error", args);
+        _binding('console', ['error', args]);
       }
     },
     fetch: async (input, init) => {
-      const response = await _java(null, "fetchAsync", new Request(input, init));
+      const response = await _binding('fetch', [new Request(input, init)]);
       return new Response(response);
     },
     webview,

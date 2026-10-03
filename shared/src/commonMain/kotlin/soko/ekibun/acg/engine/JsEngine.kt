@@ -1,7 +1,6 @@
 package soko.ekibun.acg.engine
 
 import acg.shared.generated.resources.Res
-import androidx.annotation.Keep
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.request
 import io.ktor.http.isSuccess
@@ -11,7 +10,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.runBlocking
 import soko.ekibun.acg.common.Http
 import soko.ekibun.quickjs.JSError
@@ -31,46 +29,8 @@ class JsEngine {
   companion object {
     val instance by lazy { JsEngine() }
 
-    /** 引擎插件类的包名。 */
-    private const val ENGINE_PACKAGE = "soko.ekibun.acg.engine"
-
     /** [webviewAsync] 与 `init.js` 里内联的 `webview` wrapper 约定的结果标记键。 */
     private const val WEBVIEW_KIND_KEY = "__webview_kind__"
-
-    /** 判断一个实参能否赋给指定的形参类型（含装箱与数值放宽）。 */
-    private fun acceptsArg(
-      paramType: Class<*>,
-      arg: Any?,
-    ): Boolean {
-      if (arg == null) return !paramType.isPrimitive
-      // 基本类型按名字映射到装箱类名，避免在 Kotlin 里引用 java.lang.Integer.TYPE 等
-      val boxedName =
-        if (paramType.isPrimitive) {
-          when (paramType.name) {
-            "boolean" -> "java.lang.Boolean"
-            "char" -> "java.lang.Character"
-            "byte" -> "java.lang.Byte"
-            "short" -> "java.lang.Short"
-            "int" -> "java.lang.Integer"
-            "long" -> "java.lang.Long"
-            "float" -> "java.lang.Float"
-            "double" -> "java.lang.Double"
-            else -> paramType.name
-          }
-        } else {
-          paramType.name
-        }
-      if (!paramType.isPrimitive && paramType.isInstance(arg)) return true
-      if (arg::class.java.name == boxedName) return true
-      // 数值放宽：JS 侧拿到的整数都是 Double，需要能落到 Int/Long/Float 形参上
-      if (arg !is Number) return false
-      return when (boxedName) {
-        "java.lang.Integer", "java.lang.Long", "java.lang.Short",
-        "java.lang.Byte", "java.lang.Float", "java.lang.Double",
-        -> true
-        else -> false
-      }
-    }
   }
 
   private var quickjsDelegate: QuickJS? = null
@@ -79,8 +39,8 @@ class JsEngine {
    * 惰性初始化的锁：首建是一段 check-then-act（建 runtime、求值 init、赋值），
    * 两个协程并发首访会各建一个 [QuickJS]，后赋值者覆盖先前 —— 那一个永不
    * [close][QuickJS.close]（runtime + 归属线程泄漏）。锁里那些 `runBlocking`
-   * 没有死锁风险：等的是 QuickJS 的归属线程，而归属线程上的回调（
-   * `handleJSInvokable` / 反射派发）都不进这把锁。
+   * 没有死锁风险：等的是 QuickJS 的归属线程，而归属线程上的回调
+   * （`handleJSInvokable` / `init` 那个桥）都不进这把锁。
    */
   private val quickjsLock = Any()
 
@@ -105,58 +65,41 @@ class JsEngine {
           }
           val ctx1 = QuickJS(moduleHandler = moduleHandler)
           quickjsDelegate = ctx1
-          // 声明成 JSInvokable 会丢掉 AutoCloseable -> 这个工厂函数再也关不掉，
-          // 每个引擎实例固定漏 1 票，reset() 的泄漏报告随之永久带一条噪音。
-          // JS 侧没有别的引用持有它，调用完即可归还。
+          // `init` 是**工厂函数**：JS 侧没有别的引用持有它，调用完即可归还。必须用
+          // `as JSFunction` —— 声明成 `as JSInvokable` 会丢掉 `AutoCloseable`，
+          // 每个引擎实例固定漏 1 票（依据见 [ability-bridge]）。
           // 这里在属性 getter 里，不是协程上下文，只能阻塞等这一次求值 ——
           // evaluate 本身是挂起的（它要把求值搬到 QuickJS 的归属线程上）。
           val init =
             runBlocking { ctx1.evaluate(moduleHandler("@init")!!, "<init>") } as JSFunction
           try {
             init(
-              object : JSInvokable {
-                override fun invoke(
-                  vararg argv: Any?,
-                  thisVal: Any?,
-                ): Any? {
-                  val obj = argv[0]
-                  return if (obj is String) {
-                    // 按名称实例化引擎插件类。包名必须跟随本工程的实际包名，
-                    // 而不是从别处拷来的 `soko.ekibun.nekomp.*`。
-                    val className = "$ENGINE_PACKAGE.$obj"
-                    val cls =
-                      javaClass.classLoader?.loadClass(className)
-                        ?: throw JSError("cannot load class '$className'")
-                    val ctorArgs = argv.sliceArray(1 until argv.size)
-                    // 按实参个数选构造函数，不要盲取 constructors[0]（顺序无保证，
-                    // 且多个构造函数时会选错）。
-                    val ctor =
-                      cls.constructors.firstOrNull { it.parameterCount == ctorArgs.size }
-                        ?: throw JSError(
-                          "no constructor of '$className' accepts ${ctorArgs.size} argument(s)",
-                        )
-                    ctor.isAccessible = true
-                    ctor.newInstance(*ctorArgs)
-                  } else {
-                    val methodName = argv[1] as String
-                    val objWrap = (obj ?: this@JsEngine)
-                    val callArgs = argv.sliceArray(2 until argv.size)
-                    // 重载时 declaredMethods 里会有多个同名方法，`first{}` 可能选错。
-                    // 用"名字 + 参数个数"匹配，仍不唯一时再按参数类型宽容匹配。
-                    val candidates =
-                      objWrap.javaClass.methods
-                        .filter { it.name == methodName && it.parameterCount == callArgs.size }
-                    val method =
-                      candidates.firstOrNull { m ->
-                        m.parameterTypes.withIndex().all { (i, t) -> acceptsArg(t, callArgs[i]) }
-                      } ?: candidates.firstOrNull()
-                        ?: throw JSError(
-                          "no method '$methodName' with ${callArgs.size} argument(s) " +
-                            "on ${objWrap.javaClass.name}",
-                        )
-                    method.isAccessible = true
-                    method.invoke(objWrap, *callArgs)
-                  }
+              // `_binding(method, args)` 的落地。`argv` 就是 init.js 那一**份**实参
+              // （`vararg` 打包成的 `Array<Any?>`），所以块只有一个值参数 ——
+              // `thisVal` 是隐式接收者，不占位。
+              //
+              // `when` **直接调**各能力，**没有「按名字找方法」这一步** ⇒ `private` 天然不受影响，
+              // 方法名写错是编译错误。反射走不通 —— `Class.getMethods()` 只返回 public
+              // 方法，private 的能力一个都查不到（依据见 [ability-bridge]）。
+              JSInvokable { argv ->
+                val args = argv[1] as Array<*>
+                when (argv[0] as String) {
+                  "encode" -> encode(args[0] as String, args[1] as String?)
+                  "decode" -> decode(args[0] as ByteArray, args[1] as String?)
+                  "fetch" -> fetchAsync(args[0] as Map<Any, Any?>)
+                  // args[1] 是 console.log(...) 的**实参数组**，作为 args 的元素整体送达，
+                  // 不是摊平成位置参数。
+                  "console" -> console(args[0] as String, args[1] as Array<Any?>)
+                  // webview 的 4 个实参打进 args，不是位置参数。args[3] 是回调，
+                  // 它的归属语义见 [webviewAsync]。
+                  "webview" ->
+                    webviewAsync(
+                      args[0] as String,
+                      args[1] as Map<Any, Any?>?,
+                      args[2] as String?,
+                      args[3] as JSFunction?,
+                    )
+                  else -> throw JSError("unknown method '${argv[0]}'")
                 }
               },
             )
@@ -187,7 +130,6 @@ class JsEngine {
     }
   }
 
-  @Keep
   private fun console(
     type: String,
     data: Array<Any?>,
@@ -195,13 +137,11 @@ class JsEngine {
     println("$type\n${data.toList()}")
   }
 
-  @Keep
   private fun encode(
     input: String,
     to: String?,
   ): ByteArray = input.toByteArray(Charset.forName(to ?: "utf-8"))
 
-  @Keep
   private fun decode(
     input: ByteArray,
     from: String?,
@@ -233,11 +173,9 @@ class JsEngine {
    * `Map`，连嵌套对象也在 native 侧就地还掉了引用，所以这里**没有东西可还**。
    * 只有 `options` 里嵌了函数（fetch 选项里不会有）才需要额外 `freeRecursive`。
    */
-  @Keep
   private fun fetchAsync(options: Map<Any, Any?>): Deferred<Any?> {
     return CoroutineScope(Dispatchers.IO).asyncReleasing {
       val response = Http.request(options)
-      assert(response.isActive)
       return@asyncReleasing mapOf(
         "url" to response.request.url.toString(),
         "headers" to response.headers.toMap(),
@@ -252,7 +190,7 @@ class JsEngine {
   /**
    * 后台 WebView 桥 —— 插件 JS 里的 `webview(url, header, script, onInterceptRequest)`。
    *
-   * 对齐 BangumiPlugin `assets/modules/http.js#__webview__`，两处有意的差异：
+   * 两处有意的差异：
    *
    * 1. 返回 [Deferred]（JS 侧是 Promise），不阻塞 —— QuickJS 只有一个事件循环，
    *    照参照实现那样 `Thread.sleep` 等加载会把整个引擎锁死；
@@ -265,7 +203,6 @@ class JsEngine {
    *
    * `header` 不用归还 —— 它和 `options` 一样，已经被整图展开成纯数据的 `Map`。
    */
-  @Keep
   private fun webviewAsync(
     url: String,
     header: Map<Any, Any?>?,

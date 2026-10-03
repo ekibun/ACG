@@ -69,7 +69,7 @@ data class WebViewTask(
    * 实现里不要假设自己在哪条线程。
    *
    * 但有一条硬约束：**不能从 JS 调用内部同步回调它**。脚本调 `webviewAsync`
-   * 时 `_java` 仍在 native `evaluate` 里没返回，此时反向去调 JS 函数是对引擎的
+   * 时 `_binding` 仍在 native `evaluate` 里没返回，此时反向去调 JS 函数是对引擎的
    * 重入调用，本桥会让整轮 Promise 停摆（实测挂死不返回，耗时也不增长）。
    * 所以拦截回调必须来自平台侧（`shouldInterceptRequest` / `WebResourceRequested`），
    * 也就是「脚本已经挂在 `await` 上、派发线程空闲」的时刻 —— 两端实现都是这么做的。
@@ -79,7 +79,8 @@ data class WebViewTask(
   /**
    * 补齐后台加载默认要带的头，对齐 `http.js`：`header.referer = header.referer || url`。
    *
-   * 原实现是直接改传进来的对象，这里改成纯函数 —— 任务对象要能安全复用。
+   * 纯函数：不写传入的 [headers]，缺 `Referer` 时返回加了它的**新** Map —— 同一个
+   * [WebViewTask] 可能被跑不止一轮，改原对象会把上一轮的 `Referer` 带进这一轮。
    */
   fun effectiveHeaders(): Map<String, String> =
     if (headers.keys.any { it.equals("Referer", ignoreCase = true) }) {
@@ -105,8 +106,8 @@ sealed interface WebViewTaskResult {
    * 没跑起来或者超时：WebView 环境不可用（比如 Windows 没装 WebView2 运行时）、
    * 导航失败、脚本执行失败。
    *
-   * 之所以要单独一个分支而不是简单返回 null：这些情况以前会被后端**静默降级成
-   * 空壳**（既不加载也不报错），脚本侧只会看到一个永远为空的结果。变成一条明确的
+   * 之所以要单独一个分支而不是简单返回 null：这些情况很容易被**静默降级成
+   * 空壳**（既不加载也不报错），脚本侧只会看到一个永远为空的结果。给一条明确的
    * 失败信息，比让人去猜哪一步没生效强。
    */
   data class Failed(

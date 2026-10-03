@@ -87,7 +87,7 @@ resolveEpisode(line, episode)     → { url, headers? }            // sort + lin
 | 同步 last-write-wins 用**本地**时间戳 | Bangumi `updated_at` 有官方 bug 不可靠 |
 | 模型放 `acg.model`，客户端放 `acg.catalog.bgm`；不进 `acg.engine` | engine 类名是对外契约，改了静默失效 |
 | 手写 DTO + 扩展函数 mapper，不引 OpenAPI generator | 只用 6-8 个接口；Animeko 的 mapper 也是这么写的 |
-| `HtmlParser` 进 `_java` 桥（engine 包） | 补齐 JS 侧 DOM 解析缺口，同时是订阅解释器的依赖 |
+| `HtmlParser` 进 `_binding` 桥（engine 包） | 补齐 JS 侧 DOM 解析缺口，同时是订阅解释器的依赖 |
 
 ## 4. WebView 前后台会话
 

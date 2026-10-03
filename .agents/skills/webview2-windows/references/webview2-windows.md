@@ -490,6 +490,31 @@ STA + 消息泵的线程上去 `CreateCoreWebView2Controller` —— **稳定失
 
 ---
 
+## 13. 拦截回调：「命中」与「放行」是互斥的两种终局
+
+**别写「命中 → 再放行」这种时序 —— 它在真引擎里不可达。**
+
+`cxx/webview/webview.cpp` 的 `RequestHandler::Invoke` 里，**一旦**回调返回命中就立刻
+置 `view->settled = true` 并调 `webview->Stop()`；而同一个 `Invoke` 的**开头**就有
+`if (!view || view->settled) return S_OK;` —— 也就是说**命中之后连回调都不会再被调一次**，
+更谈不上「再放行一次」。
+
+宿主侧还有第二道闸：`BackgroundWebView.kt` 的 `outcome.complete` 是幂等的、**只取第一个终态**。
+两道闸叠起来 ⇒ 「命中」与「放行」是**互斥的两种终局**，一旦命中了就不可能再放行。
+
+2026-10-03 实测印证：在 `/sub.png` 上命中、主框架与 `<script>` 上返回 null，整轮仍然以
+`Intercepted` 收场。
+
+⇒ **要验「放行」就一次都别命中**：接了回调、每次都返回 `null`、只记录不复议，
+页面照样跑完（回调在每一次请求上都被调了不止一次，这本身也是「放行不影响加载」的证据）。
+回归在 `NativeWebViewHostTest.releasingEveryRequestLetsPageFinish`。
+
+**为什么值得单列一节**：早先那条用例把「命中 → 放行」当成真实能力，来源是**一个桩里的
+手攥 `CompletableDeferred`** —— 桩有那道闸门，真实现没有对应物，于是实测挂满 608 s。
+**写这类时序断言前先问：真实现里这条时序存在吗？** 别把桩的时序翻译成真引擎版。
+
+---
+
 ## 速查清单
 
 1. 记 `ProcessFailed` 的 kind/reason/exit，**只对致命 kind 报警**。
@@ -520,4 +545,6 @@ STA + 消息泵的线程上去 `CreateCoreWebView2Controller` —— **稳定失
    对照 `GetGUIThreadInfo(GetForegroundWindow() 的 tid)` —— **那个**队列才是收按键的。
    `GetFocus()` 和 `GetActiveWindow()` 都做不到（都按线程），跨进程证明不了任何事。
 10. 别指望「可见视图建在 AWT 线程、父子同线程」这条路 —— 一个 environment 只能在创建它的
-    那条 UI 线程上建控制器（实测 `hr=0x802A000C`），见第 12 节。
+   那条 UI 线程上建控制器（实测 `hr=0x802A000C`），见第 12 节。
+11. **拦截回调的「命中」与「放行」是互斥的两种终局** —— 想验「放行」就一次都别命中，
+   见第 13 节。

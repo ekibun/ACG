@@ -23,9 +23,9 @@ import kotlin.test.fail
 /**
  * 自研 WebView2 宿主（`cxx/webview/webview.cpp`）的**端到端**回归测试。
  *
- * 前面那些 WebView 用例（[soko.ekibun.acg.engine.WebviewJsTest]）验的是 JS wrapper，
- * 用桩顶替了 `_java`，碰不到真正的东西。这里反过来：起一个本地 HTTP 服务，把
- * 真的页面喂给真的 WebView2，锁住几件**只有真的跑起来才会坏**的事：
+ * 本类**不走** `_binding`：直接构造 [WebViewTask] 调 [loadBackgroundWebView]，
+ * 验的是**WebView2 宿主本身**的行为 —— 起一个本地 HTTP 服务，把真的页面喂给真的
+ * WebView2，锁住几件**只有真的跑起来才会坏**的事：
  *
  * 1. **子资源在拦截回调里看得见**（`<script src>`），且 `isForMainFrame == false`、
  *    `method` / `headers` 都是真值。
@@ -33,6 +33,9 @@ import kotlin.test.fail
  * 3. **cookie 在不同任务之间是共享的** —— 两次任务走的是同一个 environment
  *    （同一份 user data folder）。可见页与后台页共用同一份存储靠的就是这个机制。
  * 4. **可见视图的 `evaluate` 拿得回结果** —— `nativeScriptResult` 那条管道的收件人接上了。
+ * 5. **拦截回调全程放行也能把页面跑完** —— 回调在每个请求上都被调了不止一次，
+ *    一次都不命中时整轮仍以「脚本跑完」收场。（注意别写成「命中 → 放行」：
+ *    真引擎里命中即 `Stop()`，那条时序不可达 —— 见 `releasingEveryRequestLetsPageFinish`。）
  *
  * 环境不满足时这几个用例都跳过：这测的是集成，不是环境。跳过前会先跑一次
  * [checkHost] 体检（真导航一个 `about:blank`），并把原因打到 stdout ——
@@ -40,6 +43,10 @@ import kotlin.test.fail
  *
  * 注意 `loadBackgroundWebView` 用的是 [`BACKGROUND_WEBVIEW_TIMEOUT_MS`] = 30s，
  * 这里外面再套一层 60s 的护栏，免得真出问题把构建挂死。
+ *
+ * 正因为不走 `_binding`，本类证明不了 `JsEngine` 的 `when` 派发改对了 ——
+ * 那一路由 [soko.ekibun.acg.engine.JsEngineDispatchTest] 管（零桩、真 `JsEngine`）。
+ * 两类合起来才覆盖两端：本类验宿主，那个验能力桥的派发形状。
  */
 class NativeWebViewHostTest {
   private lateinit var server: HttpServer
@@ -161,6 +168,69 @@ class NativeWebViewHostTest {
     }
 
   /**
+   * 拦截回调**全程放行**（一次都不命中）之后，加载能自己跑完。
+   *
+   * 这条验的是「放行」这个结局本身 —— 也就是 [WebViewTask.onInterceptRequest]
+   * 摆在脚本面前的那个选择里，`null` 这一支到底通不通。
+   *
+   * **别把它写成「命中 → 放行」**：那条时序在真引擎里**不可达**。
+   * `cxx/webview/webview.cpp` 的 `RequestHandler::Invoke` 里，一旦回调返回命中就
+   * 置 `view->settled = true` 并立刻 `webview->Stop()`；而同一个 `Invoke` 的开头
+   * 还有 `if (!view || view->settled) return S_OK;` —— 也就是说**命中之后连回调
+   * 都不会再被调一次**，更谈不上「再放行一次」。实测也印证了：在 `/sub.png` 上命中、
+   * 主框架与 `<script>` 上返回 null，整轮仍然以 `Intercepted` 收场（`outcome.complete`
+   * 幂等、取第一个终态，命中那一刻结果就定了）。
+   *
+   * 回调在每一次请求上都被调了不止一次，这本身也是「放行不影响加载」的证据。
+   */
+  @Test
+  fun releasingEveryRequestLetsPageFinish() =
+    runBlocking {
+      if (!webViewReady()) return@runBlocking
+
+      val seen = Collections.synchronizedList(mutableListOf<WebViewRequest>())
+      val result =
+        guarded {
+          loadBackgroundWebView(
+            WebViewTask(
+              url = url("/page.html"),
+              // 一次都不命中：只记录，不给答复。
+              onInterceptRequest = { request ->
+                seen += request
+                null
+              },
+              script = "({ sub: !!window.__subLoaded, imgs: document.images.length })",
+            ),
+          )
+        }
+
+      // 回调被反复调用过（不是只调一次就完事），且主框架与子资源都到过。
+      val urls = seen.map { it.url }
+      assertTrue(
+        seen.any { it.url.endsWith("/page.html") && it.isForMainFrame },
+        "主框架请求应该在回调里：$urls",
+      )
+      assertTrue(seen.any { it.url.endsWith("/sub.js") && !it.isForMainFrame }, "<script> 应该到过：$urls")
+      assertTrue(seen.size >= 2, "回调应该在每个请求上都被调用一次，实际只调了 ${seen.size} 次：$urls")
+
+      // 全程放行 ⇒ 没有任何一次命中 ⇒ 整轮必须以「脚本跑完」收场。
+      val scripted =
+        assertIs<WebViewTaskResult.Scripted>(
+          result,
+          "全程返回 null（放行）不该产生 Intercepted：实际是 $result",
+        )
+      val json = scripted.json ?: fail("json must not be null when the script returns a value")
+      assertTrue(
+        json.contains("\"sub\":true"),
+        "放行之后 <script> 应该真的执行了（这是「放行」这个结局的证据）：$json",
+      )
+      assertTrue(
+        json.contains("\"imgs\":1"),
+        "放行之后 <img> 子资源也该加载进 DOM（证明放行不是只对主框架有效）：$json",
+      )
+    }
+
+  /**
    * cookie 跨任务共享。
    *
    * 两次任务各自建一个隐藏窗口，但 environment（→ 浏览器进程 → cookie 存储）是
@@ -217,8 +287,9 @@ class NativeWebViewHostTest {
 
   /**
    * 可见视图上的 `evaluate` —— 和后台任务同一个 `ExecuteScript`，只是结果走
-   * `nativeScriptResult` 那条管道。**这条管道以前没有收件人**（那个回调曾经是空
-   * 实现），结果回到 native 就掉地上了，所以这条用例锁的就是「收件人接上了」。
+   * `nativeScriptResult` 那条管道。**这条管道的收件人是 `WebViewTask.onScriptResult`
+   * 这一侧的回调**，它空着的时候结果回到 native 就掉地上了，所以这条用例锁的就是
+   * 「收件人接上了」。
    *
    * **不 attach 也能测**，这也是它能在 jvmTest 里跑的原因：
    *
@@ -281,8 +352,8 @@ class NativeWebViewHostTest {
         //
         // 顺带记一笔已知的不一致：后台任务那条链路上，`init.js` 只判了
         // `json == null || json === ""`，**没判 `"null"`**，所以后台脚本没返回值时
-        // 脚本侧拿到的是 `null` 而不是 `undefined`（`WebviewJsTest` 用的桩给的是
-        // `""`，测不到这条真实分支）。要不要一并对齐，取决于插件有没有依赖它。
+        // 脚本侧拿到的是 `null` 而不是 `undefined`。要不要一并对齐，
+        // 取决于插件有没有依赖它。
         assertEquals(
           "null",
           NativeWebView.evaluateScript(handle, "undefined"),
