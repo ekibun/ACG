@@ -140,7 +140,7 @@ native（`cxx/`：WebView2 宿主、QuickJS 桥、FFmpeg 解封装+解码+播放
 **操作范围只在本仓库**：只改仓库目录及其子目录下的文件；仓库之外（用户级配置、`~/.workbuddy/`、
 系统目录、别的仓库）一律不动 —— 需要时只读，不写、不建、不删。
 
-**可以自主做完、不必中途问**：读代码与文档；改业务代码与文档；跑编译与 `:shared:jvmTest`；
+**可以自主做完、不必中途问**：读代码与文档；改业务代码与文档；跑编译闸门、**只跑与本次改动相关的定点测试**；
 修**由本次改动引起的**失败并重跑；把新踩的坑写回本文件、就近的 `cxx/AGENTS.md`
 或 [`.agents/`](./.agents) 下对应的 skill；**未完成的工作不写进指令文件**，一律进
 [TODO.md](./TODO.md)（文档体例见 [`.agents/README.md`](./.agents/README.md)）。
@@ -148,14 +148,36 @@ native（`cxx/`：WebView2 宿主、QuickJS 桥、FFmpeg 解封装+解码+播放
 **必须先问**：`git commit` / `push`；删文件；改依赖版本；动 submodule；其他不可逆、
 或影响面明显超出本次任务的操作。
 
-**"做完"的定义**：过 skill `build-and-test` 里的**三条编译闸门**，与本次改动相关的 `jvmTest` 通过
-（失败属本次改动就自己修到过）；**碰了 native 还要确认 dll 已落到运行位置**。
+**编译、测试、lint 三样默认都不跑**：这三样只在**用户确认提交时**跑一次（见 §6），或用户**明确要求**时跑；
+改代码的验收阶段只跑**定点测试**——跑得通就说明改动没影响到别处，编译一致性不靠它证明。
+
+- **测试跑定点的**：只跑**与本次改动直接相关**的测试
+  （`:shared:jvmTest --tests "soko.ekibun.<包>.<类>"`，必要时再窄到方法）；**不跑全量 `:shared:jvmTest`**。
+  理由是本工程的测试里有大量**超时兜底**（`@Test(timeout = …)` 加 `withTimeout` 护栏，见
+  [`.agents/skills/build-and-test/references/build-and-test.md`](./.agents/skills/build-and-test/references/build-and-test.md)
+  的「测试」一节）—— 全量跑一遍慢，且失败时**分不清是超时到点还是真回归**，容易把结论带偏。
+- **编译闸门不跑**：三条编译（`build-and-test` 里的闸门）一条都不跑。定点 `jvmTest` 自身会编到
+  jvm 侧，够挡住"改坏了自己写的那处"；跨端一致性与 Android 侧的编译错误**留给提交前那次**。
+- **lint 不跑**：`ktlintCheck` / `ktlintFormat` / `clang-format --dry-run` 一律不跑。
+  尤其别用 `ktlintFormat` 顺手格式化 —— 它会改到本次改动之外的行，直接违反 §1 的「外科手术式改动」。
+
+**"做完"的定义**：**与本次改动相关的定点 `jvmTest`** 通过（失败属本次改动就自己修到过）；
+**碰了 native 还要确认 dll 已落到运行位置**。
 不要在第一轮实现完就停下来问"要不要 review" —— 先按 §1 自查一遍再报。
 
 ---
 
 ## 6. 提交
 
+- **提交前把三样全核对一遍**：用户确认提交时，依次跑
+  **三条编译闸门**（`./gradlew :shared:compileAndroidMain :shared:compileKotlinJvm :desktopApp:compileKotlin`，
+  注意不是 `compileDebugKotlinAndroid`）、
+  **全量测试**（`./gradlew :shared:jvmTest --console=plain --rerun`，结果读
+  `shared/build/test-results/jvmTest/TEST-*.xml`）、**lint**
+  （`./gradlew :shared:ktlintCheck --continue` 与 `clang-format --dry-run --Werror`），
+  把结论一并报出来再提交。超时兜底导致的失败按 skill `project-traps` 的
+  [`silent-failures.md`](./.agents/skills/project-traps/references/silent-failures.md) 甄别，别靠重跑掩盖。
+  （`.githooks/pre-commit` 当场就会拦一遍 lint，所以 `ktlintCheck` 那次通常是空跑。）
 - Co-author 署名固定，别自创 `WorkBuddy <noreply@...>` 之类：
 
   ```

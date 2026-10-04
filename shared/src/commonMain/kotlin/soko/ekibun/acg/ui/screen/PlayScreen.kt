@@ -20,7 +20,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
-import soko.ekibun.acg.player.FileIO
+import soko.ekibun.acg.player.HttpIO
 import soko.ekibun.acg.player.Playback
 import soko.ekibun.ffmpeg.AVMediaType
 import soko.ekibun.ffmpeg.AvFormat
@@ -33,9 +33,8 @@ import soko.ekibun.ffmpeg.FFPlayer
 @Composable
 fun PlayScreen() {
   val playback = remember { mutableStateOf<Playback?>(null) }
-  // 输入框的初始值留空：本页是调试页签，地址由使用者填（别把本机路径写进仓库）。
   val url =
-    remember { mutableStateOf("") }
+    remember { mutableStateOf("https://media.w3.org/2010/05/sintel/trailer.mp4") }
   val player = remember { mutableStateOf<FFPlayer?>(null) }
   val duration = remember { mutableFloatStateOf(0f) }
   val pts = remember { mutableFloatStateOf(0f) }
@@ -63,7 +62,7 @@ fun PlayScreen() {
                 val newPlayer =
                   FFPlayer(
                     url.value,
-                    FileIO.Handler(),
+                    HttpIO.Handler(),
                     playback.value,
                   )
                 player.value = newPlayer

@@ -28,7 +28,10 @@ JAVA_HOME=<任意一份 JDK> ./gradlew :androidApp:assembleDebug                
 **结果落盘再读**，别靠终端实时输出下判断：Windows 上 JVM 按控制台代码页编解码，与 UTF-8 的日志
 对不上就是乱码。加 `--console=plain` 让输出变成可线性读的纯文本。
 
-## 闸门：改完代码至少过这三条编译
+## 闸门：三条编译（**改代码时不跑**，提交前核对）
+
+根 [`AGENTS.md`](../../../../AGENTS.md) §5 的规则：验收阶段**一条都不跑**，只跑定点 `jvmTest`；
+这三条只在**用户确认提交时**跑一次。
 
 **任务名别写错**：
 
@@ -37,15 +40,31 @@ JAVA_HOME=<任意一份 JDK> ./gradlew :androidApp:assembleDebug                
 #         注意不是 compileDebugKotlinAndroid
 ```
 
-`:androidApp` 自身的编译暂未纳入这道闸门 —— 改了 `androidApp/` 下的代码不会被这三条拦到。
+三条各自的覆盖面（`desktopApp` 只有一个 45 行的文件，另外两个才是大头）：
 
-## 格式化 / lint（工具已就位，改完也要跑）
+| 任务 | 编到哪 |
+|---|---|
+| `:shared:compileAndroidMain` | `shared/src/androidMain` + `commonMain` |
+| `:shared:compileKotlinJvm` | `shared/src/jvmMain` + `commonMain` |
+| `:desktopApp:compileKotlin` | `desktopApp/src` 自己（不含 shared） |
+
+⚠️ `:androidApp` 自身的编译暂未纳入这道闸门 —— 改了 `androidApp/` 下的代码不会被这三条拦到。
+⚠️ `commonMain` 的 `expect` / `actual` 是否两端都成立，只有**前两条一起跑**才查得出来；
+只跑一条时，跨端签名错要等提交前才暴露。
+
+## 格式化 / lint（**改代码时不跑**，提交前或用户明确要求时才跑）
+
+根 [`AGENTS.md`](../../../../AGENTS.md) §5 的规则：验收阶段**不跑**下面任何一条。
 
 ```bash
 ./gradlew :shared:ktlintCheck --continue      # Kotlin（标准规则 + compose-rules 规则集）
 ./gradlew ktlintFormat --continue             # 同上，能自动修的它直接修掉
 clang-format -i cxx/webview/webview.cpp       # C++；改哪个点哪个，就那三个文件
 ```
+
+⚠️ **`ktlintFormat` 会改到本次改动之外的行** —— 拿它"顺手格式化"直接违反 §1 的「外科手术式改动」，
+所以默认不跑。只想看自己这次写的行合不合规，就临时跑一次 `ktlintCheck --continue`
+（它**只校验、不改文件**）。
 
 规则正本是根目录的 `.editorconfig`（Kotlin）与 `.clang-format`（C++，Google 基线，只偏离
 「行尾统一 LF」一处），两边的取值必须一致。`clang-format` **不在 PATH 上**，
@@ -96,14 +115,19 @@ git 对**没有执行位的 hook 是静默跳过**的。
 
 ## 测试
 
+**默认只跑定点的**（根 [`AGENTS.md`](../../../../AGENTS.md) §5 的规则，理由见本节末尾）：
+
 ```bash
-./gradlew :shared:jvmTest --console=plain
+./gradlew :shared:jvmTest --tests "soko.ekibun.web.NativeWebViewHostTest" --console=plain
+./gradlew :shared:jvmTest --tests "soko.ekibun.quickjs.QuickJSTest.objectWithVariousTagsRoundTrips"
+```
+
+全量只在**用户确认提交时**跑一次（§6）：
+
+```bash
+./gradlew :shared:jvmTest --console=plain --rerun
 #   结果读 XML，不看控制台：
 #   shared/build/test-results/jvmTest/TEST-*.xml  ->  tests= / skipped= / failures= / errors=
-
-# 单个类 / 单个方法（路径就是真实包名）—— 只改了某一处、想快点验证时用
-./gradlew :shared:jvmTest --tests "soko.ekibun.web.NativeWebViewHostTest"
-./gradlew :shared:jvmTest --tests "soko.ekibun.quickjs.QuickJSTest.objectWithVariousTagsRoundTrips"
 ```
 
 - **要重复跑（偶发问题、改过 native 之后复查）必须加 `--rerun`**。不加的话第 2 轮起任务是
@@ -115,3 +139,13 @@ git 对**没有执行位的 hook 是静默跳过**的。
   [`silent-failures.md`](../../project-traps/references/silent-failures.md)：
   不要靠重跑掩盖，也不要改产品代码去迁就。
 - 测试的报错与日志**全用英文（ASCII）**，避免 Windows 控制台代码页把中文变成乱码。
+
+### 为什么默认不跑全量
+
+jvmTest 里有 **11 个 `@Test(timeout = …)` 兜底**（`HttpRequestStreamingTest` 3、
+`HttpStreamingTest` 3、`HttpAbortTest` 2、`RealHttpReadTest` 2、`HttpAbandonedSessionTest` 1，
+上限 60 s ~ 180 s），另有一批 `withTimeout` 护栏（10 s ~ 60 s）。后果是：全量一轮慢；
+失败时**分不清是超时兜底到点、还是真回归**，容易把结论带偏。
+
+真回归的判据仍然是定点测试 —— 只跑改动相关的类 / 方法，失败必然与自己有关。
+

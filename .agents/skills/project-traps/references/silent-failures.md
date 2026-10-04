@@ -212,6 +212,139 @@
   症状形状：`jcmd <pid> GC.heap_info` 显示堆只有几十 MB，任务管理器却是 GB 级；
   `GC.class_histogram` 里 `org.jetbrains.skia.impl.CleanableImpl` / `Managed$CleanerThunk` 有几百个
   （wrapper 已经没了、native 还没还）。**改前 900MB↔2.2GB 锯齿，改成复用位图池后稳定 280 MB**。
-  对策：**别在每帧路径上分配 skiko 对象** —— 复用 `Bitmap`（池化）+ `peekPixels()?.addr` +
-  `memcpy` 写入 + 让 Compose 从复用位图读（本地做法：`DesktopPlayback.framePool` 与
-  `VideoSurface.jvm.kt` 的 `nativeCanvas.drawImageRect`）。
+   对策：**别在每帧路径上分配 skiko 对象** —— 复用 `Bitmap`（池化）+ `peekPixels()?.addr` +
+   `memcpy` 写入 + 让 Compose 从复用位图读（本地做法：`DesktopPlayback.framePool` 与
+   `VideoSurface.jvm.kt` 的 `nativeCanvas.drawImageRect`）。
+- **`Http.request` 会把整个响应体先读进内存 ⇒ 远程播放「不报错地」先整包下载**（2026-10-03 实测）。
+  症状形状：远程源迟迟不出画面（要等整包下完），内存随文件大小走，而**没有任何报错**。
+  根因不在引擎，在 **ktor 的入口选择**：`HttpClient.request(...)` → `HttpStatement.execute()` →
+  `fetchResponse()`，而它内部有一句 `val result = call.save().response`（源码注释
+  "Save the body again to make sure that it is replayable"）⇒ **body 被完整缓冲**。
+  ktor 另有不 save 的 `fetchStreamingResponse()`，公开面是 `HttpStatement.execute(block)`
+  —— block 里**同时**拿得到 `headers` 与 `bodyAsChannel()`。
+  实测（本地服务端把 body 分 10 块、每块隔 50 ms，约 500 ms 发完）：`Http.request` **886 ms**、
+  紧随其后的 `bodyAsChannel()` 只 **7 ms**；响应体发一半就停住（连接不关）时 `Http.request`
+  **5 s 都不返回**。
+  ⇒ 对策：**要边下边用就用 `Http.requestStreaming`**（`acg/common/Http.kt`，走 `execute(block)`）。
+  它要求「读发生在 block 期间」—— `HttpIO` 的做法是把整条会话挂在 block 里（等一个由
+  `close()` 或「会话被换掉」完成的信号），于是 headers 与 channel 全程有效。
+  对照：`HttpStreamingTest`（第一次读必须**远早于**整包下发完成）+ `HttpReadContractTest`
+  （流式之后帧序列仍与本地文件逐帧相同）。
+  测这条时**一次只量一个调用**：曾把 `Http.request` 与 `bodyAsChannel()` 混在一个时间差里量，
+  又把「下发时长」算错一个因子（写成 `块数×64×间隔`，那个 64 是多余的），得出过「大 body 会
+  提前返回」的假结论、来回翻供三次 —— 时长算式要能用两个量级互验。
+- **ktor 3.5.2 的 `ByteReadChannel.awaitContent(min)` 参数是「最少字节数」，不是超时**（2026-10-03 实测）。
+  症状形状：把毫秒当参数传进去，编译通过、健康流上看似正常（数据到了就返回），但**静默处永远
+  醒不来**（在等「凑够 min 个字节」），abort 叫不醒、旗标查不到 —— 整套「超时轮询旗标」的设计
+  静默失效。实现是 `source.request(min)`，两个引擎（Java / OkHttp）的 body 通道都是 `ByteChannel`，
+  它的 `awaitContent` 挂起等到 ≥min 字节或通道关闭，**没有超时重载**。
+  ⇒ 「等一会儿就查旗标」必须自己包 `withTimeoutOrNull(ms) { channel.awaitContent(1) }`：
+  `sleepWhile` 走 `suspendCancellableCoroutine`，超时取消是干净的（不 consume 字节），
+  事件驱动性也还在（数据一到立刻唤醒）。见 `HttpIO.Response.awaitContent` 的 KDoc。
+- **`async` 块里 `throw` 去表达控制流 ⇒ 把**父** `runBlocking` 一起取消，外层 `catch` 根本收不到**（Kotlin / 协程，2026-10-04 实测）。
+  症状形状：**不报错，调用方拿到一个 `Int.MIN_VALUE` 之类的"没返回"哨兵值**。现场是 `HttpIO.read`：
+
+  ```kotlin
+  // ❌ 这样写，三个 abort 用例全红
+  runBlocking {
+    val signal = AbortSignal()
+    val abort = async { signal.await(); throw Http.AbortedException() }   // ← 哨兵
+    handler.onSignal { signal.raise() }
+    try { readSuspend(buf) }
+    catch (e: Http.AbortedException) { AvFormat.AVERROR_EXIT }            // ← 收不到
+    ...
+  }
+  ```
+
+  哨兵是 `runBlocking` scope 的**子协程**。`async` 里抛出的异常**不是**"留给 `await` 取的值"
+  —— 它是**未捕获异常**，会 `parentCancelled` **向上取消父 `Job`**。父 `BlockingCoroutine`
+  一进入 `Cancelling`，整个 scope（含 `readSuspend`）全被拆掉，那个
+  `catch (Http.AbortedException)` **一次都没跑**，`runBlocking` 直接把取消异常抛给调用方。
+  `system-err` 里的形状是：
+
+  ```
+  kotlinx.coroutines.JobCancellationException: Parent job is Cancelling;
+    job="coroutine#26":BlockingCoroutine{Cancelling}
+  ```
+
+  ⇒ **规矩：`async` 块里绝不用 `throw` 表达控制流**，尤其当它挂在你**想保住**的那个 scope 上。
+  要触发方去"通知"等待方，用 `目标job.cancel()`（现状写法）或
+  `CompletableDeferred.completeExceptionally()` 再让目标 `await()` ——
+  总之**别让异常从子协程漏进父 scope**。修后（也是现在的定稿写法）：
+
+  ```kotlin
+  val signal = AbortSignal()                       // private 嵌套，CompletableDeferred
+  val job = async { readSuspend(buf) }
+  val abort = async { signal.await(); job.cancel() }     // ✅ 只 cancel，不作声
+  handler.onSignal { signal.raise() }
+  try { job.await() }
+  catch (e: CancellationException) { AvFormat.AVERROR_EXIT }   // 哨兵叫醒的唯一收场
+  finally { abort.cancel(); handler.onSignal(null) }
+  ```
+
+  ⚠️ 定稿后**只有一条被叫醒的路**（哨兵 `cancel` ⇒ `CancellationException`）——
+  `Http.AbortedException` 连同跨层透传的 `Http.Signal` 已整体删除（见 2026-10-04 日志的
+  「收窄成终稿（A 方案）」），所以这里不再需要"两条路分别接"。
+
+  对照：`Http.Response.awaitContent` 里也有 `async { data }`，它**安全**，
+  因为那里用 `select` 挑一支、`finally` 把落选支 `cancel()` 掉 —— 异常从来没被"抛出去"过。
+  **两处的共同点：`async` 只用来挂等待，不用来报错。**
+
+- **固定常数 ε 做「单帧步退」必然失效（Kotlin / FFmpeg，2026-09-22 实测）**。
+  症状形状：seek 到某个关键帧落点上（例如恰好 4.0s、GOP 2 秒）再按「-1f」**不动**，
+  连按只是原地重画同一帧 —— **不报错、不卡**，只是没动。
+  根因：`av_seek_frame` 会把目标用 `av_rescale`（= `AV_ROUND_NEAR_INF`，四舍五入）折进
+  **流的时基**，于是**半格以内一律折回当前帧自己那一格**，容器又给出同一个关键帧，
+  一帧都丢不掉。实测半格（= `0.5 × 1e6 × tb.num / tb.den`）：`test.mp4`（tb 1/100000）
+  = 5µs、`ramp2.mp4`（tb 1/12288）= 41µs —— **1 微秒必然被吞掉**。
+  ⇒ ε 必须同时大于「半格」、小于「一帧间隔」。**边界已实测**（两份内容逐帧相同、只差容器
+  时基的素材）：临界 ε 就落在半格上（tb 1/12288 → 40/41µs 之间，半格 40.69µs；
+  tb 1/24 → 20833/20834µs 之间，半格 20833.3µs），上界也精确等于一个帧间隔
+  （41666µs 有效、41667µs 起会一次退两帧）。
+  ⇒ 结论：**固定常数 ε 不成立** —— 1ms 在 tb 1/12288 上够用、在 tb 1/24 上被半格吞掉。
+  现状取 **ε = 3/4 × 已缓存的帧间隔**（`FFPlayer.frameIntervalUs`）：3/4 天然落在
+  `半格 ≤ 间隔/2 < 3/4 间隔 < 间隔` 这段区间里，用不着把 `time_base` 从 native 暴露出来。
+
+- **作废预读通道用 `close()` 而不是 `cancel()`（Kotlin / kotlinx.coroutines）** → **不唤醒**
+  停在 `channel.send` 上的读作业：预读灌满、没人消费时读作业就停在那儿，于是作废流程里紧随其后的
+  `join` **死等**，症状是 seek / close 挂住不动（不报错、不抛，就是等）。
+  ⚠️ `close()` 还会让**已预读**的包投递成功、落进一条没人再收的通道 ⇒ 每次作废漏一个 `AVPacket`
+  （ffmpeg 侧表现为丢包，且不报错）。`cancel()` 则以 `CancellationException` 收场、已预读的包由
+  `onUndeliveredElement` 归还。
+  ⇒ 也正因为走 `cancel()`，**不能**照旧「`close()` + 遍历队列挨个关包」—— 队列已被丢弃。
+  现状见 `AvFormat.resetChannel` 的三步固定顺序（第 2 步）。
+
+- **两轮播放同时在飞会串帧（Kotlin / FFmpeg）**。硬约束在 native 侧：**每种流只有一块输出
+  缓冲**（`SWContext::videoBuffer`）—— `AvPlayback.postFrame` 整体改写它、后一步
+  `AvPlayback.flushFrame` 才把像素抄给平台。两轮同时走到这对调用中间，上一轮的送显就会读到
+  这一轮写进去的像素。⇒ 同一时刻只允许一轮在飞（`FFPlayer.takeOverPlayback`）。
+  ⚠️ 别拿 `Mutex` 解：**它是排队**，后到的调用等前一轮跑完再上 ⇒ 上一次跳转的结果照样先
+  落地一次、再被下一次覆盖（「都做一遍」，不是「后来者顶掉先到者」）；而且它只盖得住被包住的
+  那几个入口，`seekTo` / `play` / `resume` 全都裸奔。要的语义是**后到者顶掉先到者**。
+  ⚠️ 判据**只看对象身份**（一轮 == 一个 `PTS` 对象，`pts === 当前 pts`），**不要**掺
+  `pts.playing` —— 那会把「只是暂停」误判成「位置已换」，白丢解码帧。`[resume]` /
+  `[stepForward]` **不换对象**，因为它们不换位置。
+  ⚠️ 少了这条判据的另一半后果：被 seek 作废的那一轮会**在下一轮复活** —— 新一轮把
+  `pts.playing` 再次置 `true` 时，上一轮正卡在「等视频追上主时钟」里的那个作业会继续往下走、
+  补一次 `flushFrame`，而缓冲里此刻已经是**这一轮**的像素 ⇒ 那一帧显示成后面的帧。
+  实测（2026-09-22，ramp 素材逐帧反查帧号）：同一帧被 `postFrame` 两次而只 `flush` 一次，
+  画面上表现为**重复帧 + 之后整体落后两帧**。
+
+- **同一轮内相邻两帧的送显顺序反了会串一帧（Kotlin / FFmpeg）**。症状形状：纯顺序播放，
+  送显的像素**恰好领先自称的时间戳一帧**（实测 mp4：204 帧里 180 帧不符），不报错、不卡。
+  根因同上那**一块**共享缓冲：`postFrame` 整体改写它、`flushFrame` 才抄走，所以必须
+  **先等上一帧送显完、再写这一帧**。反过来（先 `postFrame` 再 `join`）本帧先覆写了缓冲，
+  而上一帧的 `flush` 还等着抄 ⇒ **上一帧显示成本帧的像素**。⚠️ 排队中的下一帧正好趁
+  「等视频追上主时钟」那个 `delay`（真挂起点）的空档写进来，所以这是**每一帧**都错位，
+  不是偶发。`FFPlayer` 的解码作业里那条 `join` 不能省。
+
+- **seek 后的丢帧收敛必须排在送显之前，且音频也要丢（Kotlin / FFmpeg）**。判据照 ffplay 的
+  `frame_drops_early`：`diff = dpts - master_clock`，主时钟 == 收敛目标，
+  `|diff| < AV_NOSYNC_THRESHOLD && diff < 0` ⇒ 解码后立刻丢。
+  ⚠️ **排在 `flushFrame` 后面等于「先上屏、再决定丢不丢」**：那一路 `flushFrame` 没有返回值
+  （恒 -1），而送显就发生在它那里，所以丢帧的检查必须排在**之前**。
+  ⚠️ **音频也要丢**：落点是**容器级**的（实测 mp4 seek 到 5.0s，音频首包在 3.90s、视频关键帧
+  在 4.0s），音频不丢就会把主时钟按它真正上屏的时间戳重新锚定到目标之前，视频只能干等时钟
+  爬上来。丢的是开头**连续**的一段，声卡此刻刚被 flush，所以不会留下可听见的缺口。
+  判据用 `AvFrame` 自己的时间戳（native 侧已折算成 `AV_TIME_BASE` 微秒，与 seek 目标同单位）。
+

@@ -1,6 +1,7 @@
 package soko.ekibun.ffmpeg
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import soko.ekibun.Pointer
@@ -27,11 +28,9 @@ open class AvFormat(
     /** 允许落在非关键帧上（仅在 demuxer 支持时有效）。 */
     const val AVSEEK_FLAG_ANY = 4
 
-    // AVSampleFormat 常量。
-    // 直接照抄 FFmpeg 枚举值，避免各平台实现里散落 "0"/"1" 这类魔术数字。
-    //
-    // 视频输出格式不在这里：native 侧已把转码目标钉死成 AV_PIX_FMT_RGBA
-    // （`cxx/ffmpeg/ffmpeg.cpp` 的 postFrameVideo），平台侧没有可选项。
+    // AVSampleFormat 常量，直接照抄 FFmpeg 枚举值，避免各平台实现里散落 "0"/"1" 这类魔术数字。
+    // 视频输出格式不在这里：native 侧已把转码目标钉死成 AV_PIX_FMT_RGBA（`cxx/ffmpeg/ffmpeg.cpp`
+    // 的 postFrameVideo），平台侧没有可选项。
     const val AV_SAMPLE_FMT_NONE = -1
     const val AV_SAMPLE_FMT_U8 = 0
     const val AV_SAMPLE_FMT_S16 = 1
@@ -46,9 +45,20 @@ open class AvFormat(
     const val AVERROR_EOF = -541478725
 
     /**
+     * libavutil/error.h 的 AVERROR_EXIT（`FFERRTAG('E','X','I','T')`）：
+     * **「操作被要求立即中止」**，上游文档的原话是 "the called function should not be restarted"。
+     *
+     * 我们用它在 [resetChannel] 作废读轮那条路上：等待被打断**不是故障**，上层这一轮本来就要结束，
+     * 所以读作业不该把它当错误出声（见 getPacket）。
+     *
+     * 值是照 `FFERRTAG` 的定义算出来的，同一个式子能复现上面那个 AVERROR_EOF。
+     */
+    const val AVERROR_EXIT = -1414092869
+
+    /**
      * 预读通道装多少个 packet。
      *
-     * ⚠️ 这是**包数**口径，不是字节 —— mpv 的 `--demuxer-max-bytes` 与 ExoPlayer 的
+     * 这是**包数**口径，不是字节 —— mpv 的 `--demuxer-max-bytes` 与 ExoPlayer 的
      * `DEFAULT_MAX_BUFFER_SIZE` 都是字节口径。它同时是「暂停期间还能预读多少」的上界：
      * 通道满了，读作业就停在 `send` 上等消费侧来取（这就是回压）。
      */
@@ -84,23 +94,9 @@ open class AvFormat(
   }
 
   /**
-   * 打开输入、建 `AVFormatContext`。
-   *
-   * ⚠️ **本包唯一一个留在类体里的 `external fun`，别挪进 companion。**
-   *
-   * 本包的约定是「`external fun` 放 companion + `@JvmStatic`」（理由见 [AvFrame.closeNative]）——
-   * 但 `@JvmStatic` 有第二个后果：原生方法变成**静态**，于是第二个 JNI 实参从**实例**
-   * 变成**类对象**（`jclass`）。本函数恰好要用那个实参当实例：
-   * `cxx/ffmpeg/ffmpeg.cpp` 把 `thiz` 存进 `AVFormatContext::opaque`，再在 `io_open`
-   * 回调里对它 `GetObjectClass` 后读 `io` 字段。静态化之后 `GetObjectClass` 拿到的是
-   * `java.lang.Class`，`GetFieldID(..."io"...)` 抛 `NoSuchFieldError`，随后以 null
-   * fieldID 继续走 → **JVM 直接崩**（`EXCEPTION_ACCESS_VIOLATION`）。
-   * 2026-09-21 实测踩过，hs_err 里紧邻崩溃的那条事件就是
-   * `NoSuchFieldError: java.lang.Class.io Lsoko/ekibun/ffmpeg/AvIO$Handler;`。
-   *
-   * 留在类体里没有代价：类体的 `external fun` 是**实例**原生方法，JNI 名同样是外层类名
-   * `Java_soko_ekibun_ffmpeg_AvFormat_initNative`，与 companion + `@JvmStatic` 得到的名一样；
-   * 差别只在那第二个实参。全包其余 16 个原生方法都不碰 `thiz`，所以可以放心静态化。
+   * **本包唯一一个留在类体里的 `external fun`，别挪进 companion。** 本函数要 JNI 第二个实参
+   * （`thiz`）当**实例**用（存进 `AVFormatContext::opaque`），而 `@JvmStatic` 会把它变成 `jclass`
+   * ⇒ 静态化后 JVM 直接崩。规则与逐条判据见 `cxx/AGENTS.md` 的 JNI 一节。
    */
   private external fun initNative(url: String): Long
 
@@ -117,17 +113,13 @@ open class AvFormat(
     }
 
   /**
-   * 容器级 seek。
+   * 容器级 seek。`ts` / `minTs` / `maxTs` 的单位取决于 `stream`：`stream == null`
+   * （`stream_index = -1`）时是 **`AV_TIME_BASE` 微秒**；传了具体 stream 时是**该 stream 的
+   * `time_base` 单位**。
    *
-   * `ts` / `minTs` / `maxTs` 的单位取决于 `stream`：
-   * - `stream == null`（`stream_index = -1`）时是 **`AV_TIME_BASE` 微秒**；
-   * - 传了具体 stream 时是**该 stream 的 `time_base` 单位**。
-   *
-   * ⚠️ `minTs`/`maxTs` 只在 demuxer 实现了 `read_seek2` 时才生效。
-   * mp4/mov 只实现了旧的 `read_seek`，`avformat_seek_file` 会落进回退分支
-   * 把窗口整个丢掉，只按 `dir` 推出 `AVSEEK_FLAG_BACKWARD` 调 `av_seek_frame`，
-   * 结果必然是「不晚于 `ts` 的最近关键帧」。想精确到目标时间必须靠调用方
-   * 自己丢帧收敛（见 [FFPlayer.seekTo]）。
+   * `minTs`/`maxTs` 只在 demuxer 实现了 `read_seek2` 时才生效，mp4/mov 会落进回退分支把窗口整个丢掉
+   * ⇒ 结果必然是「不晚于 `ts` 的最近关键帧」。想精确到目标时间得靠调用方自己丢帧收敛
+   * （见 [FFPlayer.seekTo]）。
    */
   open suspend fun seekTo(
     ts: Long,
@@ -144,42 +136,43 @@ open class AvFormat(
   private var packetChannel: Channel<AvPacket?>? = null
 
   /**
-   * 丢掉当前这条预读通道；下次 [getPacket] 会重建一条（从新位置重新读）。
+   * 当前预读读作业（[getPacket] 首次调用时建；通道被换后由下一次 getPacket 换新）。
    *
-   * ⚠️ **必须用 `cancel()`、不能用 `close()`** —— 2026-10-01 实测两者的收尾完全不同：
+   * 它**不是**轮次的子作业 —— 挂在自己这个 scope 上，轮次结束不等它。[resetChannel] 要的恰恰是
+   * 「等它死透」，所以必须攥着引用。作业结束后引用仍指向已完成的 Job（join 立即返回），
+   * 无需置空。
+   */
+  private var readerJob: Job? = null
+
+  /**
+   * 作废当前读轮：唤醒卡在读里的读作业、掀掉预读通道、**等它收尾**。三步顺序固定：
    *
-   * | | 正卡在 `send` 上的读作业 | 队列里已预读的包 |
-   * |---|---|---|
-   * | `close()` | **不唤醒**（随后那个包还会投递成功，落进一条已经没人再收的通道） | 还收得到 |
-   * | `cancel()` | 以 `CancellationException` 收场，包由 `onUndeliveredElement` 归还 | 同样由回调归还 |
+   * 1. **io.abort()** 投「作废」事件（一次性）—— 读卡在 native 的 `av_read_frame` 里，协程取消够不到
+   *    它（见 [AvIO.Handler.abort]），事件让它在下一个等待点自己醒来；
+   * 2. **cancel 通道** —— 读作业可能停在 `channel.send` 上，不掀它下面的 join 就死等。**必须
+   *    `cancel()`、不能 `close()`**（队列已丢弃，两个后果见 `silent-failures.md`）；
+   * 3. **join 读作业**（[readerJob]）—— 返回前读作业必然已收尾。
    *
-   * 用 `close()` 的结果是**每次 seek 漏一个 `AVPacket`**（native，无 GC 兜底，见 [AvPacket]）。
-   * 也正因为走 `cancel()`，**不能再**照旧「`close()` + 遍历队列关包」：`cancel()` 之后队列已被
-   * 丢弃，而遍历会抛 `CancellationException`。
-   *
-   * ⚠️ 调用点必须先让消费侧停下（`FFPlayer` 的 `closeAsync` / `seekImpl` 都在 `pause()` 之后才
-   * 调到这里），否则正挂在 `receive` 上的消费侧会以 `CancellationException` 收场。
+   * 通道是**粘住**的（之后 [getPacket] 立刻拿到 null = EOF），所以置空。不需要「清旗标」：作废是**一次性
+   * 事件**、绑在这条 IO 自己那次读的私有信号上，新轮 = 新 IO = 新信号。**幂等**。
    */
   suspend fun resetChannel() {
+    io.abort()
     val oldChannel = packetChannel
     packetChannel = null
     oldChannel?.cancel()
+    readerJob?.join()
   }
 
   /**
-   * 取一个 packet 交给上层。
+   * 取一个 packet 交给上层。读包在后台读作业里做：**首次调用**时建一条容量 [PREFETCH_PACKETS] 的通道，
+   * 之后一直从它取（通道满则读作业停在 `send` 上等消费侧来取 —— 这就是回压）。
    *
-   * 读包在后台读作业里做：**首次调用**时建一条容量 [PREFETCH_PACKETS] 的通道，之后一直从它取
-   * （通道满则读作业停在 `send` 上等消费侧来取 —— 这就是回压）。
+   * **[streams] 只在「建通道那一次」生效**，之后同一通道存活期间的调用传什么都不看。换过滤条件 = 换通道，
+   * 由 [seekTo] 里的 [resetChannel] 保证（FFPlayer 每轮传 `pts.streams.values`，而换位置一定先 seek）。
    *
-   * ⚠️ **[streams] 只在「建通道那一次」生效**：它决定这条通道读哪些流，之后同一通道存活期间的
-   * 调用传什么都不看。换过滤条件 = 换通道，由 [seekTo] 里的 [resetChannel] 保证（FFPlayer 每轮
-   * 传 `pts.streams.values`，而换位置一定先 seek ⇒ 实际踩不到）。
-   *
-   * 返回 `null` 表示 **EOF**：读作业读到流尾会把通道关掉，此后每次调用都**立刻返回 null**
-   * （粘住的），不挂起、也不抛。读**出错**（非 [AVERROR_EOF] 的负返回值）同样折叠成 null ——
-   * aviobuf 会把 IO 错误毒化成 EOF 状态，API 层分不开；但错误会出声（native 两条 av_log +
-   * 这里的 stderr 一条），不是静默的"播完了"。
+   * 返回 `null` 表示 **EOF**（粘住的，不挂起也不抛）。读**出错**同样折叠成 null —— aviobuf 会把 IO 错误
+   * 毒化成 EOF 状态，API 层分不开；但错误会出声（native 两条 av_log + 这里的 stderr），不是静默的「播完了」。
    */
   suspend fun getPacket(streams: Collection<AvStream>): AvPacket? =
     withPtr { ptr ->
@@ -188,50 +181,48 @@ open class AvFormat(
           val channel =
             Channel<AvPacket?>(PREFETCH_PACKETS, onUndeliveredElement = { packet -> packet?.close() })
           packetChannel = channel
-          @Suppress("DeferredResultUnused")
-          CoroutineScope(formatDispatcher).async {
-            // 手里那个包还没交出去时，谁都得负责归还它 —— 下面 finally 兜底。
-            var inFlight: AvPacket? = null
-            try {
-              while (true) {
-                val packet = AvPacket()
-                inFlight = packet
+          readerJob =
+            CoroutineScope(formatDispatcher).async {
+              // 手里那个包还没交出去时，谁都得负责归还它 —— 下面 finally 兜底。
+              var inFlight: AvPacket? = null
+              try {
                 while (true) {
-                  val ret = getPacketNative(ptr, packet.ptr)
-                  if (ret < 0) {
-                    // EOF / 出错：这个 packet 交不出去了，必须就地归还 —— native 侧
-                    // 只有 av_packet_free 一个释放点，没有 GC 兜底（见 AvPacket）。
-                    packet.close()
-                    inFlight = null
-                    // 出错与 EOF 在这里同形收场（通道关闭、消费方拿到 null）：aviobuf
-                    // 的 fill_buffer 对 IO 层任何负返回值都置 eof_reached
-                    // （aviobuf.c:551-558），错误码过后过不来，API 层分不开。
-                    // 分离只能靠出声 —— native 在 read 回调与 getPacketNative 各有
-                    // 一条 av_log，这里补 Kotlin 侧的，JVM 测试才抓得到。
-                    if (ret != AVERROR_EOF) {
-                      System.err.println("[AvFormat] av_read_frame error ret=$ret, folded to EOF")
+                  val packet = AvPacket()
+                  inFlight = packet
+                  while (true) {
+                    val ret = getPacketNative(ptr, packet.ptr)
+                    if (ret < 0) {
+                      // EOF / 出错：这个 packet 交不出去了，必须就地归还 —— native 侧
+                      // 只有 av_packet_free 一个释放点，没有 GC 兜底（见 AvPacket）。
+                      packet.close()
+                      inFlight = null
+                      // 出错与 EOF 在这里同形收场（通道关闭、消费方拿到 null）：aviobuf 会把 IO 错误
+                      // 毒化成 EOF 状态，API 层分不开，只能靠出声 —— native 在 read 回调与 getPacketNative
+                      // 各有一条 av_log，这里补 Kotlin 侧的。[AVERROR_EXIT] 例外：作废收场，别出声。
+                      if (ret != AVERROR_EOF && ret != AVERROR_EXIT) {
+                        System.err.println("[AvFormat] av_read_frame error ret=$ret, folded to EOF")
+                      }
+                      return@async
                     }
-                    return@async
-                  }
-                  // `streams.isEmpty()` 也收下：那是**下载器模式**（不看画面、只要数据），
-                  // 调用方没有任何流可筛，此时要把每个包都读出来推进读取。
-                  // 别把它当成冗余判断删掉，否则下载会一包都读不到。
-                  if (streams.isEmpty() || streams.firstOrNull { it.index == ret } != null) {
-                    packet.streamIndex = ret
-                    channel.send(packet)
-                    // 交出去了：所有权归通道（没被收走时由 onUndeliveredElement 归还）。
-                    inFlight = null
-                    break
+                    // `streams.isEmpty()` 也收下：那是**下载器模式**（不看画面、只要数据），
+                    // 调用方没有任何流可筛，此时要把每个包都读出来推进读取。
+                    // 别把它当成冗余判断删掉，否则下载会一包都读不到。
+                    if (streams.isEmpty() || streams.firstOrNull { it.index == ret } != null) {
+                      packet.streamIndex = ret
+                      channel.send(packet)
+                      // 交出去了：所有权归通道（没被收走时由 onUndeliveredElement 归还）。
+                      inFlight = null
+                      break
+                    }
                   }
                 }
+              } finally {
+                // 手里还攥着包（读出错 / 被取消）就地归还；再关掉通道 —— 消费侧那个 `for`
+                // 靠它才会结束，不关就是**永久挂起**（挂着的那一方不会自己醒）。
+                inFlight?.close()
+                channel.close()
               }
-            } finally {
-              // 手里还攥着包（读出错 / 被取消）就地归还；再关掉通道 —— 消费侧那个 `for`
-              // 靠它才会结束，不关就是**永久挂起**（挂着的那一方不会自己醒）。
-              inFlight?.close()
-              channel.close()
             }
-          }
           channel
         }
       // 用 `for` 而不是 `receive()`：通道关闭后 `for` 会把缓冲收完再**正常结束**（不抛），

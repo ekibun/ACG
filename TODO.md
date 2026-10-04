@@ -40,29 +40,6 @@
 - **完成后必须做的收尾**：删掉 `AGENTS.md` §4 里那句"现状…仍有直接引用…见 `TODO.md` B4"
   的指针（届时规则已无例外），并删掉本条。
 
-### B8. seek 后的丢帧收敛没有真路径回归测试
-
-- **现状**：`FFPlayer` 的 `resyncTo` 丢帧收敛（ffplay `frame_drops_early` 的对应物）只有"判据副本"
-  级别的测试 —— `SeekWindowSemanticsTest` 里的 `shouldDropEarly` 是手抄的纯函数，锁不住
-  "判据接错了输入"。2026-09-21 修的就是这一类失效：判据读 `flushFrame` 的返回值，而视频路径
-  **恒返回 -1**（VIDEO 分支只是送显这个副作用），于是**一帧都没丢过**；判据还排在送显之后，
-  等于"先上屏、再决定丢不丢"。
-- **第二天补的另一半**：收敛只做视频也不够。seek 落点是**容器级**的，音频同样会退到目标之前
-  （实测 `ramp.mp4`：目标 5.0s 时 demuxer 给的首包是音频 3.90s / 视频关键帧 4.0s），
-  而音频的 `flushFrame` 返回值会把主时钟按"真正上屏的时间戳"重新锚定 → 锚点落在目标之前，
-  视频只能干等时钟爬上来（现象：**画面要等声音播到目标才出现**）。所以判据必须**对每条流**成立。
-- **完成判据**：入库一个小测试媒体（h264 24fps、关键帧固定 2 秒间隔、整帧亮度随时间线性上升，
-  约 120 KB），断言两件事：①"seek 到两个关键帧之间的目标后，送显的第一帧落在目标附近，
-  而不是关键帧附近"；②"第一条真正上屏的音频时间戳 ≥ 目标"。判据不要读时钟（播放节流会污染），
-  视频读送显像素的亮度 —— 标定见探针。
-- **为什么现在没做**：往仓库里加二进制测试资源要用户点头。探针、媒体与生成命令已留在本机
-  `.workbuddy/ref/seek-probe/`（`ZzSeekDropProbe.kt`、`ZzSeekDiagProbe.kt`、`ramp.mp4`、`ramp.ts`、
-  `land-mp4.txt` / `land-ts.txt` 是 ffprobe 的落点实测；生成日志 `gen2.log` 已随临时目录清理）。
-- **⚠️ 探针的已知局限**：探针里的假音频**模拟不了真声卡的实时消费**，所以"主时钟被音频拉回"
-  这个现象在探针里复现不出来（实测：假音频下整个 12 秒的文件 100ms 内就被消费完，视频框框全过）。
-  音频侧的时间戳只能从 `AvPlayback.flushFrame` 里那行 `println("PTS ...")`（落在
-  `build/test-results/jvmTest/*.xml` 的 `<system-out>`）里看。**要真正验收 A/V 交互只能在真机上跑。**
-
 ### B9. 退帧在「落点正好是 GOP 首帧」时退不动
 
 - **现状**：**已修**（2026-09-22，路线 C）。空探步长由 `1µs` 改成 **3/4 × 已缓存的帧间隔**
@@ -281,7 +258,7 @@
   判据 = `frames` 长度：修前 `[106]×6` 不涨、常驻版 `[110]×6`）留着当参照。细节见
   [`.agents/skills/project-traps/references/silent-failures.md`](./.agents/skills/project-traps/references/silent-failures.md)
   对应 bullet。
-- **复测（同一探针、同一素材；三条编译闸门 + `:shared:jvmTest` 全绿）**：
+- **复测（同一探针、同一素材；提交前核对：三条编译闸门 + 全量 `:shared:jvmTest` + lint 全绿）**：
 
   | 场景 | 修前未命中 | 修后未命中 |
   |---|---|---|
@@ -333,27 +310,76 @@
   `_srcVideoFormat` 漏回写使 sws 上下文逐帧重建 —— 同一探针下警告从 4996 条降到 5 条，
   证据 `.workbuddy/ref/swscale-probe/`。
 
-### B12. `AvIO.read` 返回 0 被 avio/demuxer 当成「读空」，而 `HttpIO` 正靠它表达「数据没到」
+### B13. `--disable-network` 与 `--disable-protocols` 是**故意**关的，别开
 
-- **现状**（2026-10-01 查证，读的是本地 `cxx/ffmpeg/ffmpeg/` 源码）：`HttpIO.read` 在 ktor 缓冲还没
-  追上 `offset` 时返回 0，注释写着「让 avio 稍后重试」——**这句不成立**，链条如下：
-  1. `libavformat/aviobuf.c` 的 `avio_read`：`read_packet` 返回 0 时它自己返回 **0**（不死循环），
-     且 `fill_buffer` 的 `else` 分支**不置 `eof_reached`**；
-  2. `libavformat/utils.c` 的 `append_packet_chunked`：`av_shrink_packet(pkt, prev_size + FFMAX(ret,0))`
-     ⇒ `pkt->size == 0`，`av_get_packet` **返回 0**（不是 `AVERROR_EOF`）；
-  3. `libavformat/mov.c` 的 `mov_read_packet`：重试路径是
-     `if (ret < 0) { if (should_retry(...)) mov_current_sample_dec(sc); }` —— **只认负错误码**；
-     而 `should_retry` 对 `AVERROR_EOF` / `avio_feof` 返回 0。
-  ⇒ 「暂时没有数据」在这条链上**没有任何「稍后重试」的语义**。
-- ⚠️ **尚未逐行核的一环**：`ff_read_packet` 拿到 `read_packet` 返回的 0 之后是跳过这个 sample 还是
-  继续循环（以及 `read_packet_wrapper` 对 0 的处理）。**处置之前先补上这一环**，别照着推断改。
-- **影响形状**：网络稍慢就可能让 demuxer 把一个 sample 读空 —— 与 B10 的「吞包」同类，
-  但这一层在 IO，B10 修的读包循环够不到它。
-- **方向**：`read` 改用 `AVERROR(EAGAIN)`（要配 `AVIO_FLAG_NONBLOCK` 与上层的重试），或在 IO 层
-  阻塞等数据（更贴近现有「单线程无锁」的模型）。**这同时是「IO 层超前下载」的前置条件** ——
-  先定「没数据怎么表达」，再谈预读窗口。
-- **完成判据**：定下契约并改掉 `HttpIO`；真连一个 HTTP 源播放，不再出现「读空 sample」。
+- **现状（2026-10-04 核实）**：`cxx/ffmpeg/ffmpeg.cmake` 的 configure 参数带
+  `--disable-network`、`--disable-protocols`，产物 `config_components.h` 里
+  `CONFIG_HTTP_PROTOCOL` / `CONFIG_HTTPS_PROTOCOL` / `CONFIG_TCP_PROTOCOL` / `CONFIG_FILE_PROTOCOL`
+  / `CONFIG_TLS_PROTOCOL` **全为 0**（`CONFIG_SCHANNEL 1`、`CONFIG_NETWORK 0` 是无害残留，
+  network 一关那几支根本进不了编译）。
+- **这不是缺陷，是设计**：ffmpeg 的 URL 访问被换成 `io_open` 回调 + `AvIO` 抽象
+  （`cxx/ffmpeg/ffmpeg.cpp` 的 `AVFMT_FLAG_CUSTOM_IO`），实际 I/O 全由 Kotlin 侧
+  `FileIO` / `HttpIO` 实现（ktor/OkHttp）。所以**「ffmpeg 没有网络协议」是对的**。
+- ⚠️ **别被日志误导**：真实源起播时 stderr 会打
+  `https or dtls protocol not found, recompile FFmpeg with openssl, gnutls or securetransport enabled.`
+  与 `Protocol name not provided, cannot determine if input is local or a network protocol…`。
+  这两条来自 `avformat_open_input` 对 CUSTOM_IO 的**协议探测**分支，**不影响功能** ——
+  同一次运行里 `RealUrlProbeTest` 的 `open / 读 / seek` 全部通过（见 B12）。想消掉就得
+  `av_dict_set(&opts, "protocol_whitelist", …, 0)` 或改传内联选项串，属**噪声治理**而非修 bug，
+  已记在 B12 的完成判据之外。
 
+
+### B12. HTTP 源读空：契约已定并改掉 `HttpIO`，剩下真远程源与 FFPlayer 口径没验
+
+- **已修**（2026-10-02）：`HttpIO.read` 原来在 ktor 缓冲还没追上 `offset` 时返回 0
+  （注释写着「让 avio 稍后重试」——不成立），现在改成**在 IO 层阻塞等数据**：
+  `getResponseBlocking()` 只在真读到流尾时返回 null（`read` 把它翻成 `AVERROR_EOF`），
+  推进改用新的 `advanceTo()` 逐段真读丢弃 —— 不再用 `InputStream.skip`（它允许少跳，
+  少跳一次 `offset` 的记账就与真实位置错开）。
+- **链条与「为什么既不能返回 0 也不能返回负数」**（逐行核过本仓 `cxx/ffmpeg/ffmpeg/`：
+  `fill_buffer` → `avio_read` → `append_packet_chunked` → `mov_read_packet` →
+  `av_read_frame`）：正本写在 `HttpIO.getResponseBlocking()` 的 KDoc 里，**别再抄一份到这里**。
+  一句话：返回 0 ⇒ 「sample 游标前进、字节流没前进」外加把 0 长度的包交给上层；
+  返回负数 ⇒ `s->error` 被置上且**没有任何代码清它**（`avio_seek` 只清 `eof_reached`），
+  之后每次**零字节**读都以那个旧错误码收场，**真正的 EOF 也会冒充成它**。
+  ⚠️ **`AVERROR(EAGAIN)` + `AVIO_FLAG_NONBLOCK` 这条路
+  对我们不存在** —— 它们只长在 `avio.c` 的 `retry_transfer_wrapper` 里（只包 `URLProtocol`），
+  我们走的是 `avio_alloc_context` + 自有回调，不经过那一层；头文件也写着 `read_packet`
+  "must never return 0"（`avio.h` 的 `avio_alloc_context`）。
+- **新用例**：`shared/src/jvmTest/.../player/HttpReadContractTest.kt` —— 起本地服务喂入库
+  素材（body 分块下发 + 块间 sleep），判据是**解出的视频帧序列与本地文件逐帧相同**；
+  认 Range（206）与不认 Range（一律 200）各一个。
+  **A/B 实测**：还原成旧实现后，「向前 seek」那个用例**根本不返回**（整轮构建被 SIGTERM）；
+  新实现两个用例 8 秒过。
+- **作废读轮重构**（2026-10-03）：「本轮作废」收敛进 `AvFormat.resetChannel` 一个函数
+  （io.abort 投「作废」事件 → cancel 通道 → join 读作业），`takeOverPlayback` 只停
+  轮次不掀读作业，作废由换位置入口（play / seekTo / stepBack）在**调用方线程**上先行调
+  resetChannel —— 事件必须赶在读作业占住归属线程之前投出（排到它后面的调用永远轮不到执行）。
+  stepForward 不换位置、不掀读作业（预读包与在飞的读都有效）。`HttpIO.read` 的等待用 `select`
+  让「等数据」与「闲置超时」（`SOCKET_TIMEOUT_MS`）两支竞速（ktor 3.5.2 的 `awaitContent(min)`
+  参数是**最少字节数**不是超时，见 `project-traps/references/silent-failures.md`），
+  超时由正在等的读换会话重试。
+- **真远程源已验（2026-10-04，`RealUrlProbeTest`）**：`soko.ekibun.acg.player.RealUrlProbeTest`
+  连 `https://media.w3.org/2010/05/sintel/trailer.mp4`（**真实 HTTPS，走了系统代理**）实测通过 ——
+  `initNative` 拿到 2 条流（854x480 视频 + 音频）、`duration=52208333`；读 38 包 0.5 s；
+  读 20 包后 `seekTo(20_000_000)` 再读 28 帧 2.0 s 全过。**结论：真实网络下的
+  open / 顺序读 / Range seek 三条路都通**，①里「真远程源没试」这一条可以划掉
+  （剩下的是「高延迟 / 断流重连」的极端形态，仍没专门构造）。
+- **还剩**：① ~~只对本地 HTTP 服务验过~~**已补真远程源**（见上一条），
+  高延迟 / 断流重连的极端形态仍未专门构造；
+  ② 走 `FFPlayer` 真播一个 HTTP 源（本条原文的「播放」口径）**部分完成**：
+  `FFPlayerHttpStallSeekTest`（@Ignore）已把场景稳定构造出来（WAV + 分段停摆服务端），
+  但暴露了**先于本次改动就存在的编排竞态** —— play 挂在 takeOverPlayback 的 pause-join 上，
+  轮次被别人的 resetChannel / closeAsync 杀掉后 join 恢复，play 继续在已作废的轮次上跑
+  seekImpl（takeOver 的 `pts === before` 挡不住 close / 外部作废，因为 close 不换 pts）。
+  修法方向：轮次被外部作废时 takeOver 也要能判假（close 与外部作废都作废 pts，或等价闸）。
+  修完解开 @Ignore 补 wake 真路径断言。测试脚手架经验（stall server 设计）已写进该用例 KDoc。
+  ③ 「IO 层超前下载」的窗口仍没动 —— 前置条件（没数据怎么表达）已定，窗口本身没做。
+  ④ WAV/PCM 类流有个与播放器无关的坑先记着：`find_stream_info` 对「开着不关」的连接会
+  无限读下去（WAV 的包没有 duration，时长分析窗凑不齐，实测喂 480KB 也不停，上限是
+  probesize 5MB），`wav_read_header` 末尾还会回卷到数据起点重读一次 —— 停摆服务端必须
+  把这两次读全量供给，open 才能完成。
+- **完成判据**：真连一个远程 HTTP 源播放，不再出现「读空 sample」。
 ### B19. Android 端 VideoSurface 生命周期收口（待真机实测）
 
 - **代码已补**（2026-10-02）：`VideoSurface.android.kt` 此前没有 onDispose —— common 契约
@@ -372,7 +398,7 @@
   （`version.ref = "ktorClientOkhttp"`）—— 别名以某个具体 artifact 命名，读到
   `ktor-client-core` 挂着 `ktorClientOkhttp` 会误判升级口径。
 - **完成判据**：别名改名 `ktor`（`[versions]` 一处 + `[libraries]` 三处引用同步），
-  三条编译闸门过。
+  提交前核对三条编译闸门。
 
 ### B21. 测试配置了空源集
 
@@ -519,7 +545,7 @@
 - **随迁**：jvmTest 的 dll 注入（`shared/build.gradle.kts` 的 `ProcessResources`）与
   `soko.ekibun.{quickjs,ffmpeg}` 的测试文件搬到新模块；`desktopApp` 打包的 dll 落位引用同步改。
 - **为什么现在没做**：一次性重构，与业务改动分开。
-- **完成判据**：三条编译闸门 + `:shared:jvmTest` 全绿；`shared` 的源集里不再有
+- **完成判据**：提交前核对：三条编译闸门 + 全量 `:shared:jvmTest` + lint 全绿；`shared` 的源集里不再有
   `soko.ekibun.{quickjs,ffmpeg}` 源文件。
 
 ### E7. cxx 构建接进 Gradle（把「dll 手工同步」变成机器闸门）
