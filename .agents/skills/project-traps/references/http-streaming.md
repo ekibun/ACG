@@ -123,7 +123,7 @@ job="coroutine#26":BlockingCoroutine{Cancelling}`。
 
 ## 四、会话 scope 为什么不能挂在调用方 job 上
 
-`Http.requestStreaming` 里那条会话开在 `CoroutineScope(Dispatchers.IO)` 上，
+`Http.request` 里那条会话开在 `CoroutineScope(Dispatchers.IO)` 上，
 **不挂调用方的 job**：
 
 - 调用方（avformat 线程）是在 `runBlocking` 里等到 `[Response]` 再消费的，而
@@ -145,7 +145,7 @@ seek 之后网络游标没到位时，要在这条响应上**白读白丢**地�
    推进整段期间 `cachedRsp` 都是旧值 ⇒ `reused` 判错，且「这条会话已归本 IO」在半途不成立。
 2. **新建立的那条必须自己收干净** —— 抛出时它已经登记进 `cachedRsp`，但连 offset 都
    没走到、不是「可复用的缓存会话」（复用那条的存亡归 `close` / 静默自愈管，顺手关掉
-   会伤到还没用完的会话）。建立它的那次 `requestStreaming` 调用早已返回 ⇒ `close` 与
+   会伤到还没用完的会话）。建立它的那次 `Http.request` 调用早已返回 ⇒ `close` 与
    建立期的 job 两边都抓不住它，不收就是一条永久挂在 `done.await()` 上的 ktor 会话 +
    漏掉的连接（实测：服务端 `entered=3` / `exited=2`）。
 3. **每一段都走 `rsp.read`**（内部先等数据到、再读），不要直接用 `readAvailable` ——
@@ -181,7 +181,7 @@ TCP 往返 + TLS + 响应头的固定成本。量用 `Http.Response.availableFor
 `HttpSkipThresholdTest`），**每一条都能让上层判断错**：
 
 1. **通道没建时它返回 0，而那个 0 不代表「网络上什么都没下」。** 下载与它无关：
-   `requestStreaming` 拿到响应时引擎侧**已经在拉 body** 了（实测：一次 `read` 都没调、
+   `Http.request` 拿到响应时引擎侧**已经在拉 body** 了（实测：一次 `read` 都没调、
    服务端已写出 704 KiB / 共 2 MiB）。0 的真正含义只是「本对象还没拿到通道引用」。
    ⇒ 任何拿它当「网速慢 / 还没缓冲」的判据都是错的。
 

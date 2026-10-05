@@ -245,17 +245,19 @@
    对策：**别在每帧路径上分配 skiko 对象** —— 复用 `Bitmap`（池化）+ `peekPixels()?.addr` +
    `memcpy` 写入 + 让 Compose 从复用位图读（本地做法：`DesktopPlayback.framePool` 与
    `VideoSurface.jvm.kt` 的 `nativeCanvas.drawImageRect`）。
-- **`Http.request` 会把整个响应体先读进内存 ⇒ 远程播放「不报错地」先整包下载**（2026-10-03 实测）。
+- **`HttpClient.request(...)` 会把整个响应体先读进内存 ⇒ 远程播放「不报错地」先整包下载**（2026-10-03 实测）。
   症状形状：远程源迟迟不出画面（要等整包下完），内存随文件大小走，而**没有任何报错**。
   根因不在引擎，在 **ktor 的入口选择**：`HttpClient.request(...)` → `HttpStatement.execute()` →
   `fetchResponse()`，而它内部有一句 `val result = call.save().response`（源码注释
   "Save the body again to make sure that it is replayable"）⇒ **body 被完整缓冲**。
   ktor 另有不 save 的 `fetchStreamingResponse()`，公开面是 `HttpStatement.execute(block)`
   —— block 里**同时**拿得到 `headers` 与 `bodyAsChannel()`。
-  实测（本地服务端把 body 分 10 块、每块隔 50 ms，约 500 ms 发完）：`Http.request` **886 ms**、
-  紧随其后的 `bodyAsChannel()` 只 **7 ms**；响应体发一半就停住（连接不关）时 `Http.request`
+  实测（本地服务端把 body 分 10 块、每块隔 50 ms，约 500 ms 发完）：`HttpClient.request(...)`
+  **886 ms**、紧随其后的 `bodyAsChannel()` 只 **7 ms**；响应体发一半就停住（连接不关）时它
   **5 s 都不返回**。
-  ⇒ 对策：**要边下边用就用 `Http.requestStreaming`**（`acg/common/Http.kt`，走 `execute(block)`）。
+  ⇒ 对策：**要边下边用就走本项目的 `Http.request(...)`**（`acg/common/Http.kt`）——
+  它内部挂的是 `prepareRequest(...).execute(block)`，即上面那个不 save 的路子。
+  上游那句 `HttpStatement.execute()` 整包入口本项目**没有暴露**，别照着 ktor 文档调。
   它要求「读发生在 block 期间」—— `HttpIO` 的做法是把整条会话挂在 block 里（等一个由
   `close()` 或「会话被换掉」完成的信号），于是 headers 与 channel 全程有效。
   对照：`HttpStreamingTest`（第一次读必须**远早于**整包下发完成）+ `HttpReadContractTest`

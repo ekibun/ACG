@@ -5,10 +5,11 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.invoke
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
@@ -34,7 +35,7 @@ expect fun jniLoadLibrary(name: String)
  * 自己线程的接口，唯一的取法就是「往它上面投递一次、取 `currentThread()`」。也正因为要在
  * 构造期投递，**别在归属线程上构造自己** —— 那是自己等自己。
  *
- * ⚠️ 关它是**显式动作**（[close]，转发 `ExecutorService.shutdown()`）：那条线程活到被关或进程
+ * 关它是**显式动作**（[close]，转发 `ExecutorService.shutdown()`）：那条线程活到被关或进程
  * 退出。共享实例（`QuickJS.sharedDispatcher`、`AvFormat` 的伴生对象）**不该关** —— 全进程就那一
  * 条；「每个实例各起一条」的用法（`AvCodec`）由 `Pointer` 的 `closeDispatcherOnClose`
  * 交给基类代收 —— 独占者不必自己攥着 dispatcher 才能关它。
@@ -67,20 +68,20 @@ open class ThreadDispatcher(
   /**
    * 往归属线程上投递。
    *
-   * ⚠️ **关掉之后一律抛 [IllegalStateException]**，就在 `delegate.dispatch` **之前**拦下。
+   * **关掉之后一律抛 [IllegalStateException]**，就在 `delegate.dispatch` **之前**拦下。
    * 这一手是补上去的：kotlinx 自己会兜住 `RejectedExecutionException` 并**静默改投
    * `Dispatchers.IO`**（原文见 [close] 的 KDoc）——「归属线程」这个承诺于是被悄悄打破，
    * 本该在归属线程上跑的 native 调用落到 IO 线程池上。对一个拿线程归属当正确性前提的桥来说，
    * 那比当场抛异常糟得多。拦截必须发生在 `delegate.dispatch` **之前**：一旦放进去，
    * kotlinx 就把异常换成「改投」了，外面再也吵不起来。
    *
-   * ⚠️ 拦的是**新投递**，拦不住已经在队列里的：`shutdown()` 不等待在途任务，已提交的照跑完。
+   * 拦的是**新投递**，拦不住已经在队列里的：`shutdown()` 不等待在途任务，已提交的照跑完。
    */
   override fun dispatch(
     context: CoroutineContext,
     block: Runnable,
   ) {
-    check(!closedFlag.get()) {
+    check(!isClosed) {
       "ThreadDispatcher(${thread.name}) 已经关掉，别再往它上面投递 —— " +
         "放开的话 kotlinx 会把被拒的块改投到 Dispatchers.IO 上，native 调用就跑在 IO 线程池上了"
     }
@@ -94,7 +95,7 @@ open class ThreadDispatcher(
    * 关掉归属线程 —— 就是 `ExecutorService.shutdown()`：**不等待**在途任务（已提交的会跑完、
    * 线程随后退出）。
    *
-   * ⚠️ **关掉之后再投递，拿不到 `RejectedExecutionException`** —— 2026-09-21 实测：
+   * **关掉之后再投递，拿不到 `RejectedExecutionException`** —— 2026-09-21 实测：
    * kotlinx 在 `ExecutorCoroutineDispatcherImpl.dispatch` 里把 `RejectedExecutionException`
    * **兜住了**（`jvmMain/Executors.kt:133-141`）：先取消上下文里的 Job，再把块
    * **改投到 `Dispatchers.IO`**。于是同一个「关掉」有三种表现，**没有一种是「吵着拒绝」**：
@@ -109,7 +110,7 @@ open class ThreadDispatcher(
    * 落在 IO 线程池上。所以本类**自己拦了一手**（见 [dispatch]）：关掉之后的投递当场抛
    * [IllegalStateException]，别指望能从 kotlinx 那边听见动静。
    *
-   * ⚠️ **只有独占者才该调**：`QuickJS.sharedDispatcher` / `AvFormat` 的伴生实例是全进程共享的，
+   * **只有独占者才该调**：`QuickJS.sharedDispatcher` / `AvFormat` 的伴生实例是全进程共享的，
    * 关它等于给后面所有调用者埋雷。拦一手只是把「埋雷」换成「当场炸」—— 炸点离肇事点仍然远，
    * 传 `closeDispatcherOnClose = true` 之前该确认的还得确认。
    *
@@ -172,13 +173,13 @@ open class ThreadDispatcher(
  *   「建句柄要挑线程」的子类不必自己安排 —— `JS_NewRuntime` 正是靠这条让 `stack_top`
  *   基准落在归属线程上（见 [soko.ekibun.quickjs.QuickJS.initPtr]）。
  *
- * ⚠️ 第一个实参**不拿 `0` 当「没交」的哨兵**：`0` 是合法的空句柄（借用型的空壳就传
+ * 第一个实参**不拿 `0` 当「没交」的哨兵**：`0` 是合法的空句柄（借用型的空壳就传
  * `0L`），拿它当哨兵会把「真的交了 `0`」误判成「没交」、转头去调 [initPtr]。要表示「没
  * 交」就留 `null`；覆写路径返回 `0` 则是**建句柄失败**，基类会 `check` 出来。
  *
  * 还有一条**不属于上面两条**的路：**句柄要晚点才有的**（[soko.ekibun.ffmpeg.AvFormat] /
- * [soko.ekibun.ffmpeg.AvCodec] 的 `ctx`）—— 那就不要继承本类，改为**内部持有一个本类的
- * 子类**：那个子类在自己的构造期拿到句柄，外层 façade 只负责转发。这样「什么时候建」被
+ * [soko.ekibun.ffmpeg.AvCodec] 的 `ctx`）—— 那就**内部持有一个本类的子类**：
+ * 那个子类在自己的构造期拿到句柄，外层 façade 只负责转发。这样「什么时候建」被
  * 关在内部类里，外层无需惰性语义。
  *
  * 指针**不可更改**（没有 `setPtr`）：归还之后句柄就作废了，留一个能改的槽位只会
@@ -196,12 +197,12 @@ open class ThreadDispatcher(
  *   回调链）。已在归属线程上就地执行，否则 `runBlocking` 投过去。
  * - [ptr] —— `public`、同步、**不投递也不设 isClosed 门**的裸读：读得到就读。给「已经确定在归属
  *   线程上」的场合用（[withPtr] 块里、native 回调链里、标记窗口里的归还），形态就是
- *   `frame.ptr` / `packet.ptr` 这类直接取值。它对应旧版那扇挂起门 `ptrValue()`（= `withPtr { it }`），
- *   后者已删掉 —— 那些调用点本来就都在 [withPtr] 块里，多一层挂起没有意义。
+ *   `frame.ptr` / `packet.ptr` 这类直接取值。用它的地方本来都在 [withPtr] 块里，
+ *   多一层挂起没有意义。
  *   带一条**同线程断言**（JVM `-ea`，测试与 run / hotRun 生效、生产关闭）：跑错线程在
  *   测试期就炸，而不是偶发崩在 native 里。
  *
- * ⚠️ [withPtr] / [withPtrSync] **先查 [isClosed]**（标记即抛 [IllegalStateException]）：
+ * [withPtr] / [withPtrSync] **先查 [isClosed]**（标记即抛 [IllegalStateException]）：
  * 关闭是「先标记、后释放」，标记了就当作已经删除，经这两扇门的操作一律拒绝。
  * 归还动作恰恰跑在「已标记、未销毁」那个窗口里（[releaseImpl] 自己就要读句柄），
  * 所以**不经过这两扇门** —— [releaseImpl] 的句柄以参数交进来，收尾直读 [ptr]。
@@ -224,15 +225,11 @@ open class ThreadDispatcher(
  * [CoroutineDispatcher]（能直接当上下文元素用），外加快照下来的 [Thread]，并把
  * `isDispatchNeeded` 改成「已在归属线程上就别派发」。
  *
- * ⚠️ 那份快照在「**不在归属线程上建自己**」时准确 —— 在归属线程上调 [ThreadDispatcher]
+ * 那份快照在「**不在归属线程上建自己**」时准确 —— 在归属线程上调 [ThreadDispatcher]
  * 是自己等自己。当前三个调用点都不在归属线程上（伴生对象初始化 / `withContext` 里）。
  *
- * ⚠️ 就算快照失准，后果**只是多一次投递**（[withPtrSync] 会白跑一趟 `runBlocking` 投到归属
- * 线程上），**不影响正确性**。这与曾经那扇「拿构造线程做跨线程读校验」的弃用门不同：那扇
- * 门的快照失准会**放过真正的误用**。
- *
- * 顺带一说：**「构造线程」不再是任何判据** —— 归属线程由 [ThreadDispatcher] 记，不再由
- * 构造现场推。所以「带 dispatcher 的子类都在归属线程上构造」这条旧不变量已经不需要了。
+ * 就算快照失准，后果**只是多一次投递**（[withPtrSync] 会白跑一趟 `runBlocking` 投到归属
+ * 线程上），**不影响正确性** —— 所以这里不设「跨线程读」的校验门。
  *
  * `dispatcher` 为 `null` 表示「本类不承诺线程归属」：[submit] 就地执行、[withPtr]
  * 直接读、[withPtrSync] 不做线程判断。那些还没注入 dispatcher 的子类（`AvFrame` /
@@ -246,7 +243,7 @@ open class ThreadDispatcher(
  * 释放消息一定排在「它之前投递的所有操作」之后、「它之后投递的所有操作」之前。
  *
  * 需要确定性的场合（例如关门前清算泄漏清单）改用 [closeDeferred] 拿 [Deferred] 去 await。
- * ⚠️ [isClosed] 是读句柄两扇门的判据（见「读指针」一节）：标记即抛；归还动作跑在
+ * [isClosed] 是读句柄两扇门的判据（见「读指针」一节）：标记即抛；归还动作跑在
  * 「已标记、未销毁」窗口里，不走那两扇门（直读 [ptr]）。
  *
  * `closeDispatcherOnClose` 为真时，**归还落地之后**才关掉那条独占的 dispatcher —— 关早了会把
@@ -282,7 +279,7 @@ abstract class Pointer protected constructor(
    * [soko.ekibun.quickjs.QuickJS] 是这种：它要拿 `this` 去 `initContext` 换，而 `this`
    * 在 `super(...)` 的实参里还不可引用。
    *
-   * ⚠️ 别拿 `0` 表示「没交」：`0` 是**合法的空句柄**（借用型的空壳就这么传），哨兵会把
+   * 别拿 `0` 表示「没交」：`0` 是**合法的空句柄**（借用型的空壳就这么传），哨兵会把
    * 「真的交了 `0`」误判成「没交」而转头去问 [initPtr]。要表示「没交」就留 `null`。
    *
    * 它还有第二个用途：[closeDeferred] 借它区分「句柄本来就在手上」与「得靠 [initPtr]
@@ -299,7 +296,7 @@ abstract class Pointer protected constructor(
    * [ThreadDispatcher] 自己拦的一手；不加它就会退化回 kotlinx 的兜底（`CancellationException`，
    * 裸 `dispatch` 那条甚至静默改投 `Dispatchers.IO`，见 [ThreadDispatcher.close] 的 KDoc）。
    *
-   * ⚠️ 传 `true` 的前提是「这条 dispatcher 是本对象自己建的、没有别人用」—— 基类查不了
+   * 传 `true` 的前提是「这条 dispatcher 是本对象自己建的、没有别人用」—— 基类查不了
    * 这一点（[ThreadDispatcher] 不知道有几家引用它）。传错的后果是**延迟爆**：本对象关掉之后，
    * 别的持有者才在别处炸，报错点离肇事点很远。
    *
@@ -386,10 +383,10 @@ abstract class Pointer protected constructor(
    * 与手写 `withContext(dispatcher) { … }` 的关系：**语义相同，是它的收口版** ——
    * 块一样在归属 dispatcher 上跑，只是句柄由基类压进来，不必在块里再读一次。
    *
-   * ⚠️ `internal` 而不是 `protected`：[soko.ekibun.quickjs.QuickJS] 的调用点遍布
+   * `internal` 而不是 `protected`：[soko.ekibun.quickjs.QuickJS] 的调用点遍布
    * native 回调链与 façade 内部，`protected` 到不了那些地方。
    *
-   * ⚠️ 它**先查 [isClosed]**（标记即抛）：关闭是「先标记、后释放」，标记了就当作已经
+   * 它**先查 [isClosed]**（标记即抛）：关闭是「先标记、后释放」，标记了就当作已经
    * 删除。归还动作跑在标记窗口里，所以**不走这扇门** —— [releaseImpl] 的句柄以参数
    * 交进来，收尾直读 [ptr]。
    */
@@ -408,7 +405,7 @@ abstract class Pointer protected constructor(
    * - 否则 `runBlocking` 投到归属 dispatcher 上跑完再返回；
    * - `dispatcher` 为 `null`：就地执行、不判断线程（本类不承诺线程归属）。
    *
-   * ⚠️ 它会在**调用线程上阻塞**等归属 dispatcher 空出来，所以在归属线程自己身上调它
+   * 它会在**调用线程上阻塞**等归属 dispatcher 空出来，所以在归属线程自己身上调它
    * 最划算（就地）。同理，别在「归属线程正等着你返回」的场合调它。
    * 与 [withPtr] 一样**先查 [isClosed]**（标记即抛）。
    */
@@ -422,22 +419,22 @@ abstract class Pointer protected constructor(
   /**
    * 把动作**投递**到归属 dispatcher。
    *
-   * 返回的 [Deferred] 完成时动作已落地；不 `await()` 就是「发消息、不等结果」。
+   * 返回的 [Job] 完成时动作已落地；不 `join()` 就是「发消息、不等结果」。
    * `dispatcher` 为 `null` 时就地跑完再返回 —— 此时 `block` 抛出的异常直接传给调用方，
-   * 不会被收进 [Deferred]。
+   * 不会被收进 [Job]。
    *
-   * ⚠️ `internal` 而不是 `protected`，理由与 [withPtr] 相同：[soko.ekibun.quickjs.QuickJS]
+   * `internal` 而不是 `protected`，理由与 [withPtr] 相同：[soko.ekibun.quickjs.QuickJS]
    * 的内部调用点也要用它，`protected` 到不了那些地方。别自己抄一份
-   * `CoroutineScope(dispatcher).async { }` —— 投递语义（`dispatcher` 为 `null` 时就地跑完
+   * `CoroutineScope(dispatcher).launch { }` —— 投递语义（`dispatcher` 为 `null` 时就地跑完
    * 再返回）只在这里维护一份。
    *
-   * ⚠️ 兜底那条 `CompletableDeferred(value = …)` 必须写**命名实参**：省掉它就成了
-   * `CompletableDeferred(result)`，一旦 `T` 被实例化成 `Job` 之类，字面量式的重载解析会
-   * 挑中 `CompletableDeferred(parent: Job?)`，造出一个**永不完成**的 Deferred 而 await 挂死
+   * 兜底那条 `CompletableDeferred(value = …)` 必须写**命名实参**：省掉它就成了
+   * `CompletableDeferred(Unit)`（字面量式重载），一旦泛型被实例化成别的类型，就会挑中
+   * `CompletableDeferred(parent: Job?)`，造出一个**永不完成**的 Deferred 而 join 挂死
    * —— 同一个坑已在 QuickJS 的关闭流程里踩过一次。
    */
-  internal fun <T> submit(block: suspend () -> T?): Deferred<T?> =
-    dispatcher?.let { CoroutineScope(it).async { block() } }
+  internal fun submit(block: suspend () -> Unit): Job =
+    dispatcher?.let { CoroutineScope(it).launch { block() } }
       ?: CompletableDeferred(value = runBlocking { block() })
 
   private val closedFlag = AtomicBoolean(false)
@@ -454,10 +451,10 @@ abstract class Pointer protected constructor(
   protected fun markClosed(): Boolean = closedFlag.compareAndSet(false, true)
 
   /**
-   * [close] 的可等待版本：[Deferred] 完成时 [releaseImpl] 已经跑完。
+   * [close] 的可等待版本：[Job] 完成时 [releaseImpl] 已经跑完。
    *
    * 三种情形：
-   * - **已经关过**（[markClosed] 没抢到名额）：返回一个已完成的 [Deferred]，什么也不做；
+   * - **已经关过**（[markClosed] 没抢到名额）：返回一个已完成的 [Job]，什么也不做；
    * - **句柄从没兑现过**、而且它本来要靠 [initPtr] 现算：说明 native 资源**压根没建**，
    *   于是不为了「还」去把它建出来 —— 但**照样先标记**（[isClosed] 立刻为真），否则关闭
    *   之后的新操作会白白建出一个没人释放的上下文；
@@ -466,16 +463,13 @@ abstract class Pointer protected constructor(
    * `nativePtr == null` 这半个判据不能省：句柄是**构造参数交进来**的子类（[soko.ekibun.quickjs.JSRef]
    * / [soko.ekibun.ffmpeg.AvFrame]）手上**已经有**资源了，`ptr` 读没读过都欠着一次归还。
    *
-   * 返回的是 `Deferred<Unit?>` 而不是 `Deferred<Unit>`：归还路径经 [submit]，而它的返回
-   * 类型是 `Deferred<T?>`（块允许交回 `null`）—— 这里只是跟着它走，别再套一层转换。
-   *
-   * `closeDispatcherOnClose` 为真时，**这条 [Deferred] 完成之后**才关那条独占的 dispatcher。
+   * `closeDispatcherOnClose` 为真时，**这条 [Job] 完成之后**才关那条独占的 dispatcher。
    * 挂在这里而不是 `close()` 里，是为了让两条路都覆盖到：「发完不管」的 [close]，以及
-   * `FFPlayer.closeAsync()` 那种 `await()` 的。短路分支返回的是**已完成**的 Deferred，挂在它
+   * `FFPlayer.closeAsync()` 那种 `join()` 的。短路分支返回的是**已完成**的 Job，挂在它
    * 上面的关闭动作当场执行 —— 这正是「句柄都没建过也得收线程」的场合（线程在建
    * [ThreadDispatcher] 时就起了）。
    */
-  fun closeDeferred(): Deferred<Unit?> {
+  fun closeDeferred(): Job {
     val done =
       if (!markClosed() || (nativePtr == null && !ptrLazy.isInitialized())) {
         CompletableDeferred(value = Unit)
@@ -496,7 +490,7 @@ abstract class Pointer protected constructor(
    * 归还过程抛出的异常在这里只打印 —— 投递成功之后它进了 [Deferred]，没有任何调用者能
    * 接住；要拿到改用 [closeDeferred] 并 `await()`。
    *
-   * ⚠️ 与之相对，**投递本身**被拒（dispatcher 已经关了）时异常是**同步**抛出的，走不到
+   * 与之相对，**投递本身**被拒（dispatcher 已经关了）时异常是**同步**抛出的，走不到
    * 「只打印」那一步 —— 见 [ThreadDispatcher.dispatch]。
    */
   override fun close() {
@@ -511,7 +505,7 @@ abstract class Pointer protected constructor(
    * - **只跑一次**（[markClosed] 抢到才跑）；
    * - **跑在归属 dispatcher 上**（`dispatcher` 为 `null` 时跑在调用线程上）。
    *
-   * ⚠️ 它跑在 [markClosed] **之后** —— 所以归还**不经过**读句柄那两扇门（它们查
+   * 它跑在 [markClosed] **之后** —— 所以归还**不经过**读句柄那两扇门（它们查
    * [isClosed]、标记即抛），句柄以参数交进来；收尾还需要句柄的（如 [releaseRef] 类）
    * 直读 [ptr]，否则归还自己就被挡在门外，`close()` 会「返回成功、其实什么都没释放」。
    *

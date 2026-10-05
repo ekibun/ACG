@@ -17,8 +17,9 @@ import kotlin.test.assertTrue
  * `HttpIO` 必须是**流式**的：第一个 `read` 在响应体发完**之前**就该拿到数据。
  *
  * 判据用「第一次读的耗时 vs 整包下发时长」比：服务端把 body 分若干块下发、块间固定间隔，整包要约
- * 「块数 × 每块间隔」ms；第一次读只要**远早于**它（< 一半）就说明没在等整包。走便捷入口
- * `Http.request` 会先整包缓冲（实测见 `silent-failures.md` 的「整包缓冲」一节）。
+ * 「块数 × 每块间隔」ms；第一次读只要**远早于**它（< 一半）就说明没在等整包。ktor 的便捷入口
+ * 内部有一句 `call.save()` 会先整包缓冲，`Http.request` 没有那句（实测见 `silent-failures.md`
+ * 的「整包缓冲」一节）。
  */
 class HttpStreamingTest {
   /** 分块慢发：写一块、flush、睡一会儿，写完整块数才关。 */

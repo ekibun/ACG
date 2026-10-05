@@ -67,7 +67,7 @@ class HttpBodyDownloadTimingProbeTest {
       // 建连。这一步内部会调 `delegate.bodyAsChannel()` 吗？—— 那正是要测的。
       val rsp =
         runBlocking {
-          Http.requestStreaming(
+          Http.request(
             mapOf<Any, Any?>(
               "url" to server.url,
               "headers" to mapOf("range" to "bytes=0-"),

@@ -1,7 +1,6 @@
 package soko.ekibun.acg.engine
 
 import acg.shared.generated.resources.Res
-import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.request
 import io.ktor.http.isSuccess
 import io.ktor.util.toMap
@@ -80,10 +79,30 @@ class JsEngine {
                 when (argv[0] as String) {
                   "encode" -> encode(args[0] as String, args[1] as String?)
                   "decode" -> decode(args[0] as ByteArray, args[1] as String?)
-                  "fetch" -> fetchAsync(args[0] as Map<Any, Any?>)
                   // args[1] 是 console.log(...) 的**实参数组**，作为 args 的元素整体送达，
                   // 不是摊平成位置参数。
                   "console" -> console(args[0] as String, args[1] as List<Any?>)
+                  // `fetch` 只建会话、**不读 body**：body 交给 `Response.arrayBuffer`
+                  // 按需取（`init.js` 那边 await 之后才调）。所以 `_opaque` 交的是
+                  // [Http.Response] 本体，JS 侧那个 `JavaObject` 包装就是 finalizer
+                  // 能回收它的抓手（`close()` 由析构回调代调，见 cxx/quickjs/quickjs.cpp）。
+                  "fetch" ->
+                    CoroutineScope(Dispatchers.IO).async {
+                      val rsp = Http.request(args[0] as Map<Any, Any?>)
+                      val meta = rsp.delegate
+                      mapOf(
+                        "url" to meta.request.url.toString(),
+                        "headers" to meta.headers.toMap(),
+                        "ok" to meta.status.isSuccess(),
+                        "redirected" to (meta.status.value in 300..399),
+                        "status" to meta.status.value,
+                        "_opaque" to rsp,
+                      )
+                    }
+                  "Response.arrayBuffer" ->
+                    CoroutineScope(Dispatchers.IO).async {
+                      (args[0] as Http.Response).readAll()
+                    }
                   // webview 的 4 个实参打进 args，不是位置参数。args[3] 是回调，
                   // 它的归属语义见 [webviewAsync]。
                   "webview" ->
@@ -158,27 +177,6 @@ class JsEngine {
     val job = async(block = block)
     job.invokeOnCompletion { values.forEach { it?.close() } }
     return job
-  }
-
-  /**
-   * 插件 JS 的 `fetch(...)` 落到这里（`init.js` 的 `__fetch__`）。
-   *
-   * `options` 已经不是一票 JS 引用了：`jsToJava` 把它整图展开成纯数据的
-   * `Map`，连嵌套对象也在 native 侧就地还掉了引用，所以这里**没有东西可还**。
-   * 只有 `options` 里嵌了函数（fetch 选项里不会有）才需要额外 `freeRecursive`。
-   */
-  private fun fetchAsync(options: Map<Any, Any?>): Deferred<Any?> {
-    return CoroutineScope(Dispatchers.IO).asyncReleasing {
-      val response = Http.request(options)
-      return@asyncReleasing mapOf(
-        "url" to response.request.url.toString(),
-        "headers" to response.headers.toMap(),
-        "ok" to response.status.isSuccess(),
-        "redirected" to (response.status.value in 300..399),
-        "status" to response.status.value,
-        "body" to response.bodyAsChannel().toByteArray(),
-      )
-    }
   }
 
   /**

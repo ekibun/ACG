@@ -119,20 +119,25 @@ async (_binding) => {
       this.redirected = response.redirected;
       this.status = response.status;
       this.url = response.url;
-      this.body = response.body;
-      // TODO `type`, `useFinalURL`, `bodyUsed`
-    }
-
-    clone() {
-      return new Response(this)
-    }
-
-    async arrayBuffer() {
-      return this.body;
+      this.bodyUsed = false;
+      const rsp = response._opaque;
+      this.arrayBuffer = async () => {
+        if(this.bodyUsed) throw new TypeError("body stream already read");
+        this.bodyUsed = true;
+        // `await` 不能省：`_binding` 落到 Kotlin 的能力桥，返回的是
+        // `Deferred<ByteArray>`（桥约定，见 ability-bridge.md），JS 侧 await  才拿到
+        // 字节数组。少这个 await 的话 `decode` 收到的是 `CompletableDeferredImpl`，
+        // 强转 `ByteArray` 当场抛 ClassCastException（实测，见 JsEngineDispatchTest）。
+        return await _binding('Response.arrayBuffer', [rsp]);
+      }
+      // TODO `type`, `useFinalURL`
     }
 
     async text(utfLabel) {
-      return new _TextDecoder(utfLabel || "utf-8").decode(this.body);
+      // `decode` 是**同步**桥（直接收 ByteArray），所以 `arrayBuffer()` 的结果
+      // 必须先 await 成字节数组 —— 传 Promise 进去会在 Kotlin 侧强转时炸。
+      const buf = await this.arrayBuffer();
+      return new _TextDecoder(utfLabel || "utf-8").decode(buf);
     }
 
     async json(utfLabel) {

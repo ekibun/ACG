@@ -94,7 +94,7 @@ class HttpBufferedAmountProbeTest {
     MediaServer(body, chunkSize = 4096, chunkDelayMs = 10).use { server ->
       val rsp =
         runBlocking {
-          Http.requestStreaming(
+          Http.request(
             mapOf<Any, Any?>(
               "url" to server.url,
               "headers" to mapOf("range" to "bytes=0-"),
@@ -157,7 +157,7 @@ class HttpBufferedAmountProbeTest {
     MediaServer(body, chunkSize = 64 * 1024, chunkDelayMs = 0).use { server ->
       val rsp =
         runBlocking {
-          Http.requestStreaming(
+          Http.request(
             mapOf<Any, Any?>(
               "url" to server.url,
               "headers" to mapOf("range" to "bytes=0-"),

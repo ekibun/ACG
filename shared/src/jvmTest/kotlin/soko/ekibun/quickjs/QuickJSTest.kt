@@ -63,7 +63,7 @@ class QuickJSTest {
     val old = System.err
     System.setErr(PrintStream(buf, true, Charsets.UTF_8))
     try {
-      runBlocking { closeDeferred().await() }
+      runBlocking { closeDeferred().join() }
     } finally {
       System.setErr(old)
     }
@@ -202,7 +202,6 @@ class QuickJSTest {
     val fn = assertIs<JSFunction>(eval(ctx, "()=>1", name = "<eval>"))
     assertEquals(1L, fn.invoke())
     fn.close()
-    // 不抛异常即通过
     runBlocking { ctx.closeAndAssertNoLeak() }
   }
 
@@ -483,8 +482,8 @@ class QuickJSTest {
   /**
    * 未显式释放的值：**会被报告为泄漏，但不会让进程崩掉**。
    *
-   * 这一条替换了原来「未释放 + close() 不崩溃」的断言 —— 那个前提在 QuickJS 侧根本
-   * 不成立。`JS_FreeRuntime` 结尾有 `assert(list_empty(&rt->gc_obj_list))`，只要还有
+   * 「未释放 + `close()` 不崩溃」这个前提在 QuickJS 侧不成立，所以断言只能落在报告上：
+   * `JS_FreeRuntime` 结尾有 `assert(list_empty(&rt->gc_obj_list))`，只要还有
    * 活引用就会 abort，整个进程死掉、测试连报告都发不出来。
    *
    * [QuickJS.collectLeaks] 的正确行为是两件事一起做：
@@ -536,7 +535,7 @@ class QuickJSTest {
   @Test
   fun closeIsIdempotentAcrossEntryPoints() {
     val ctx = context()
-    runBlocking { ctx.closeDeferred().await() }
+    runBlocking { ctx.closeDeferred().join() }
     ctx.close()
     runBlocking { ctx.closeAndAssertNoLeak() }
   }

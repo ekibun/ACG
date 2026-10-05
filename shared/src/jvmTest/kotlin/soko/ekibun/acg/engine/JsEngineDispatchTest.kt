@@ -189,6 +189,35 @@ class JsEngineDispatchTest {
   }
 
   /**
+   * `Response.arrayBuffer` 是**独立的一条桥**（不走 `fetch` 内部），参数是
+   * `[_opaque]` —— 即 `fetch` 回的那个 [soko.ekibun.acg.common.Http.Response] 包装。
+   *
+   * 锁两件事：
+   * 1. **能真读到 body**（`arrayBuffer()` 必须 `await` 那个 `Deferred` ——
+   *    少一个 await 就会把 `CompletableDeferredImpl` 喂给 `decode`，当场
+   *    `ClassCastException`，这是实测症状）；
+   * 2. **`bodyUsed` 语义**：`fetch` 只建会话不读 body，所以 `bodyUsed` 初始必须是
+   *    `false`（能被读）；读过之后同一对象再读一次必须抛 `TypeError`。
+   */
+  @Test
+  fun responseArrayBufferReadsBodyOnceAndFlagsBodyUsed() {
+    val target = url("/data.json")
+    assertEquals(
+      "1|false-ok|true",
+      evalAsync(
+        """
+        const r = await fetch('$target');
+        const before = r.bodyUsed;          // fetch 不该已经把 body 读掉
+        const a = await r.json();
+        let threw = false;
+        try { await r.arrayBuffer(); } catch (e) { threw = e instanceof TypeError; }
+        return a.a + "|" + before + "-" + (threw ? "ok" : "no-throw") + "|" + r.bodyUsed;
+        """.trimIndent(),
+      ),
+    )
+  }
+
+  /**
    * `webview`：`args[0..3]` 依次是 url / header / script / onInterceptRequest。
    *
    * **本条是那 4 行下标唯一的哨兵** —— 反向验证过：把 `args[1]` 串到 `args[2]`，

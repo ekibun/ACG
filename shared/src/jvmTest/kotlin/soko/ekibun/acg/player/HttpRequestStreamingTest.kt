@@ -14,7 +14,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * 钉住 `Http.requestStreaming` 的**返回值式**契约：它返回一条活的 [Http.Response]，
+ * 钉住 `Http.request(...)` 的**返回值式**契约：它返回一条活的 [Http.Response]，
  * 元数据从 `delegate` 取，`close()` 必须真把服务端那条连接放掉。
  *
  * 与 `HttpStreamingTest` 的分工：那边测的是 `HttpIO`（消费方）的行为；这边直接测 API 本身，
@@ -88,15 +88,15 @@ class HttpRequestStreamingTest {
    * 返回的 [Http.Response] 必须**真的包着块内那个响应**：`status` / `headers` / `call`
    * 都对得上，`offset` 与 `contentLength` 的推导口径也对。
    *
-   * `requestStreaming` **不收任何作废信号**：建立期的取消由调用方（`HttpIO.read` 的哨兵）
-   * **取消整条协程**掀掉 —— 见 `Http.requestStreaming` 与 `HttpIO.read` 的 KDoc。
+   * `Http.request` **不收任何作废信号**：建立期的取消由调用方（`HttpIO.read` 的哨兵）
+   * **取消整条协程**掀掉 —— 见 [Http.request] 与 `HttpIO.read` 的 KDoc。
    */
   @Test(timeout = 60_000)
   fun responseExposesTheInBlockDelegateAndDerivedMetadata() {
     ChunkedServer(chunks = 20, chunkSize = 4096, delayMs = 30).use { server ->
       val rsp =
         runBlocking {
-          Http.requestStreaming(mapOf("url" to server.url))
+          Http.request(mapOf("url" to server.url))
         }
       try {
         // ktor 元数据一律从 delegate 取（不转发）。
@@ -128,7 +128,7 @@ class HttpRequestStreamingTest {
       // `Response.read` 是 suspend，且内部「先等数据到、再读」—— 数据没到它会等到到（或超时抛），
       // 阻塞由调用方按需包（本类里不再有 runBlocking 之外的阻塞）。
       runBlocking {
-        val rsp = Http.requestStreaming(mapOf("url" to server.url))
+        val rsp = Http.request(mapOf("url" to server.url))
         try {
           val buf = ByteArray(4096)
           val n = rsp.read(buf)
@@ -150,7 +150,7 @@ class HttpRequestStreamingTest {
   @Test(timeout = 60_000)
   fun closeReleasesTheServerConnection() {
     ChunkedServer(chunks = 100, chunkSize = 4096, delayMs = 20).use { server ->
-      val rsp = runBlocking { Http.requestStreaming(mapOf("url" to server.url)) }
+      val rsp = runBlocking { Http.request(mapOf("url" to server.url)) }
       val buf = ByteArray(4096)
       assertTrue(runBlocking { rsp.read(buf) } > 0, "先读到数据，证明连接真的在用")
       rsp.close()

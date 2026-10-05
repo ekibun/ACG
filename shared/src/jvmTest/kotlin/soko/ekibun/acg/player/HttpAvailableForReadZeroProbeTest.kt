@@ -81,7 +81,7 @@ class HttpAvailableForReadZeroProbeTest {
     CountingServer(body).use { server ->
       val rsp =
         runBlocking {
-          Http.requestStreaming(
+          Http.request(
             mapOf<Any, Any?>(
               "url" to server.url,
               "headers" to mapOf("range" to "bytes=0-"),

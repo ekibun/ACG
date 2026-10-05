@@ -73,10 +73,10 @@ class RealHttpReadTest {
           assertTrue(packets > 0, "must read at least one packet over real HTTPS")
           assertTrue(frames > 0, "must decode at least one frame over real HTTPS")
         } finally {
-          codec.closeDeferred().await()
+          codec.closeDeferred().join()
         }
       } finally {
-        format.closeDeferred().await()
+        format.closeDeferred().join()
       }
     }
   }
@@ -103,10 +103,10 @@ class RealHttpReadTest {
             "timestamp after seek should be near 20s, got $tailTs (head was $headTs)",
           )
         } finally {
-          codec.closeDeferred().await()
+          codec.closeDeferred().join()
         }
       } finally {
-        format.closeDeferred().await()
+        format.closeDeferred().join()
       }
     }
   }

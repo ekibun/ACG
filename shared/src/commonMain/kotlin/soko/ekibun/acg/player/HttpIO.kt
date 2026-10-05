@@ -9,12 +9,11 @@ import soko.ekibun.acg.common.Http
 import soko.ekibun.acg.common.SOCKET_TIMEOUT_MS
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvIO
-import kotlin.getValue
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
- * HTTP 上的 [AvIO]：一条**活着的**会话，响应体边到边读（走 [Http.requestStreaming]，不用
- * [Http.request] —— 后者整包缓冲，见 `silent-failures.md` 的「整包缓冲」一节）。
+ * HTTP 上的 [AvIO]：一条**活着的**会话，响应体边到边读（走 [Http.request] —— 它**不缓冲**，
+ * 见 `silent-failures.md` 的「整包缓冲」一节）。
  *
  * 读与 seek 只在一条线程上（native 的 avio 回调单线程串行），所以本类不加锁。[read] 是**唯一**的
  * `runBlocking`（native 回调要同步签名），进门就把活交给挂起主体。
@@ -80,11 +79,11 @@ class HttpIO(
    * 打开一条从 [start] 起的会话，等它把响应交出来。**不用**给 [Http.Response.offset] 赋起点 ——
    * 它自己从 `Content-Range` header 算，本函数只管请求、不管记账。
    *
-   * 这里**没有** `runBlocking`（[Http.requestStreaming] 本身就是 suspend），阻塞交给最外层的 [read]。
+   * 这里**没有** `runBlocking`（[Http.request] 本身就是 suspend），阻塞交给最外层的 [read]。
    * **建立期也能被掀掉**：[read] 那支哨兵**取消整条协程** —— 建连 / TLS 握手 / 等响应头都算。
    */
   private suspend fun getRange(start: Int): Http.Response =
-    Http.requestStreaming(
+    Http.request(
       options +
         mapOf(
           "headers" to (options["headers"] as? Map<*, *> ?: mapOf<Any, Any>()) +
@@ -144,7 +143,7 @@ class HttpIO(
         left <= 0
       } catch (t: Throwable) {
         // **新建立的那条必须自己收干净**：它已经登记进 [cachedRsp]，但连 offset 都没走到、不是
-        // 「可复用的缓存会话」，留着下次读会拿它当地基。而建立它的那次 [Http.requestStreaming] 早已
+        // 「可复用的缓存会话」，留着下次读会拿它当地基。而建立它的那次 [Http.request] 早已
         // 返回 ⇒ [close] 与建立期的 job 两边都抓不住它（实测：服务端 entered=3 / exited=2）。
         if (!reused) {
           cachedRsp = null

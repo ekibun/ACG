@@ -20,6 +20,11 @@ struct JSRuntimeOpaque {
   // 内部）， initContext 拿一个真 ArrayBuffer 问一次 JS_GetClassID
   // 自标定，submodule 升级也不会漂。
   JSClassID arrayBufferClassId;
+  // `java/lang/AutoCloseable` 的全局引用（initContext 建、destroyContext 删）。
+  // 挂在 JavaObject 上的对象若是它的实现者，类析构回调要替 JS 侧调一次 close()
+  // —— JS 那边没有 finally，引用丢掉就是最后的机会，漏了只能等 runtime 销毁。
+  // 拿不到（类找不到 / OOM）就退化成只放引用，行为与从前一致。
+  jclass autoCloseableClass;
   // 0 表示不限制：memoryLimit 为 0 就不调 JS_SetMemoryLimit。
   int64_t memoryLimit;
   int64_t timeoutMs;
@@ -55,9 +60,26 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
   env->GetJavaVM(&javaVm);
   JSRuntime* rt = JS_NewRuntime();
   if (rt == nullptr) return 0;
-  auto opaque = new JSRuntimeOpaque{
-      javaVm,     env->NewWeakGlobalRef(ctx),       0,    0, memory_limit,
-      timeout_ms, std::chrono::steady_clock::now(), false};
+  auto opaque =
+      new JSRuntimeOpaque{javaVm,     env->NewWeakGlobalRef(ctx),
+                          0,          0,
+                          nullptr,    memory_limit,
+                          timeout_ms, std::chrono::steady_clock::now(),
+                          false};
+  // AutoCloseable 的类引用要在 JS_NewClass **之前**备好 ——
+  // 类析构回调随时可能跑，那时再取就晚了。
+  {
+    jclass cls = env->FindClass("java/lang/AutoCloseable");
+    if (cls != nullptr) {
+      opaque->autoCloseableClass = (jclass)env->NewGlobalRef(cls);
+      env->DeleteLocalRef(cls);
+    }
+    // 这里**只 Clear 不 Describe**（与下面 finalizer 那处相反）：
+    // 这条路走不通是「类找不到」的正常降级，Describe 只会往 stderr
+    // 打一条 NoClassDefFoundError 噪声，而那不是错误 ——
+    // 退化后行为与从前一致（只放引用，不 close）。
+    if (env->ExceptionCheck()) env->ExceptionClear();
+  }
   // QuickJS 自己默认给 1MB 的栈预算（JS_DEFAULT_STACK_SIZE），和 JVM 线程栈
   // （约 1MB）同量级 —— 深递归真把**宿主**线程栈走穿，挂的是整个进程。
   // 预算必须远低于宿主线程栈：stack_limit = stack_top - stack_size，而
@@ -120,20 +142,63 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
   if (!JS_IsRegisteredClass(rt, opaque->javaClassID)) {
     JSClassDef def{
         "JavaObject",
-        // 类析构回调：把挂在 JS 对象上的 Java 全局引用放掉
+        // 类析构回调：JS 侧把这个包装丢掉时跑。
+        //
+        // 两件事，按顺序：
+        // 1. 若原对象实现 `AutoCloseable` ⇒ 调一次 `close()`；
+        // 2. 放掉 Java 全局引用。
+        //
+        // 顺序不能反：先放引用就再也拿不到 jobject 了，close 也就无从调起。
+        //
+        // 为什么 close：JS 那边没有 try-finally，插件把引用一丢，
+        // 宿主侧就再没有「用完了」的信号了。
+        // 而这些对象（Http.Response 之类）都**欠着一条连接或一个 native
+        // 句柄**，不在这儿调，就只能等 `JS_FreeRuntime` 一次性兜底，
+        // 中间那条连接一直悬着。
+        //
+        // 这套「GetMethodID(GetObjectClass(x), "close", "()V") + CallVoidMethod
+        // + ExceptionDescribe/Clear」的形状与 `ffmpeg.cpp` 的 `closeIoContext`
+        // 一致，是有意保持同形的（各自要在自己那侧的线程上跑，
+        // 抄不出公共函数）—— 改动其中一份时记得看另一份。
         [](JSRuntime* rt, JSValue obj) noexcept {
           auto opaque = (JSRuntimeOpaque*)JS_GetRuntimeOpaque(rt);
           if (opaque == nullptr) return;
           JNIEnv* env;
           opaque->javaVm->GetEnv((void**)&env, JNI_VERSION_1_4);
-          env->DeleteGlobalRef((jobject)JS_GetOpaque(obj, opaque->javaClassID));
+          auto ref = (jobject)JS_GetOpaque(obj, opaque->javaClassID);
+          if (ref == nullptr) return;
+          if (opaque->autoCloseableClass != nullptr &&
+              env->IsInstanceOf(ref, opaque->autoCloseableClass)) {
+            // `GetMethodID` 问的是**具体类**，但签名 `()V` 来自接口
+            // `AutoCloseable.close()` —— 它是抽象方法（不是 default 方法），
+            // 所以每个实现类都**一定**有这个 public 方法，查得到。
+            // `GetObjectClass` 返回的是 local ref，取完方法 id 就得删 ——
+            // GC 时机上没别的机会释放它。
+            jclass cls = env->GetObjectClass(ref);
+            jmethodID close = cls == nullptr
+                                  ? nullptr
+                                  : env->GetMethodID(cls, "close", "()V");
+            if (close != nullptr) {
+              env->CallVoidMethod(ref, close);
+              // 析构回调绝不能往外抛（它跑在 GC 时机上，没有调用者能接）——
+              // 先 Describe 打到 stderr 再 Clear：静默清掉就丢了诊断线索。
+              if (env->ExceptionCheck()) {
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+              }
+            }
+            if (cls != nullptr) env->DeleteLocalRef(cls);
+          }
+          env->DeleteGlobalRef(ref);
         }};
     int e = JS_NewClass(rt, opaque->javaClassID, &def);
     if (e < 0) {
       // 类没注册成：这个 runtime 起不来，opaque 连它的 weak global ref
-      // 一起收掉， 别把失败路径漏成一份常驻内存。
+      // 一起收掉，别把失败路径漏成一份常驻内存。
       JS_SetRuntimeOpaque(rt, nullptr);
       JS_FreeRuntime(rt);
+      if (opaque->autoCloseableClass != nullptr)
+        env->DeleteGlobalRef(opaque->autoCloseableClass);
       env->DeleteWeakGlobalRef(opaque->thiz);
       delete opaque;
       return 0;
@@ -145,6 +210,8 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
     // JS_NewClass 失败是同一条清理链，别让 gc_obj_list 断言留到进程退出。
     JS_SetRuntimeOpaque(rt, nullptr);
     JS_FreeRuntime(rt);
+    if (opaque->autoCloseableClass != nullptr)
+      env->DeleteGlobalRef(opaque->autoCloseableClass);
     env->DeleteWeakGlobalRef(opaque->thiz);
     delete opaque;
     return 0;
@@ -161,7 +228,7 @@ Java_soko_ekibun_quickjs_QuickJS_destroyContext(JNIEnv* env, jclass,
   JSRuntime* rt = JS_GetRuntime((JSContext*)ctx);
   auto opaque = (JSRuntimeOpaque*)JS_GetRuntimeOpaque(rt);
   // 顺序有讲究：JS_FreeContext / JS_FreeRuntime 期间会跑 JavaObject
-  // 的类析构回调， 它得读到 opaque（javaVm + javaClassID）才能把挂着的 Java
+  // 的类析构回调，它得读到 opaque（javaVm + javaClassID）才能把挂着的 Java
   // 全局引用删掉。 以前这里先把 opaque 置成 nullptr，那些 global ref
   // 就被析构回调里那句 `if (opaque == nullptr) return;` 直接放过了 —— 漏的是
   // jobject 全局引用表。
@@ -169,6 +236,10 @@ Java_soko_ekibun_quickjs_QuickJS_destroyContext(JNIEnv* env, jclass,
   JS_FreeRuntime(rt);
   if (opaque != nullptr) {
     // thiz 是 initContext 里 NewWeakGlobalRef 建的，得自己删；opaque 本体同理。
+    // autoCloseableClass 同样要在**析构回调跑过之后**才删 —— 上面两次 Free
+    // 里它还要用来判 `IsInstanceOf`。
+    if (opaque->autoCloseableClass != nullptr)
+      env->DeleteGlobalRef(opaque->autoCloseableClass);
     env->DeleteWeakGlobalRef(opaque->thiz);
     delete opaque;
   }

@@ -20,8 +20,7 @@ import kotlin.test.assertTrue
  * 2. **覆写 [Pointer.initPtr] 就地算** —— 要拿 `this` 去 native 换的那类（`QuickJS`）：
  *    第一个实参留 `null`，覆写体里现算，基类保证「首次读句柄」时才调它；
  * 3. **借用别人的**（`AvStream`）—— **不继承 [Pointer]**：借来的东西不该有 `close()`，
- *    于是 `use {}` / `invokeOnCompletion` 这类自动调用点也关不到它（旧版靠「继承 + 覆写
- *    `close()` 抛异常」，那要跑到运行期才拦得住）。
+ *    于是 `use {}` / `invokeOnCompletion` 这类自动调用点也关不到它。
  *
  * 读句柄有三个入口：[Pointer.withPtr] / [Pointer.withPtrSync] **先查**
  * [Pointer.isClosed]（标记即抛）；[Pointer.ptr] 裸读不设门 —— 归还动作恰好跑在
@@ -194,7 +193,7 @@ class PointerTest {
         override suspend fun releaseImpl(ptr: Long) = Unit
       }
     assertTrue(owner.thread.isAlive, "not closed yet, the thread should be alive")
-    runBlocking { probe.closeDeferred().await() }
+    runBlocking { probe.closeDeferred().join() }
     owner.thread.join(5_000)
     assertFalse(owner.thread.isAlive, "with closeDispatcherOnClose the thread must be collected once release lands")
   }
@@ -215,7 +214,7 @@ class PointerTest {
         object : Pointer(0x78L, shared) {
           override suspend fun releaseImpl(ptr: Long) = Unit
         }
-      runBlocking { probe.closeDeferred().await() }
+      runBlocking { probe.closeDeferred().join() }
       assertTrue(shared.thread.isAlive, "without closeDispatcherOnClose the shared dispatcher must not be touched")
     } finally {
       shared.close()
@@ -392,11 +391,11 @@ class PointerTest {
         }
 
       // close() 只投递；等它落地要拿 closeDeferred() 去 await
-      runBlocking { probe.closeDeferred().await() }
+      runBlocking { probe.closeDeferred().join() }
       assertEquals(counting.thread, releasedOn)
       assertTrue(probe.isClosed)
       // 只跑一次：归还动作不可重入
-      runBlocking { probe.closeDeferred().await() }
+      runBlocking { probe.closeDeferred().join() }
       assertEquals(1, releaseCount)
     }
 
@@ -419,19 +418,18 @@ class PointerTest {
         }
       }
     assertFalse(probe.isClosed)
-    runBlocking { probe.closeDeferred().await() }
+    runBlocking { probe.closeDeferred().join() }
     assertTrue(probe.isClosed)
     assertTrue(markedWhenRead, "release must run after the closed mark")
     assertEquals(0xBEEFL, seen, "release must receive the handle given at construction")
   }
 
   /**
-   * 「要等线程」那类子类**不再**靠抛异常拒绝归还：基类把归还投递到归属 dispatcher 上，
-   * 所以 `close()` 就是正常路径（旧版把同步 `close()` 覆写成直接抛、另立 `closeAsync()`，
-   * 那套 `releaseHint` 机制已删）。
+   * 「要等线程」那类子类归还走**正常路径**：基类把归还投递到归属 dispatcher 上，
+   * 所以 `close()` 不需要抛异常、也不需要另立一个异步入口。
    *
    * 这里顺带钉住：句柄从没兑现过时，`close()` 不会为了「还」去现建一个 native 上下文
-   * ——[AvCodec] 的 `initPtr()` 就是一次真 native 调用，真建出来反而多一次白建白毁。
+   * —— [AvCodec] 的 `initPtr()` 就是一次真 native 调用，真建出来反而多一次白建白毁。
    */
   @Test
   fun threadBoundSubclassClosesThroughBaseDispatcher() {
@@ -471,7 +469,7 @@ class PointerTest {
    * （`QuickJS` 里就是 `initContext`，含 `JS_NewRuntime` / `JS_SetMaxStackSize` 记下的
    * `stack_top` 基准）一定跑在归属线程上 —— 挂起门与同步门两条路都钉。
    *
-   * ⚠️ 这条性质**不是 `by lazy` 给的**：惰性只管「首次读才求值、只算一次」，线程归属是
+   * 这条性质**不是 `by lazy` 给的**：惰性只管「首次读才求值、只算一次」，线程归属是
    * 另外几条凑出来的 —— [Pointer.withPtr] 把 `ptr` 读在 `withContext(d) { … }` 的**块内**、
    * [Pointer.withPtrSync] 读在 `runBlocking(d) { … }` 的**块内**。改动任一条，本用例先红。
    */
@@ -566,7 +564,7 @@ class PointerTest {
       }
     assertEquals(0L, probe.ptr)
     assertEquals(0L, probe.withPtrSync { it })
-    runBlocking { probe.closeDeferred().await() }
+    runBlocking { probe.closeDeferred().join() }
     assertEquals(1, releaseCalls, "a 0 handle still owes one release")
   }
 }

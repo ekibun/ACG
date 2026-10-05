@@ -161,7 +161,6 @@ class FFPlayer(
     // 落点靠下面的丢帧收敛补齐。
     if (pts != newPts) return@withContext
     super.seekTo(ts, stream, minTs, maxTs, flags)
-    // 跳到下一帧
     if (pts != newPts) return@withContext
     when {
       // 视频轨在：单帧步进轮（暂停中 seek）靠「下一帧画面」停住，正常续播轮
@@ -294,7 +293,6 @@ class FFPlayer(
                 // 顺序反了就是**上一帧显示成本帧的像素**（实测：204 帧里 180 帧不符，见 silent-failures.md）。
                 lastUpdate?.join()
                 if (!isPlaying()) return@updateJob
-                // 解码帧
                 if (!muted) playback?.postFrame(codecType, frame)
                 // seek 后的丢帧收敛（ffplay frame_drops_early）：`diff = dpts - master_clock`，主时钟 ==
                 // resyncTo，`|diff| < AV_NOSYNC_THRESHOLD && diff < 0` ⇒ 解码后立刻丢。**必须排在送显之前、
@@ -309,7 +307,6 @@ class FFPlayer(
                   consumed = true
                   return@updateJob
                 }
-                // 等视频追上主时钟
                 if (codecType == AVMediaType.VIDEO && onNextFrame?.isActive != true) {
                   while (frame.timeStamp > pts.now(playback?.speedRatio() ?: 1f)) {
                     delay(1.milliseconds)
@@ -478,11 +475,11 @@ class FFPlayer(
       // 并 join 到读作业死透 —— 后者保证 [AvFormat.releaseImpl] 销毁 native 上下文时没有读作业
       // 还拿着它。理由与逐条判据见 [AvFormat.resetChannel] 的 KDoc。
       resetChannel()
-      super.closeDeferred().await()
+      super.closeDeferred().join()
       // 每个 codec 有自己的归属 dispatcher：这里要等**归还真的落地**，
       // 而不是投出去就返回 —— 所以 await 各自的 closeDeferred()。
       codecs
-        .map { async(playerDispatcher) { it.value.closeDeferred().await() } }
+        .map { async(playerDispatcher) { it.value.closeDeferred().join() } }
         .awaitAll()
       codecs.clear()
     }

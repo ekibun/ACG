@@ -1,11 +1,13 @@
 package soko.ekibun.acg.common
 
 import io.ktor.client.HttpClient
+import io.ktor.client.HttpClientConfig
+import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.HttpTimeoutConfig
 import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.forms.MultiPartFormDataContent
 import io.ktor.client.request.forms.formData
 import io.ktor.client.request.prepareRequest
-import io.ktor.client.request.request
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsChannel
@@ -14,6 +16,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.availableForRead
 import io.ktor.utils.io.readAvailable
+import io.ktor.utils.io.toByteArray
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,7 +29,7 @@ import kotlinx.coroutines.selects.select
 import kotlin.getValue
 import kotlin.time.Duration.Companion.milliseconds
 
-expect fun createHttpClient(followRedirects: Boolean): HttpClient
+expect fun createHttpClientImpl(block: HttpClientConfig<*>.() -> Unit): HttpClient
 
 /**
  * 「两次数据包之间」的最大不活动时间（毫秒），**闲置超时** —— [Response.read] 内那支
@@ -38,44 +41,65 @@ expect fun createHttpClient(followRedirects: Boolean): HttpClient
 const val SOCKET_TIMEOUT_MS = 8_000L
 
 object Http {
+  /**
+   * 建客户端：通用配置收在这里（`Http` 一处），平台侧只补自己的引擎与插件。
+   *
+   * 显式把引擎层的「闲置超时」设成无限：这条判据**唯一**交给 [Response.read] 内那支
+   * `select onTimeout`（见 [SOCKET_TIMEOUT_MS]），两平台行为才一致。不装的话 OkHttp 自带的
+   * 10 s read timeout 会照旧生效，而那走的不是我们这支（成因见 `http-streaming.md` 第一节）。
+   *
+   * 装在**这里**而不是各平台侧：装两遍虽然安全（ktor 对同一 plugin 的重复 `install`
+   * 会作用到已有配置上），但会让读者误以为平台侧那处才是权威，而 JVM 侧并不需要。
+   */
+  private fun createHttpClient(block: HttpClientConfig<*>.() -> Unit): HttpClient =
+    createHttpClientImpl {
+      this.block()
+      install(HttpTimeout) {
+        socketTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
+      }
+    }
+
   private val clientWithRedirect by lazy {
-    createHttpClient(followRedirects = true)
+    createHttpClient {
+      followRedirects = true
+    }
   }
   private val clientWithoutRedirect by lazy {
-    createHttpClient(followRedirects = false)
+    createHttpClient {
+      followRedirects = false
+    }
   }
 
   /**
-   * 发一次请求，**响应体已整包缓冲**后再交给调用方。走 ktor 的便捷入口，内部有一句 `call.save()`。
-   * 「边下边用」的场景必须用 [requestStreaming]（实测见 `silent-failures.md` 的「整包缓冲」一节）。
-   */
-  suspend fun request(options: Map<Any, Any?>): HttpResponse {
-    val url = options["url"] as String
-    return clientFor(options).request(url) { applyOptions(options) }
-  }
-
-  /**
-   * 与 [request] 同参数，但**流式**：body 不缓冲，返回一条**活的** [Response]，读多少到多少。
+   * 建一条**流式**会话，等它把响应交出来：body 不缓冲，返回一条**活的** [Response]，读多少到多少。
+   * 元数据一律从 [Response.delegate] 取；**必须** `close()` 掉它，否则那条连接不会放掉。
    *
-   * **生命周期**：`execute` 的块返回后 ktor 立刻 `cleanup()` 掉响应，所以这里让块**挂住**
-   * （`done.await()`）直到对方 [Response.close] —— 一条连接能**跨多次读**慢慢用。
-   * 会话 scope 为什么不能挂在调用方 job 上（会死锁），见 `http-streaming.md` 第四节。
+   * 「整包消费」（下完整个 body 再用）的场景也走这里，然后 [Response.readAll] ——
+   * ktor 的便捷入口内部有一句 `call.save()`，本函数没有，**别指望它替你缓冲**
+   * （实测见 `silent-failures.md` 的「整包缓冲」一节）。
+   *
+   * 拿到 [Response] 的两条消费路径：**Kotlin 侧**（`HttpIO`，显式 `close`）与
+   * **JS 侧**（`fetch` 把它当 `_opaque` 挂进 JS，body 由 `Response.arrayBuffer` 桥取，
+   * 关闭交给 native 的类析构回调代调）。JS 那条能成立靠的就是「会话开在无父 scope 上」——
+   * 推导见 `http-streaming.md` 第四节。
    */
-  suspend fun requestStreaming(options: Map<Any, Any?>): Response {
-    val url = options["url"] as String
+  suspend fun request(options: Map<Any, Any?>): Response {
     // 放行块（= [Response.close] 做的事）：完成它 ktor 随即 cleanup 掉这条响应。
     val done = CompletableDeferred<Unit>()
-    // 响应就绪的信号。[requestStreaming] 等它拿到响应就返回；建立期的失败也从它这里出去。
+    // 响应就绪的信号。本函数等它拿到响应就返回；建立期的失败也从它这里出去。
     val ready = CompletableDeferred<Response>()
-    // 会话开在**无父** scope 上：挂调用方的 job 会死锁（推导见 KDoc）。块也**不能**在这里返回
-    // （返回后 ktor 会 cleanup），靠 `done.await()` 挂住直到 close。
+    // 会话开在**无父** scope 上：挂调用方的 job 会死锁（推导见 `http-streaming.md`
+    // 第四节）。块也**不能**在这里返回（返回后 ktor 会 cleanup），靠 `done.await()`
+    // 挂住直到 close。
     val session =
       CoroutineScope(Dispatchers.IO).launch {
         try {
-          clientFor(options).prepareRequest(url) { applyOptions(options) }.execute { rsp ->
-            ready.complete(Response(delegate = rsp, done = done))
-            done.await()
-          }
+          (if (options["redirect"] == "follow") clientWithRedirect else clientWithoutRedirect)
+            .prepareRequest(options["url"] as String) { applyOptions(options) }
+            .execute { rsp ->
+              ready.complete(Response(delegate = rsp, done = done))
+              done.await()
+            }
         } catch (t: Throwable) {
           // [ready] 没完成 = 失败在**建立期**（建连 / TLS / 等响应头）：必须传出去，否则上面
           // `ready.await()` 永远挂着。已完成 = 响应已交出去、这次读自己会以 EOF / 异常收场，不用传。
@@ -83,7 +107,7 @@ object Http {
         }
       }
     try {
-      // 建立期没有 abort 支（见 KDoc）：作废走**取消这条协程**，`ready.await()` 会被一起掀掉。
+      // 建立期没有 abort 支：作废走**取消这条协程**，`ready.await()` 会被一起掀掉。
       // 所以这里就一句 await —— 建连 / TLS 握手 / 等响应头多长都无所谓，取消随时能到。
       return ready.await()
     } finally {
@@ -100,7 +124,15 @@ object Http {
    * **关会话 ≠ 作废本轮**：作废是**一次性事件**（`HttpIO` 的哨兵取消整条读，会话**保留**）；
    * [close] **不可逆**，掀通道 + 放块回去 + ktor cleanup。
    *
+   * 两条读法：[read] 读多少到多少（ffmpeg 边下边用那条）、[readAll] 一次读完
+   * （插件 JS 的 `Response.arrayBuffer()` 走那条）。**混用会串** —— 见各自 KDoc。
+   *
    * 本类**不含任何 `runBlocking`**，阻塞交给调用方。
+   *
+   * 本类实现 [AutoCloseable]，而它会经 `jsWrapObject` 原样挂到 JS 对象上 ——
+   * JS 侧把它丢掉时，native 的类析构回调会**替 JS 调一次 [close]**
+   * （`cxx/quickjs/quickjs.cpp` 的 `JavaObject` finalizer）。所以 [close] 必须
+   * 能在任意线程上可调、且幂等（实测两条关闭路径并发到达是常态）。
    */
   class Response internal constructor(
     /** ktor 响应本体。元数据（`status` / `headers` / `call` …）全部从这里取。 */
@@ -108,6 +140,14 @@ object Http {
     /** 完成它 = 放会话的 `block` 回去（ktor 随即 cleanup）。幂等。 */
     private val done: CompletableDeferred<Unit>,
   ) : AutoCloseable {
+    /**
+     * 本条响应是否已经 [close] 过 —— 直接问会话本身，不另设标志：
+     * [close] 做的第一件事就是 `done.complete(Unit)`，而 `done` 完成后不会再变回未完成。
+     * 两条关闭路径（调用方显式 close、JS 侧 GC 时的 `JavaObject` finalizer）并发到达时，
+     * `complete` 只有一个赢家，另一路读到的是「已完成」—— 语义正好对。
+     */
+    val isClosed: Boolean get() = done.isCompleted
+
     /**
      * 流总长度；**未知时 -1**，不是 0（0 会被 ffmpeg 当成「长度为零的流」，把后续 seek
      * 全判成越界）。
@@ -142,6 +182,24 @@ object Http {
       channelOrNull ?: delegate.bodyAsChannel().also { channelOrNull = it }
 
     /**
+     * 把余下的 body **整包**读完，**读完即 [close]** —— 「不流式、只要一次性拿到全部」的那条路。
+     *
+     * 与 [read] 的分工：[read] 读多少到多少（ffmpeg 边下边用那条），本方法一次读完。
+     * 走同一条 [channel]，所以**混用会串** —— 读完再 `read` 只会拿到流尾。
+     *
+     * 供插件 JS 的 `Response.arrayBuffer()` 用（`init.js` 那边 await 之后才调），
+     * 跑在 IO 线程上。它**不**复用 [read] 的闲置超时，所以**没有**超时：
+     * 引擎层的 socket 超时已被本对象 `createHttpClient` 设成无限，而这里也没有
+     * `select` 那一支 —— 读完立刻关掉，不给「卡住的服务端」留窗口。
+     *
+     * 关掉的理由：这条路径的消费者（插件 JS）拿到字节数组就不再需要这条连接，
+     * 而 [close] 顺带把会话的 `block` 放回给 ktor cleanup。
+     * 用 [use] 而不是「读完再手动 close」：连接被服务端掐断时 `toByteArray()` 会抛，
+     * 那条路上连接与响应同样要放掉 —— `use` 覆盖成功与异常两条出口。
+     */
+    suspend fun readAll(): ByteArray = use { channel().toByteArray() }
+
+    /**
      * 通道里**已经到达、但还没被 [read] 取走**的字节数。
      *
      * 两条反直觉的性质（机制与实测见 `http-streaming.md` 第六节）：
@@ -172,6 +230,9 @@ object Http {
       len: Int = buf.size,
       timeoutMs: Long = SOCKET_TIMEOUT_MS,
     ): Int {
+      // 已关闭的响应上再读是**用错**，不是 EOF：通道已被 cancel，readAvailable 会给出一个
+      // 语义不明的失败（而不是 0）。当场拒绝，别让它伪装成「读空了」。
+      if (isClosed) throw IllegalStateException("Response already closed")
       val chan = channel()
       return coroutineScope {
         // 必须先建出来、再进 `select`：`select` 里现写 `async { }` 会被 kotlinc 报
@@ -198,6 +259,11 @@ object Http {
      *
      * 这里的 cancel 走 [channelOrNull]：**只掀已经建起来的那条**。本条响应从没被读过时通道压根
      * 没建，别为了「有东西可 cancel」去把 body 抽出来（那是 suspend，而且白建一条没人读的通道）。
+     *
+     * **幂等，且两条路径并发到达也安全** —— 不另设标志，两句话各自已经幂等：
+     * 通道 `cancel` 在已关闭时立刻返回（ktor `ByteChannelImpl.cancel` 的
+     * `_closedCause != null` 早退），[done] 的 `complete` 第二次调用返回 false、不重复触发
+     * （实测 8 线程并发 complete 50 轮，每轮都只有一个赢家）。所以这里可以**直接调两次**。
      */
     override fun close() {
       channelOrNull?.cancel(null)
@@ -211,11 +277,8 @@ object Http {
    */
   internal class IdleTimeoutException : RuntimeException("HTTP idle timeout: 服务端 ${SOCKET_TIMEOUT_MS}ms 未出字节")
 
-  private fun clientFor(options: Map<Any, Any?>): HttpClient =
-    if (options["redirect"] == "follow") clientWithRedirect else clientWithoutRedirect
-
   /**
-   * 两个入口**共用这一份** —— 抄两遍迟早只改一处，而「少带一个 header」是难查的静默失效。
+   * **整包 / 流式两种执行共用这一份** —— 抄两遍迟早只改一处，而「少带一个 header」是难查的静默失效。
    */
   private fun HttpRequestBuilder.applyOptions(options: Map<Any, Any?>) {
     if (options["credentials"] == "omit") {

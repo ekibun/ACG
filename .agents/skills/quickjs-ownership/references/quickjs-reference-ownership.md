@@ -284,6 +284,84 @@ class QuickJS(
 - 丢掉 GC 兜底是有代价的：**忘记 `close()` 就真的永久泄漏**，测试与调用方必须自己
   保证关闭路径。这也正是规则 6 存在的理由。
 
+### 规则 5.0 —— `AutoCloseable` 的**销毁回调**放在 native finalizer 里（2026-10-05）
+
+上面讲的是 Kotlin 侧**主动** `close()`。反过来那一面：JS 侧把包装**丢掉**时，
+宿主怎么知道「用完了」。答案是 `JavaObject` 的类析构回调
+（`cxx/quickjs/quickjs.cpp` 的 `JS_NewClass`）：
+
+```cpp
+// 挂在 JS 对象上的 Java 全局引用放掉之前，若原对象是 AutoCloseable 就先 close()。
+// 顺序承重：先 DeleteGlobalRef 就再也拿不到 jobject。
+if (opaque->autoCloseableClass != nullptr &&
+    env->IsInstanceOf(ref, opaque->autoCloseableClass)) {
+  jmethodID close = env->GetMethodID(cls, "close", "()V");
+  env->CallVoidMethod(ref, close);
+  if (env->ExceptionCheck()) env->ExceptionClear();   // 析构回调不得抛
+}
+env->DeleteGlobalRef(ref);
+```
+
+判据是 `IsInstanceOf` 那个**接口**，**不做任何 Kotlin 侧类型判断** ⇒
+`Pointer` 那些也是 `AutoCloseable` 的类自动被覆盖，不需要单独分支。
+
+不显然的地方：
+
+- **`close()` 必须能在任意线程上可调**，因为 finalizer 跑在 GC 的时机上。
+  `Pointer.close()` 是「投递即返回」，满足；`Http.Response.close()` 只碰
+  `channelOrNull` 与 `CompletableDeferred`，也满足。**这一条要成为新增 `AutoCloseable`
+  的准入条件** —— 挂上 opaque 之前先确认它的 `close()` 不会阻塞。
+- **析构回调不得抛**，且要 `ExceptionDescribe` + `ExceptionClear`（同 `ffmpeg.cpp` 的
+  `closeIoContext`）—— 静默 `Clear` 会把 close 抛的异常丢掉。
+- **`autoCloseableClass` 的删除点在两次 `Free` 之后**：`JS_FreeContext` / `JS_FreeRuntime`
+  期间 finalizer 还要用它判 `IsInstanceOf`。同理 `opaque->thiz` 的删除顺序（原有约束）。
+- **测试触发回收直接「关掉 runtime」即可，不要为此在生产代码上加 GC 开关** ——
+  曾加过 `QuickJS.runGC()` + JNI 导出 `jsRunGC`，2026-10-05 按「不要为了测试加东西」删掉。
+  关 runtime 就够，依据是 quickjs 自己的一条链：
+  ```
+  JS_FreeRuntime
+    → JS_RunGCInternal(rt, FALSE)   // quickjs.c:2423
+    → gc_free_cycles                // 其中一趟（quickjs.c:6756）
+    → free_gc_object → free_object  // quickjs.c:6787 / 6394
+    → (*finalizer)(rt, obj)         // quickjs.c:6365-6367，**无条件**
+  ```
+  ⚠️ **`remove_weak_objects` 与 class finalizer 无关** —— 我曾把
+  `JS_RunGCInternal(rt, FALSE)` 的这个参数读成「关 runtime 不跑 finalizer」，
+  **那是错的**：它只管 `gc_remove_weak_objects`（`FinalizationRegistry` 的 weak 引用
+  队列，quickjs 注释里那句「avoid create new jobs with FinalizationRegistry」指的就是它）。
+  **`free_object` 调 finalizer 时不看任何参数。** 别再拿这个参数当「跑没跑 finalizer」的判据。
+- ⚠️ 顺带：finalizer 可能比「关 runtime」**更早**跑 —— 归零之后 quickjs 内部任何一次
+  分配都可能顺带触发 `js_trigger_gc`（quickjs.c:1780，阈值 `malloc_gc_threshold`
+  初值 256 KB、每次触发后重置为「当前堆 × 1.5」）。
+  ⇒ 探针**别断言「还活着时 close 没被调」**，只断言「关掉之后一定被 close」。
+- ⚠️ **测试里绝对不能「故意漏句柄」** —— `JS_FreeRuntime` 末尾有
+  `assert(list_empty(&rt->gc_obj_list))`，漏句柄会**直接 abort 整个测试进程**
+  （gradle 报 `Test process encountered an unexpected problem` / exit value 3，
+  **后续用例全被标成 skipped**，而 XML 里 `failures=0`，极具欺骗性）。
+  漏句柄这件事由规则 6 的泄漏报告负责报，不在「回收行为」这类探针里验。
+
+### 规则 5.0.1 —— 上游已幂等，就别自己再加一道标志
+
+`AutoCloseable` 实现类被两条路径（调用方显式 `close`、native finalizer）并发调用是常态。
+**先查上游是否已经幂等，别急着加 `AtomicBoolean`**（2026-10-05 实测，`Http.Response` 上）：
+
+| 上游动作 | 幂等保证在哪 |
+| --- | --- |
+| `CompletableDeferred.complete(Unit)` | 第二次**返回 false**，不抛、不重复触发；8 线程并发 50 轮实测**每轮只有一个赢家** |
+| `ByteReadChannel.cancel(cause)` | ktor `ByteChannelImpl.cancel` 第一行 `if (_closedCause.value != null) return` |
+
+⇒ 那个 `AtomicBoolean` 没挡住任何东西，是纯冗余（违反「最简实现」）。
+需要「是否已关闭」的状态时，**从既有事实推**而不是另设标志：
+
+```kotlin
+// close() 做的第一件事就是 done.complete(Unit)，而 done 完成后不会再变回未完成
+val isClosed: Boolean get() = done.isCompleted
+```
+
+探针钉在 `CloseIdempotencyProbeTest`（3 用例：complete 幂等 / 并发只有一个赢家 /
+连关三次安全且 `read` 当场拒绝）—— 想再加标志前先看它。
+
+
 ### 规则 5.1 —— `soko.ekibun.Pointer` 基类（2026-09-20 定稿）
 
 定义在 `shared/src/commonMain/kotlin/soko/ekibun/jni.kt`。**所有持有 native 指针的对象

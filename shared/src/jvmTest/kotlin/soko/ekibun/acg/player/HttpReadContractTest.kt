@@ -63,10 +63,10 @@ class HttpReadContractTest {
               }
               pts
             } finally {
-              codec.closeDeferred().await()
+              codec.closeDeferred().join()
             }
           } finally {
-            format.closeDeferred().await()
+            format.closeDeferred().join()
           }
         }
       assertTrue(afterSeek.size > 200, "seek 之后应当还读到两百多帧，实际 ${afterSeek.size}")
@@ -98,10 +98,10 @@ class HttpReadContractTest {
           }
           pts
         } finally {
-          codec.closeDeferred().await()
+          codec.closeDeferred().join()
         }
       } finally {
-        format.closeDeferred().await()
+        format.closeDeferred().join()
       }
     }
 

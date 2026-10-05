@@ -60,8 +60,8 @@ class QuickJS(
      * 死锁；但新 runtime 的操作会和外面那些一起排在这条单线程上 —— 在回调里**等**它的
      * 结果就是自己等自己。
      *
-     * ⚠️ 它**从不 shutdown**：共享的东西没有哪一方有权关掉它，所以这条线程活到进程结束。
-     * 反过来的好处是反复建 runtime 不再攒线程（改造前是每个 runtime 一条、同样不关）。
+     * 它**从不 shutdown**：共享的东西没有哪一方有权关掉它，所以这条线程活到进程结束。
+     * 反过来的好处是反复建 runtime 不会攒线程。
      */
     val sharedDispatcher = ThreadDispatcher("quickjs")
 
@@ -312,10 +312,9 @@ class QuickJS(
   /**
    * 所有仍持有 native 引用的对象，**强引用**登记。
    *
-   * 用身份登记表而不是原来的 `WeakHashMap<Long, JSRef>`：
-   * - 原来是「native 指针 → 包装」，指针一复用就会覆盖条目，且条目会被 GC 静默
-   *   清掉 —— 于是关闭时遍历 `ref` 根本找不到漏掉的对象，只能让 C 层断言 abort。
-   * - 现在按对象身份登记，`close()` 时能确定性地逐个归还，还能枚举出残留者。
+   * 按**对象身份**登记（不是按 native 指针）：指针会被复用、条目会被 GC 静默清掉，
+   * 那样 `close()` 遍历时就找不到漏掉的对象，只能让 C 层断言 abort。身份登记让
+   * `close()` 能确定性地逐个归还，还能枚举出残留者。
    *
    * 这里刻意用强引用（与 flutter_qjs 的 `_RuntimeOpaque._ref` 一致）：只有强引用才能
    * 保证「还没 close 的对象一定还在册」，从而让清算**确定发生**而不是听天由命等 GC。
@@ -336,7 +335,7 @@ class QuickJS(
   /**
    * 算出 runtime + context —— 覆写基类的句柄来源。
    *
-   * ⚠️ 基类保证它**不在构造期调**、且`只调一次`（结果存进 `Pointer.ptr`）：它在**首次读
+   * 基类保证它**不在构造期调**、且`只调一次`（结果存进 `Pointer.ptr`）：它在**首次读
    * 句柄**那一刻才跑，那时 [moduleHandler] / [stackSize] / [memoryLimit] / [timeout] 都
    * 已经有值。别把它挪回构造期 —— 基类构造期本类的字段全是 `0`（实测 `putfield` 排在
    * `invokespecial <init>` **之后**，而且**编译器不报错**），而 `timeout = 0` 等于关掉死
@@ -650,13 +649,13 @@ class QuickJS(
    * 的 `submit { releaseImpl(ptr) }` 投到归属线程上，**submit 就是线程边界**：落地时
    * 已在归属线程，这里不必（也不可）再自行切换。
    *
-   * ⚠️ **别包 withPtrSync**：它带着 isClosed 门，会把这个窗口里的归还当场挡掉
+   * **别包 withPtrSync**：它带着 isClosed 门，会把这个窗口里的归还当场挡掉
    * （[collectLeaks] 那一轮清算就此断掉）。**也别改 submit**：那会把归还排队到当前
    * 块之后，而 close 的 [releaseImpl]（销毁）不等它 —— 对着已销毁的
    * runtime 释放句柄，use-after-free。线程保证来自调用链（基类投递 → 落地后同步直调），
    * `ptr` 的同线程断言（`-ea` 下）兜住跑错线程的调用。
    *
-   * ⚠️ 还的是 **ref 自己的值句柄**（`ref.ptr`），**不是**本类的 ctx 句柄 —— 两个都是
+   * 还的是 **ref 自己的值句柄**（`ref.ptr`），**不是**本类的 ctx 句柄 —— 两个都是
    * `Long`，混用就是拿 runtime 指针对去 `jsFreeValue`，当场踩坏 native 堆（实测表现是
    * 测试进程 `0xC0000374` heap corruption 直接死掉）。
    */
@@ -676,7 +675,7 @@ class QuickJS(
    *
    * 这与 [jsToJava] 那边的 `cache` 是同一个思路（按 native 指针记忆）。
    */
-  fun javaToJsImpl(
+  private fun javaToJsImpl(
     obj: Any?,
     cache: MutableMap<Any, Long> = IdentityHashMap<Any, Long>(),
   ): Long =
@@ -716,7 +715,6 @@ class QuickJS(
         // jsRes/jsRej 不需要单独归还 —— 所有权已经转移给新建的 JSFunction。
         val resolve = jsToJava(ptr, jsRes) as JSFunction
         val reject = jsToJava(ptr, jsRej) as JSFunction
-        @Suppress("DeferredResultUnused")
         submit {
           try {
             resolve.invoke(obj.await())
@@ -771,6 +769,12 @@ class QuickJS(
         }
         return@withPtrSync ret
       }
+      // `Http.Response` 等 AutoCloseable **不另开分支**：下面的 `jsWrapObject` 兜底
+      // 已经足够 —— 它挂的 `JavaObject` 就是 native 类析构回调能回收它的抓手
+      // （析构时替 JS 调 `close()`，见 `cxx/quickjs/quickjs.cpp`）。
+      // 插件侧读 body 走 `init.js` 的 `Response.arrayBuffer` 桥（那条桥把 Response
+      // 当**参数**收，不经过这里），所以这里不需要给它挂任何方法 ——
+      // 挂了没人调，`read` 的返回契约（`{n, bytes}` 那个 Map）也就没人定过。
       val ret = jsWrapObject(ptr, obj)
       return@withPtrSync if (obj is JSInvokable) {
         val func = jsNewCFunction(ptr, ret)
@@ -831,7 +835,7 @@ class QuickJS(
     // 先记录：还在册 = 调用方漏了归还
     val leaked = snapshot.map { "  ${it.describe()}" }
     // 再归还：清空登记册，让 runtime 可以安全销毁
-    snapshot.forEach { it.closeDeferred().await() }
+    snapshot.forEach { it.closeDeferred().join() }
     refs.clear()
     return leaked
   }
