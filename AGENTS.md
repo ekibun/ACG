@@ -44,8 +44,27 @@ native（`cxx/`：WebView2 宿主、QuickJS 桥、FFmpeg 解封装+解码+播放
 不是来源仓库；未跟踪的参照目录在别人的 clone 里不存在，指向它的注释等于指向一个找不到的东西。
 ⚠️ 但**契约签名要留**（如 `webview(url, header, script, onInterceptRequest)`）——
 那是"该实现什么形状"，属代码事实；「已删除 + 出处」的防回归警告同理。
+**注释不写「代码在做什么」的复述** —— 判据是**删掉这行注释，读者的理解有没有变化**；
+没变化就是在翻译代码，删（`/** 写播放倍速。 */` 配 `fun setSpeedRatio` 是典型）。
+「这是什么」指的是**契约与职责**，不是把标识符翻成中文。
+**用 import，不写全限定名**（同 animeko）—— `extensions.configure<KtlintExtension>` 而不是
+`extensions.configure<org.jlleitschuh.gradle.ktlint.KtlintExtension>`。
+**源码正文不用 emoji 符号** —— `.kt` / `.kts` 的注释里不写 `⚠️` / `✅` / `❌` / `📌` / `💡`。
+animeko 2913 个 kt/kts、60866 行注释里含 emoji 的只有 30 行（0.05%），且全是**测试数据里的字符串**，
+不是注释标记；它的 `⚠️` 只出现在 3 个设计文档 `.md` 里，是文档的状态标记。
+⚠️ **这条管的是「源码」**：`.md` 文档里的 `⚠️` 不受此限（`comments.md` 有明确例外——
+「已删除 + 出处」的防回归说明是刻意留的警告）。符号只是标记，**约束本身照写**，
+删符号别删句子；约束描述一大段机制、或带实测数据时，正文留一句裸约束 + 指到 `.agents/` 下
+对应文档的哪一节。
 承重的历史知识抽进 [`.agents/`](./.agents) 下对应 skill 的 `references/`，代码里只留指针；
 写法细则见 skill `coding-style`。
+
+**注释太长时搬、不删** —— 判据是「这段在讲**约束**，还是在讲**机制**？」：带实测数据
+（探针名、样本表、ffmpeg 源码行号）或在推演「为什么长成这样」的段落 ⇒ 搬进 `.agents/` 下对应
+`references/`，正文留一句裸约束 + 指到哪一节；约束就贴在那个函数旁边 ⇒ 留裸约束句、删推演过程。
+**约束本身一个字都不能少**，搬走的是推演过程。别拿「注释行 / 代码行」的比例当判据 ——
+分母是代码行，小文件密度天然冲高（animeko 自己就有 92% 的小文件超 35%）。落点表见
+`comments.md` 第六节。量测口径与它本身的三个坑见 `comments.md` 第六节。
 
 **目标驱动执行** —— 先定可验证的成功标准，再循环到它通过。
 把需求翻译成可验证的目标："加校验" → 先写非法输入的测试、再让它过；"修 bug" → 先写复现它的测试。
@@ -95,7 +114,7 @@ native（`cxx/`：WebView2 宿主、QuickJS 桥、FFmpeg 解封装+解码+播放
   `androidx-lifecycle` 是**刻意**钉在 alpha/beta 上的，不是笔误 —— 不要"顺手"降成稳定版。
 - native 绑定统一收在 `soko.ekibun.*`（`quickjs` / `ffmpeg` / `jni.kt` 已经在那儿），
   **新增绑定一律放这里**；`soko.ekibun.acg.*` 是业务层（`web` / `player` / `engine` / `common` /
-  `ui.screen`）。
+  `ui.screen` / `ui.comp`）。`ui.screen` 放**整页**、`ui.comp` 放**跨页复用的组件**。
 - 注册 Gradle 任务用 `tasks.register<T>("name")`；`by tasks.registering(...)` 已弃用且**编译失败**。
 
 | 找什么 | 去哪 |
@@ -174,10 +193,10 @@ native（`cxx/`：WebView2 宿主、QuickJS 桥、FFmpeg 解封装+解码+播放
   注意不是 `compileDebugKotlinAndroid`）、
   **全量测试**（`./gradlew :shared:jvmTest --console=plain --rerun`，结果读
   `shared/build/test-results/jvmTest/TEST-*.xml`）、**lint**
-  （`./gradlew :shared:ktlintCheck --continue` 与 `clang-format --dry-run --Werror`），
+  （`./gradlew :shared:ktlintCheck --continue` 与 `clang-format --dry-run --Werror`）、
   把结论一并报出来再提交。超时兜底导致的失败按 skill `project-traps` 的
   [`silent-failures.md`](./.agents/skills/project-traps/references/silent-failures.md) 甄别，别靠重跑掩盖。
-  （`.githooks/pre-commit` 当场就会拦一遍 lint，所以 `ktlintCheck` 那次通常是空跑。）
+  （`.githooks/pre-commit` 当场就会拦一遍 lint，所以那两次通常是空跑。）
 - Co-author 署名固定，别自创 `WorkBuddy <noreply@...>` 之类：
 
   ```

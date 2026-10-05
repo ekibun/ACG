@@ -18,7 +18,7 @@ import javax.sound.sampled.SourceDataLine
 
 /**
  * 桌面端播放实现：音频走 javax.sound.sampled；视频写进**复用的 skiko 位图**（[frame]），
- * 由 `VideoSurface.jvm.kt` 用 nativeCanvas 直接画 —— 不每帧新建对象，理由见 [nextFrameBitmap]。
+ * 由 `VideoSurface.jvm.kt` 取 skiaCanvas 直接画 —— 不每帧新建对象，理由见 [nextFrameBitmap]。
  *
  * [soko.ekibun.ffmpeg.AvPlayback] 的 native 侧会按构造时传入的 audioFormat 用 swr_convert
  * 转码输出，因此这里的 audioFormat = AV_SAMPLE_FMT_FLT 意味着拿到的是 float32。
@@ -27,7 +27,8 @@ import javax.sound.sampled.SourceDataLine
  */
 class DesktopPlayback(
   onFrame: (Long?) -> Unit,
-) : Playback(onFrame) {
+  onEvent: (Event) -> Unit,
+) : Playback(onFrame, onEvent) {
   private val playbackDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
 
   private companion object {
@@ -109,7 +110,7 @@ class DesktopPlayback(
   /**
    * 最新一帧，供 Compose 绘制。
    *
-   * ⚠️ 它是**复用**的位图（内容每帧被覆写），不是快照 —— 绘制方要留住像素必须自己拷一份
+   * 它是**复用**的位图（内容每帧被覆写），不是快照 —— 绘制方要留住像素必须自己拷一份
    * （见 `VideoSurface.jvm.kt`）。靠「换块」让引用变化，Compose 据此重组 + 重绘。
    */
   val frame: Bitmap? get() = frameState.value

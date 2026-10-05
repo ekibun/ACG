@@ -65,22 +65,16 @@ class JsEngine {
           }
           val ctx1 = QuickJS(moduleHandler = moduleHandler)
           quickjsDelegate = ctx1
-          // `init` 是**工厂函数**：JS 侧没有别的引用持有它，调用完即可归还。必须用
-          // `as JSFunction` —— 声明成 `as JSInvokable` 会丢掉 `AutoCloseable`，
-          // 每个引擎实例固定漏 1 票（依据见 [ability-bridge]）。
-          // 这里在属性 getter 里，不是协程上下文，只能阻塞等这一次求值 ——
-          // evaluate 本身是挂起的（它要把求值搬到 QuickJS 的归属线程上）。
+          // `init` 是**工厂函数**，JS 侧没别的引用持有它，调用完即可归还 —— 但必须 `as JSFunction`：
+          // 声明成 `as JSInvokable` 会丢掉 `AutoCloseable`，每个引擎实例固定漏 1 票（见 [ability-bridge]）。
+          // 这里在属性 getter 里、没有协程上下文，只能阻塞等（`evaluate` 本身是挂起的）。
           val init =
             runBlocking { ctx1.evaluate(moduleHandler("@init")!!, "<init>") } as JSFunction
           try {
             init(
-              // `_binding(method, args)` 的落地。`argv` 就是 init.js 那一**份**实参
-              // （`vararg` 打包成的 `Array<Any?>`），所以块只有一个值参数 ——
-              // `thisVal` 是隐式接收者，不占位。
-              //
-              // `when` **直接调**各能力，**没有「按名字找方法」这一步** ⇒ `private` 天然不受影响，
-              // 方法名写错是编译错误。反射走不通 —— `Class.getMethods()` 只返回 public
-              // 方法，private 的能力一个都查不到（依据见 [ability-bridge]）。
+              // `_binding(method, args)` 的落地：`argv` 是 init.js 那一**份**实参（`vararg` 打的
+              // `Array<Any?>`），`thisVal` 是隐式接收者、不占位。`when` **直接调**各能力、不按名字找 ⇒
+              // `private` 天然不受影响、写错名字是编译错误（反射走不通，依据见 [ability-bridge]）。
               JSInvokable { argv ->
                 val args = argv[1] as Array<*>
                 when (argv[0] as String) {

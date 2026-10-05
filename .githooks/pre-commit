@@ -1,5 +1,5 @@
 #!/bin/sh
-# 提交前拦截：Kotlin 走 ktlint、C++ 走 clang-format —— **只校验，不改文件**。
+# 提交前拦截：Kotlin 走 ktlint + **注释密度**、C++ 走 clang-format —— **只校验，不改文件**。
 #
 # 为什么是 git hook 而不是 CI：CI 要推到远端之后才跑，拦不住「改动进仓库」这个动作。
 # 这里在 `git commit` 当场拦一次。
@@ -7,17 +7,24 @@
 # 口径正本：skill `coding-style`（`.agents/skills/coding-style/`）+ 根 `.editorconfig`（Kotlin）
 # 与根 `.clang-format`（C++）。本脚本只管「跑哪个命令」，不重复任何规则。
 #
+# 三道检查的分工：
+#   - ktlint —— 格式与风格规则（缩进、标点、行尾空格）
+#   - 注释密度 —— 「注释是不是喧宾夺主」这主观判断的可量化形态，判据与阈值见
+#     `.agents/skills/coding-style/references/comments.md` 第六节
+#   - clang-format —— C++ 格式
+#
 # 装法（每个 clone 做一次；`.git/config` 是本机私有的，不入库）：
 #     git config core.hooksPath .githooks
 #   仓库里已按 100755 记录执行位，克隆下来一般就带着；若在 Linux / macOS 上丢了，
 #   `chmod +x .githooks/pre-commit` —— git 对**没有执行位的 hook 是静默跳过**的。
 #
-# 本机依赖（缺了会**明确报错**，不会静默放行）。两种给法，任选：
+# 本机依赖（缺了会**明确报错**，不会静默放行）。三种给法，任选：
 #   - 环境变量（推荐）：source `.workbuddy/env.ps1` / `env.sh`，或自己设用户级环境变量。
 #   - 填下面「本机依赖配置」区：写在文件里、不入库，每次提交自动生效。
 #   - 暂存区里有 `.kt` / `.kts` → 要能跑 `./gradlew`，即 `JAVA_HOME` 或 PATH 上有 java，
 #     且 `uname` / `xargs` / `sed` / `tr` / `cygpath` 可用（见下面的 PATH 修补）。
 #     `gradlew` 不会自己去找 JDK，命令行下必须给一份。
+#   - 暂存区里有 `.kt` / `.kts` → 还要能跑 `python3`（注释密度那道）。
 #   - 暂存区里有 `cxx/{webview,quickjs,ffmpeg}/` 下的源文件 → 要能找到 clang-format：
 #     先看 `$ACG_CLANG_FORMAT`，再看 PATH 上的 `clang-format`。版本要对齐 `.clang-format`
 #     的基线（本机用 23.1.1；版本不同会出假失败）。
@@ -160,7 +167,7 @@ if [ -n "$kt" ]; then
   else
     gradlew_ok=0
     if [ -n "$git_usr_bin" ]; then
-      # 只给 gradlew 这一条命令补 PATH，缩小影响面。
+      # 只给gradlew 这一条命令补 PATH，缩小影响面。
       PATH="$git_usr_bin:$PATH" ./gradlew ktlintCheck --continue --console=plain -q && gradlew_ok=1
     else
       ./gradlew ktlintCheck --continue --console=plain -q && gradlew_ok=1

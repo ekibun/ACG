@@ -409,6 +409,35 @@
 - **完成判据**：配置与源集一致 —— 要么删掉空配置，要么真补源（`commonTest` 放与
   JVM/native 无关的纯用例）。
 
+### B22. 取包超时改成「继续重试」后，`pause()` 的最坏耗时变成一个取包超时（100 ms）
+
+- **现状**（2026-10-04 改 `AvPlayback.isReadTimeOut` 时落下的）：`FFPlayer.resumeImpl` 的取包
+  超时分支从「置 `pts.playing = false` + `break`」改成了「上报 `PACKET_READ_TIMEOUT` +
+  `continue`」—— 网络恢复后能接着取包，不必让上层重新 `play`。代价是
+  **播放轮次不再因超时自己结束**，于是 [FFPlayer.pause] 的 `playingJob.join()` 要等当前那个
+  `withTimeout` 到点才返回（不再是毫秒级）。
+  `FFPlayerStallMidPlaybackTest` 的 `pause()` 探测预算 5 s，够用。
+- **还要定的**：超时重试的节奏。**已定：固定 10 Hz，不加退避**（2026-10-04 删掉超时分支里
+  的 `delay(100)`）—— 一轮就是 `withTimeout(100)` 那 100 ms，那个 `delay` 是白等一倍，
+  于是 [FFPlayer.pause] 的最坏耗时也缩到「等当前那个循环轮次走完」，机制上界 = 一个轮次
+  （实测是个跨度、七次 7～108 ms，取决于探测那一刻停在哪一格：可能是取包的 `withTimeout`，
+  也可能是回压分支的 `delay(1)` ⇒ **下界不是「毫秒级」**；略超 100 是调度与计测开销）。
+  ⚠️ **重试不重新进 native**（这条已核实，别再按「每轮一次 native 往返」推）：
+  [AvFormat.getPacket] 的 `packetChannel ?:` 在通道存活期走**非空分支、不重建**
+  `readerJob`（见 [AvFormat.resetChannel] 的 KDoc，那两个字段为什么没有 `@Volatile`）。
+  读作业建一次就始终 park 在 `getPacketNative` 里、跨所有重试（它不是轮次的子作业，
+  轮次结束也不等它）。所以每次重试的实际代价只是消费侧 `for (v in channel)` 空等
+  100 ms 再被 `withTimeout` 取消 ⇒ **只有 10 Hz 的协程定时器开销，没有 native 往返，
+  也不重建 `HttpIO` 会话检查**。原先「长时间停网时空转很贵、加限流」的顾虑不成立。
+  剩下的是**响应**问题：网络恢复后最迟 100 ms 就醒过来看一眼，够不够快由产品定。
+- **完成判据**（2026-10-04 已做）：`isReadTimeOut` 的 KDoc 已把「轮次不结束、pause 要等当前
+  那个循环轮次走完」写死；`FFPlayerStallMidPlaybackTest` 也补了两条定点断言 ——
+  探测 `pause()` 之前先取一次 `isReadTimeOut` 快照、确认**那一刻确实处在取包超时进行中**
+  （少了它，「`pause()` 返回了」这条断言在**没有**超时时同样成立，量到的耗时证明不了任何事），
+  再对耗时钉一个量级上界（1 s 预算，实测跨度 7～108 ms）。
+  ⚠️ 它管的是**量级**不是精确值：把 `delay(100)` 加回去会变成 200 ms 上下、仍在预算内 ⇒
+  抓不到那种回归；要钉精确值得另写判据。
+
 ## C. 事实未实测，文档里暂无据
 
 ### C1. Android APK 产物路径
@@ -451,47 +480,80 @@
 - **完成判据**：整理出项目专有名词表，或明确决定不维护。**若整理，不要放回 `AGENTS.md`**
   —— 它是"要查的时候才看"的资料，放 `.agents/` 下；`AGENTS.md` 只留一行指针。
 
-### D4. 注释规范对齐 animeko（规则入文件 + 存量分期修正）
+### D4. 注释的长度与符号（规则已入 `AGENTS.md`，剩下分期改）
 
-- **现状**（2026-10-02 评估）：animeko 的 AGENTS.md 有两条本仓没有的注释规则——
-  ①「注释直接描述当前设计、职责、行为与约束，**不要用"不再…""改为…"等措辞叙述开发过程**」，
-  只在解释兼容/迁移确有必要时才提历史；②「用 import，不用全限定名」。本仓是反向文化：
-  日期戳 + 过程叙述遍布（例：`NativeWebView.jvm.kt`「原来的 DOM 桥 2026-09-15 已整套删除」、
-  根 `build.gradle.kts`「2026-09-17 实测，曾因此留了 4 空格缩进」、`shared/build.gradle.kts`
-  挂着「临时」的常驻调试配置）。
-- **做法分两步**：
-  ① 规则写进根 `AGENTS.md` §1（全限定名那条也一并），新注释即合规；
-  ② 存量**分期**修正——动到哪个文件改哪个；可选一轮窄口径专项，只处理「日期戳且已不承重」
-  的纯流水账（如上面那句「临时调试」）。
-- ⚠️ **不做全量一次性改写**：大量历史注释是**承重的陷阱记录**（钩子禁 `grep` 的事故、
-  焦点闸为何必须留），正确变换是「约束先行、历史一句话作证据」，机械改写会丢陷阱知识，
-  且违背 AGENTS.md §1 外科手术原则。
-- **顺带**：根 `build.gradle.kts:30` 的全限定名 `org.jlleitschuh.gradle.ktlint.KtlintExtension`
-  是规则②的现行反例，写规则时顺手改。
-- **完成判据**：规则已入 `AGENTS.md`；抽查之后新增的注释合规。
-- **追加口径（2026-10-03 定）——③ 源码正文不用 emoji 符号**：
-  - **实测依据**：animeko 2913 个 `.kt`/`.kts`、60866 行注释里，含 emoji 的只有 **30 行
-    （0.05%）**，且**全是测试数据里的字符串**（番剧标题原文、Figma 稿名），不是注释标记。
-    它的 `⚠️`/`✅`/`❌` 只出现在 3 个 Markdown 文件（`docs/design/media/media-selector-*.md`，
-    15/70/58 处）—— **是设计文档的状态标记，不进源码**；`📌`/`💡`/`🛠` 全仓 0 处。
-    ⚠️ 注意：animeko **没有成文禁这一条**（`code-style.md` 仅 34 行，grep 零命中），
-    「源码零符号」是**事实惯例**。所以要对齐的是**行为**，不是某条款。
-  - **本仓现状**：`shared/` 的 `.kt` 里 55 处 ⚠️ / 14 个文件（`jni.kt` 19、`AvFormat.kt` 6、
-    `JsEngineDispatchTest.kt` 6、`QuickJS.kt` 4、`FFPlayer.kt` 4、`AvPlayback.kt` 3、
-    `Http.kt` 3、`AvFrame.kt` 2、`FileIO.kt` 2、其余 3 个各 1）。**这是本仓自创惯例，
-    不是从 animeko 抄的**，但与①不冲突：①管「说什么」，符号管「标哪句」。
-  - **做法（与①②同一口径：分期，不全量）**：动到哪个文件，就按下面的分工搬。
-    - **可以只去符号、保留裸约束**的：**约束就贴在那个函数旁边、迁走就丢「在哪个函数上」**
-      （典型是 19 处 native 指针所有权、测试自身的写法约束）。做法是删符号、句子照留。
-    - **该把细节迁进文档**的：**约束描述的是一大段机制、或带实测数据**（迁移了正文装不下）。
-      落点按域分：ktor/HTTP 生命周期 → skill `project-traps` 的 `silent-failures.md`；
-      拦截回调时序 → skill `webview2-windows` 的 `webview2-windows.md`；
-      能力桥/JS 侧写法 → skill `quickjs-ownership` 的 `ability-bridge.md`。
-      正文留**一句裸约束 + 指到那份文档的哪一节**。
-  - **文档内的 ⚠️ 不受此限**：`comments.md` 有明确例外——「明确写了『已删除 + 出处』的
-    防回归说明」是刻意留的警告。`ability-bridge.md:58` 那段反射反例即属此例，保留。
-  - **不做专项**：55 处存量不搞一次性改写，跟着①的「动到哪个改哪个」走。
-
+- **已落地**（2026-10-04）：三条写法规则进了根 `AGENTS.md` §1 —— ①注释讲现状不讲历程、
+  ②用 import 不写全限定名、③源码正文不用 emoji 符号（附 animeko 的实测依据与例外边界）。
+  根 `build.gradle.kts` 那处全限定名（规则②的现行反例）已改；本次改动涉及的 10 个文件里
+  30 处 ⚠️ 已删（符号去、句子留）。
+- **长度：判据改成「按语义搬，不按数字卡」**（同日复核后调整）。原先落的是
+  **注释/代码 ≤ 35%、单块 ≤ 25 行**两个数字，还写了个量测脚本挂进 `.githooks/pre-commit`；
+  **2026-10-04 复核后全部撤掉**（脚本已删，hook / `AGENTS.md` / `SKILL.md` / `comments.md`
+  的引用一并清干净）。**撤的理由**：「注释行 / 代码行」的分母是代码行 ⇒ 文件越短密度越容易冲高，
+  那是算术必然。实测 animeko 485 个主源码 `.kt`：**代码行 < 30 的文件里 92% 超 35%**，
+  中位密度 90%——拿 35% 当普适阈值是把「只在长文件上成立的观察」当成了规则。
+  （顺带修正两个错数：animeko 全量是 **14.5%** 不是 23.3%；代码行 ≥ 60 的文件上中位 10.5%、
+  p90 35.7%，35% 只是那里的上界。）
+  ⇒ 现行判据写在 `comments.md` 第六节：**带实测数据或「为什么长成这样」的段落搬进
+  `.agents/` 下对应 `references/`，正文留一句裸约束 + 指向；约束本身一个字都不能少。**
+- **已压掉的**（搬出去的内容都有落点，信息一条没丢）：
+  - `Http.kt` 的 `availableForRead` 36 行实测数据 → `http-streaming.md` 第六节；
+  - `AvFormat.resetChannel` **57 行 → 17 行**：归属线程的论证 `http-streaming.md` 第二节
+    已有，`packetChannel` / `readerJob` **不加 `@Volatile`** 那 22 行（含访问点表与
+    「拆掉 `FFPlayer.pause` 的 join 就变真竞态」）搬进 `silent-failures.md`；
+  - `AvIO.getBufferSize` 的 ffmpeg 常量来由（`aviobuf.c:36` / `:43` + 官方注释）→
+    `cxx/AGENTS.md` 的 ffmpeg 一节；
+  - `AvPlayback.isReadTimeOut` **29 行 → 14 行**：耗时特性（pause 的 join 上界 = 一个轮次、
+    实测 7～108 ms）搬进 `debugging.md`；
+  - `HttpIO.skipThreshold` **16 行 → 9 行**：判据论证 `http-streaming.md` 第五节已有全文；
+  - `FileIO` 类 KDoc **14 行 → 10 行**：wav / pcm 在文件尾 **100% CPU 空转**的实测与
+    `aviobuf.c:551-558` 的判据搬进 `silent-failures.md`；
+  - `Http.requestStreaming` 内 5 组行内注释（done/ready、session scope、catch、await、finally）
+    各压到 2～3 行，死锁推导只留 `http-streaming.md` 第四节的指针；
+  - `FFPlayer` 类 KDoc / `takeOverPlayback` / `resume` 各压一轮 —— 这份文件的注释**基本都是
+    真约束**（是「该留」的好样板），再压就要删判据了。
+- **复述是独立于长度的另一维**（2026-10-05 补，§四那条重话原先只在 `comments.md` 正文里，
+  `AGENTS.md` §1 竟没有）。压长度时**漏了 4 处**：`AvPlayback` 的「写播放倍速。」配
+  `fun setSpeedRatio`、「读播放倍速。」的前半句；`VideoSurface` 的「平台相关的视频输出区域。」
+  配 `expect fun VideoSurface`；`Playback` 类 KDoc 后半句「音频/视频输出由各平台子类实现」
+  （`abstract class` + 同目录两个 `Playback.*.kt` 已经说明）。⇒ 判据改成**两步**：
+  **先剔复述**（删掉这行注释，理解有没有变化？没变化就删），**再问约束还是机制**。
+  写进 `comments.md` 第六节与 `AGENTS.md` §1。
+- **长度基线：三层，建议性**（2026-10-05 实测 animeko 2913 个 kt/kts 后补进 `comments.md` 第六节）。
+  中位 / p90：类 KDoc 3/9、函数 KDoc 3/7、属性 KDoc 3/5、**函数体内 `//` 1/2**
+  （animeko 那 4779 组行内注释里 83% 是单行、93% ≤ 2 行）。建议上限取 p90 向上取整：
+  **类 8 / 函数 6 / 属性 5 / 函数体内 2**。⚠️ 与「别拿注释行 ÷ 代码行当判据」不冲突 ——
+  那条反对的是比例（分母随文件大小漂移、算术必然），这里量的是**单个注释块的行数**（与文件大小无关）。
+  超了按两步走：先剔复述，再把机制搬进 `references/`；剔完还超，问一句「这段是不是**数据**
+  （规则表、样例、状态机）」—— 数据长是应该的。
+- **长度已收的**（2026-10-05）：
+  - `Http.kt` **全篇 9 处**：类 KDoc 去掉与 `delegate` 重复的参数段、`contentLength` 7→4、
+    `offset` 8→6、`private` 的 `channelOrNull` **8→1**、`applyOptions` 去掉签名复述、
+    删掉「移除自动带上的 Cookie」这类复述，`requestStreaming` 体内三处各压 1 行；
+  - **函数体内 `//` ≥ 5 行的 11 处全部收掉**（最长 `QuickJS.kt` 12→2、`HttpIO.kt` 9→4、
+    `NativeWebViewHostTest.kt` 8→3、`JsEngine.kt` 7→3 与 5→3、`FileIOTest` 5→3、
+    `AvFormat` 5→3 等），**现在 ≥ 5 行为 0**；行内注释 ≤ 2 行的占比 80% → 81%（animeko 93%）。
+- **剩下不动的**（密度高但内容该留）：
+  - `player/Playback.kt`：另 4 行是短契约句与 `updateAspectRatio` 那个「避免每帧写快照」的
+    判据；
+  - `ui/comp/VideoSurface.kt`（原 `ui/screen/`，随组件迁移）：三条回调的时机与 null 语义是
+    **对外契约**，内容留；形式已由 `@param` 改成正文 + `[onPlayback]` 链接（`comments.md` §三 禁标签）。
+- **剩下的存量**（按「动到哪个改哪个」分期）。**扫描口径**：按注释块分组数行数，KDoc 比上表上限、
+  行内注释 ≥ 3 行即算越界（复算脚本是会话里的临时产物，不在仓库里）。
+  2026-10-05 复算：
+  - **函数体内 `//`**：3 行 **50 处**、4 行 **10 处**（另有 1 处 6 行是 `HttpIO.kt` 的 ASCII 示意图，
+    属「数据」不动）。3-4 行多是「一个块里三条独立约束」，硬压到 2 行会丢约束 ⇒ 逐处判断。
+  - **KDoc 超建议上限 1-2 倍 106 处、超 2 倍以上 44 处**：前几名是 `jni.kt` 的 `Pointer` 基类 KDoc
+    **147 行**（全仓最长，两张表 + 三个 `##` 小节）、`FFPlayerStallMidPlaybackTest` 类 KDoc **97 行**、
+    `SeekWindowSemanticsTest` **40 行**、`JSRef` **33 行**。`jni.kt` 那个压法特殊：它讲的是
+    「哪一步必须同步」，搬走就丢「在哪个函数上」⇒ **留在原地压短**。
+  - **符号**：**27 处 / 5 个文件** —— `jni.kt` 19、`QuickJS.kt` 4、`AvFrame.kt` 2、
+    `AvStream.kt` 1、`jvmTest/.../PointerTest.kt` 1。删符号、句子照留；`jni.kt` / `QuickJS.kt`
+    与 skill `quickjs-ownership` 的 `ability-bridge.md` 有交叉，删之前先确认那句约束在文档侧有落点。
+- **完成判据**：`shared/src/**/*.kt` 与 `*.kts` 的注释里 `⚠` 命中数为 0，
+  **复述已剔净**（逐条问「删掉后理解有无变化」，无变化就删），
+  且 `jni.kt` 那 147 行块压到只剩裸约束句（`→` 不计入，它是 `comments.md` §五点名允许的
+  ASCII 示意图）。
 
 ### D5. 子系统代码地图（学 animeko `docs/contributing/code/`）
 

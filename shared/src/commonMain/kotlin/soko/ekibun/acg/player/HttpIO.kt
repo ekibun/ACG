@@ -3,12 +3,14 @@ package soko.ekibun.acg.player
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import soko.ekibun.acg.common.Http
 import soko.ekibun.acg.common.SOCKET_TIMEOUT_MS
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvIO
 import kotlin.getValue
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * HTTP 上的 [AvIO]：一条**活着的**会话，响应体边到边读（走 [Http.requestStreaming]，不用
@@ -57,8 +59,6 @@ class HttpIO(
     }
   }
 
-  override fun getBufferSize() = 32768L
-
   private var offset = 0
   private var cachedRsp: Http.Response? = null
 
@@ -66,18 +66,13 @@ class HttpIO(
   private val discardBuf = ByteArray(16 * 1024)
 
   /**
-   * 一次 [read] 内、**因闲置超时**最多换几次会话（对应 ExoPlayer 的
-   * `RetryDataSource.DEFAULT_RETRY_COUNT = 3`）。
+   * 「往前跳多远就不如在网络上白读白丢」的阈值 —— 取 avio 缓冲的大小（[getBufferSize]，与 ffmpeg
+   * 对齐，来由见 `cxx/AGENTS.md`）。
    *
-   * 判据是 `Http.Response.read` 内那支 `select onTimeout`（[SOCKET_TIMEOUT_MS]）——
-   * 两次数据包之间超过 8 s 还没动静它就抛 [Http.IdleTimeoutException]，这里换一条会话重试；
-   * 次数用尽就往上抛，由 [read] 的外壳收场（返回 -1，native 当 IO 错误）。
-   */
-  private val maxRetries = 3
-
-  /**
-   * 「往前跳多远就不如在网络上白读白丢」的阈值 —— 取 avio 缓冲的大小（[getBufferSize]）。
-   * 判据是「要跳多远」，不是「已缓冲多少字节」（后者量的是**另一件事**，通道也没公开这个数）。
+   * 比阈值时**要减掉通道里已有的部分**（[Http.Response.availableForRead]）：那部分白读是纯内存
+   * memcpy、零网络成本。**别改成「把阈值调大来代替扣减」**（阈值是常量，扣减按实际缓冲量算）。
+   * 与 ffmpeg 官方判据（`aviobuf.c:279`，`offset1 <= buffer_size + short_seek_threshold`）的
+   * 对照、以及「缓冲量极度依赖服务端发得多快」的实测，都见 `http-streaming.md` 第五节。
    */
   private val skipThreshold: Int get() = getBufferSize().toInt()
 
@@ -112,11 +107,13 @@ class HttpIO(
       // 缓冲已经越过 offset（seek 往回）：这条响应给不出 offset 处的内容，必须换一条。
       rsp.close()
       rsp = getRange(offset)
-    } else if (offset - rsp.offset > skipThreshold) {
-      // [////buffer////]        |
-      //                      offset
-      // 往前跳得远（超过一个 avio 缓冲）：与其白读白丢，不如换一条**真落在 offset 上**的。服务端给不出
-      // 这种响应时保留原来这条，下一轮再试。
+    } else if (offset - rsp.offset - rsp.availableForRead > skipThreshold) {
+      // [////已交付////][//通道//]  |
+      //                       offset
+      // 往前跳得远 —— 远到**扣掉通道里已有的那些**之后仍超过一个 avio 缓冲：剩下的部分还得从网络上
+      // 取，与其白读白丢，不如换一条**真落在 offset 上**的。服务端给不出这种响应时保留手上这条。
+      // 扣减量在本分支里可信（进来的是复用的缓存会话，通道必定已建立），推导见
+      // `http-streaming.md` 第五节。
       val newRsp = getRange(offset)
       if (newRsp.offset == offset) {
         rsp.close()
@@ -126,12 +123,11 @@ class HttpIO(
       }
     }
     // 这里**必须阻塞**推进，不能退回「缓冲没到就返回 0 让上层重试」：aviobuf 没有「稍后重试」这种
-    // 语义（`fill_buffer` 对两种返回值的后果见 http-streaming.md 第一节），`AVERROR(EAGAIN)` 那条路也只
-    // 长在 `URLProtocol` 上。等的是网络，而调用方本来就在本线程等这批数据。
+    // 语义（`fill_buffer` 对两种返回值的后果见 `http-streaming.md` 第一节）。
     val want = offset - rsp.offset
     // 这条 rsp 是**新建立**的还是**复用的缓存会话**：[getResponseBlocking] 开头
-    // `rsp = cachedRsp` 取出来的就是复用的（此时 `cachedRsp === rsp`）。抛出时两者的收场
-    // 不同—— 复用那条的存亡归 [close] / 静默自愈管，顺手关掉会伤到还没用完的会话。
+    // `rsp = cachedRsp` 取出来的就是复用的。抛出时两者的收场不同—— 复用那条的存亡归 [close] /
+    // 静默自愈管，顺手关掉会伤到还没用完的会话。
     val reused = cachedRsp === rsp
     cachedRsp = rsp
     val advanced =
@@ -149,7 +145,7 @@ class HttpIO(
       } catch (t: Throwable) {
         // **新建立的那条必须自己收干净**：它已经登记进 [cachedRsp]，但连 offset 都没走到、不是
         // 「可复用的缓存会话」，留着下次读会拿它当地基。而建立它的那次 [Http.requestStreaming] 早已
-        // 返回 ⇒ [close] 与建立期的 job 两边都抓不住它（2026-10-04 实测：服务端 entered=3 / exited=2）。
+        // 返回 ⇒ [close] 与建立期的 job 两边都抓不住它（实测：服务端 entered=3 / exited=2）。
         if (!reused) {
           cachedRsp = null
           rsp.close()
@@ -230,23 +226,21 @@ class HttpIO(
    * 挂起点都会抛 `CancellationException`。
    */
   private suspend fun readSuspend(buf: ByteArray): Int {
-    // 超时重试计数：一次 [read] 内最多换 [maxRetries] 次会话。这条流是**一直读下去**的，
-    // 允许 `read` 里跨多次会话重试（不是「一个请求重试 3 次」—— 每次 [read] 都是新的一轮）。
-    var timedOut = 0
     while (true) {
       // 取不到响应 = 真的读到流尾（见 [getResponseBlocking]）。
       val rsp = getResponseBlocking() ?: return AvFormat.AVERROR_EOF
       // 等数据到再读一段 —— `rsp.read` 内部先把「等」和「读」合在一起，闲置超时时**抛**
-      // [Http.IdleTimeoutException]（见它的 KDoc）。这里要的却是「超时 ⇒ 换一条会话重试」，
-      // 所以就地 catch 住、按重试计数决定继续还是放它上去。
+      // [Http.IdleTimeoutException]（见它的 KDoc）。这里要的却是「超时 ⇒ 换一条会话接着读」，
+      // 所以就地 catch 住。
       val ret =
         try {
-          rsp.read(buf).also { timedOut = 0 }
+          rsp.read(buf)
         } catch (e: Http.IdleTimeoutException) {
-          // 闲置超时（[SOCKET_TIMEOUT_MS]）：这条会话多半死了（TCP 还连着、对端不再发字节）⇒ 换
-          // 一条重试。重试次数用尽后**放它上去**（不是返回 EOF）—— 静默 EOF 会被 ffmpeg 当成「正常
-          // 读到流尾」，把故障伪装成正常结束。超时由 `rsp.read` 内那支 `select onTimeout` 自己兜。
-          if (++timedOut > maxRetries) throw e
+          // 闲置超时：这条会话多半死了 ⇒ 丢掉、按同样间隔换一条，**不限次数**（抛上去会被 aviobuf
+          // 毒化成 EOF、播放静默「正常结束」，见 `http-streaming.md`）。间隔同样取
+          // [SOCKET_TIMEOUT_MS]：刚踩完一个超时窗口就重连，换来的仍是死连接。
+          // 上层另有时间闸（FFPlayer 的取包超时 → `AvPlayback.onEvent`），这里**只管一直读**。
+          delay(SOCKET_TIMEOUT_MS.milliseconds)
           rsp.close()
           if (cachedRsp === rsp) cachedRsp = null
           continue

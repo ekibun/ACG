@@ -32,7 +32,7 @@ class FFPlayerAudioOnlyTest {
   // 同一份列表，照样读得到。
   private class FakePlayback(
     events: MutableList<Long?>,
-  ) : AvPlayback({ events.add(it) }) {
+  ) : AvPlayback({ events.add(it) }, { _ -> }) {
     val flushes = AtomicInteger(0)
 
     override val sampleRate: Int = WavMedia.SAMPLE_RATE

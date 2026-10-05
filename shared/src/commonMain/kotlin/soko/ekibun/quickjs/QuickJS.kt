@@ -318,18 +318,8 @@ class QuickJS(
     then: JSFunction?,
   ): Deferred<Any?> {
     val ret = CompletableDeferred<Any?>()
-    // 两个包装都是 native 交出来的新引用，由这里负责归还：
-    // - `then` 是 native 为 "then" 属性**独占**造的 JSFunction。独占是常态：
-    //   函数不登记进转换用的 cache（对齐 flutter_qjs 的 `_jsToDart` ——
-    //   它的函数分支不写 `cache[valptr]`，只有数组/普通对象写）。所以同一个
-    //   `Promise.prototype.then` 被数组里每个 promise 取到时，各自拿到一个新包装，
-    //   这里 `close()` 只影响自己那一个。
-    // - `thisVal` 是本函数第一个参数携带的 promise 自身（JS_DupValue 过的）
-    // 漏掉任何一个，它就会一直挂在 refs 上，让关闭时的清算抛泄漏。
-    //
-    // `then` 可空：Kotlin 这边按 `JSFunction` 声明，但 native 传过来的是
-    // `Object`，若该 Promise 的 "then" 属性不是函数（或转换失败）就是 null。
-    // 以前直接 `then.close()` 会 NPE；用可空接收 + 安全调用堵住。
+    // `then` / `thisVal` 都是 native 交出来的**独占**引用，由这里归还；漏一个就挂在 refs 上、
+    // 关闭清算时抛泄漏。`then` 可空（native 传的是 `Object`），那层安全调用别去掉。
     val thisVal = JSRef(obj, this)
     try {
       jsCallImpl(

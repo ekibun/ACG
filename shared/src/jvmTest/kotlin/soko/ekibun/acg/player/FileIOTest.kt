@@ -96,11 +96,9 @@ class FileIOTest {
 
   @Test
   fun readAtEofReturnsAvErrorEof() {
-    // `RandomAccessFile.read` 用 -1 表示 EOF，FileIO 把它翻成 **AVERROR_EOF**：
-    // aviobuf 的 fill_buffer 只把 AVERROR_EOF / 负数当终止，**返回 0 是"读空"**
-    // —— 0 会让 wav/pcm 这类没有重试逻辑的 demuxer 在文件尾无限空转
-    // （2026-10-02 实测，avformat 线程 100% CPU）。「打不开」的 -1 语义与此不同，
-    // 见 missingFileFailsInsteadOfThrowing。
+    // `RandomAccessFile.read` 的 -1 由 FileIO 翻成 **AVERROR_EOF**：aviobuf 只把负数当终止，
+    // 返回 0 会被当「读空」，wav/pcm 这类 demuxer 会在文件尾无限空转（实测 avformat 线程 100% CPU）。
+    // 「打不开」的 -1 语义与此不同，见 missingFileFailsInsteadOfThrowing。
     val io = fileIO()
     io.seek(FILE_SIZE, AvIO.SEEK_SET)
     assertEquals(AvFormat.AVERROR_EOF, io.read(ByteArray(16)))

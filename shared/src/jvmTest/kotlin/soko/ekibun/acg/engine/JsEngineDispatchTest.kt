@@ -333,12 +333,8 @@ class JsEngineDispatchTest {
         fd.set('b', '4');
         const bytes = new TextEncoder().encode('BIN');
         fd.append('file', bytes, 'x.bin');
-        // JS 侧就把「非字符串的 value」折成 'bytes:<长度>'：ArrayBuffer 展开成
-        // Map 是宿主侧的事（byteLength 会变成 map 的键），在 JS 侧折掉更省事，
-        // 而且顺带证明它确实是个有长度的二进制缓冲。
-        // `missing()` 区分 null 与 undefined 是**必需的**：两者回到宿主都是
-        // Kotlin 的 null，宿主侧分不出「键不存在」和「键存在但为 null」—— 而
-        // `init.js` 恰好两种都产出（`filename` 是 undefined、`type` 是 null）。
+        // 非字符串 value 折成 'bytes:<长度>'：ArrayBuffer 展开成 Map 是宿主侧的事，JS 侧折更省事。
+        // `missing()` 必须区分 null / undefined —— 回宿主都是 Kotlin null，而 `init.js` 两种都产出。
         const show = (v) => typeof v === 'string' ? v : 'bytes:' + v.byteLength;
         const missing = (v) => v === undefined ? '<absent>' : v === null ? '<null>' : String(v);
         return {

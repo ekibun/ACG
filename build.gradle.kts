@@ -1,3 +1,5 @@
+import org.jlleitschuh.gradle.ktlint.KtlintExtension
+
 plugins {
   // 这里必须 `apply false`，否则插件会在每个子项目各自的 classloader 里
   // 再加载一遍
@@ -27,7 +29,7 @@ allprojects {
   }
 
   // 生成代码不是我们的代码 —— 排除掉，否则 compose 资源生成器产出的 .kt 也会被检查。
-  extensions.configure<org.jlleitschuh.gradle.ktlint.KtlintExtension> {
+  extensions.configure<KtlintExtension> {
     filter {
       exclude("**/generated/**")
     }

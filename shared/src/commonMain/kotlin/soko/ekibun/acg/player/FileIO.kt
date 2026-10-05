@@ -7,15 +7,14 @@ import soko.ekibun.ffmpeg.AvIO
 /**
  * 本地文件的 [AvIO] 实现。
  *
- * 与 [HttpIO] 的差别全在数据来源：本地文件能直接定位到任意偏移，所以这里既没有
- * "网络游标"、也没有重试 —— [read] 读到 EOF 返回 [AvFormat.AVERROR_EOF]、出错返回 -1。
+ * 与 [HttpIO] 的差别全在数据来源：本地文件能直接定位到任意偏移，所以这里既没有「网络游标」、
+ * 也没有重试 —— [read] 读到 EOF 返回 [AvFormat.AVERROR_EOF]、出错返回 -1。
  *
- * ⚠️ **EOF 必须翻成 [AvFormat.AVERROR_EOF]，不能返回 0**：aviobuf 的 `fill_buffer`
- * 只把 `AVERROR_EOF` / 负数当终止（aviobuf.c:551-558），返回 0 会被当成「读空，继续
- * 要数据」—— wav/pcm 这类没有重试逻辑的 demuxer 会在文件尾**无限空转**（2026-10-02
- * 实测：合成的 wav 播到文件尾，avformat 线程 100% CPU，GC 被每次 32 KB 的分配拖垮）。
+ * **EOF 必须翻成 [AvFormat.AVERROR_EOF]，不能返回 0** —— aviobuf 的 `fill_buffer` 只把
+ * `AVERROR_EOF` / 负数当终止（`aviobuf.c:551-558`），返回 0 会被当成「读空，继续要数据」，
+ * wav/pcm 这类 demuxer 会在文件尾**无限空转**。症状与实测见 `silent-failures.md`。
  *
- * ⚠️ 受 [AvIO.seek] 的 `Int` 签名与 native 侧 `(II)I` 方法描述符限制，本实现只对
+ * 受 [AvIO.seek] 的 `Int` 签名与 native 侧 `(II)I` 方法描述符限制，本实现只对
  * **小于 2 GiB** 的文件正确（偏移在 JNI 边界上就被截成了 32 位）。
  */
 class FileIO(
@@ -30,8 +29,6 @@ class FileIO(
 
   /** 逻辑读写位置，与底层文件指针保持同步。 */
   private var offset = 0L
-
-  override fun getBufferSize() = 32768L
 
   override fun read(buf: ByteArray): Int {
     val file = file ?: return -1

@@ -6,7 +6,13 @@ import java.nio.ByteBuffer
 
 abstract class AvPlayback(
   val onFrame: (Long?) -> Unit,
+  val onEvent: (Event) -> Unit,
 ) : Pointer() {
+  enum class Event {
+    PACKET_READ_TIMEOUT,
+    PACKET_READ_TIMEOUT_RESOLVED,
+  }
+
   abstract val sampleRate: Int
   abstract val channels: Int
   abstract val audioFormat: Int
@@ -72,10 +78,31 @@ abstract class AvPlayback(
     private external fun closeNative(ctx: Long)
   }
 
-  /** 读播放倍速。挂起：句柄要经 [Pointer.withPtr] 取，属性形态表达不了。 */
+  /**
+   * 「这一轮取包超时了」——**网络停住**，与「播完了」是两件事，上层要靠它提示用户。
+   *
+   * 由 [FFPlayer.resumeImpl] 的取包循环独家写：取包超时置 `true`、下一次
+   * 成功取到包置回 `false`。**写侧只在 `playerDispatcher` 上**，所以没有并发写。
+   *
+   * **setter 会发事件**（每次值真的翻转才经 [onEvent] 发一条 [Event]；同值重复赋值不发，否则
+   * 播放轮次会以取包超时为节拍把上层刷爆）。**读这个字段当不了「当前状态」的可靠来源** ——
+   * 它只保证写侧单线程，没给读侧任何跨线程同步（非 `@Volatile`、非快照）；要跟 UI 对齐就用 [Event]。
+   *
+   * 它**不等于**「播放结束了」：取包超时后轮次是 `continue` 不是 `break`，网络恢复能接着取包，
+   * 所以期间画面**定格**而不是消失（真播完走 [onFrame] 的 `null`）。代价见 `debugging.md`
+   * 「`pause()` 返回慢不等于挂死」一节。
+   */
+  var isReadTimeOut = false
+    set(value) {
+      if (field != value) {
+        onEvent(if (value) Event.PACKET_READ_TIMEOUT else Event.PACKET_READ_TIMEOUT_RESOLVED)
+      }
+      field = value
+    }
+
+  /** 挂起：句柄要经 [Pointer.withPtr] 取，属性形态表达不了。 */
   suspend fun speedRatio(): Float = withPtr { ptr -> speedRatioNative(ptr, 0f) }
 
-  /** 写播放倍速。 */
   suspend fun setSpeedRatio(value: Float) =
     withPtr { ptr ->
       speedRatioNative(ptr, value)
@@ -103,12 +130,11 @@ abstract class AvPlayback(
   /**
    * 把一帧交给平台消费（音频写声卡 / 视频送显）。
    *
-   * 返回值只对**音频**有意义：它是折算掉重采样前导静音后"真正上屏的时间戳"。
-   * 视频没有这个概念 —— 视频路径恒返回 `-1`，送显只是它的副作用。
-   * 所以调用方**不能**用这个返回值去判断视频帧的时间戳：丢帧收敛要用
-   * [FFPlayer] 那边的 `AvFrame.timeStamp`（单位同样是 `AV_TIME_BASE` 微秒）。
+   * 返回值只对**音频**有意义：它是折算掉重采样前导静音后「真正上屏的时间戳」。视频恒返回 `-1`
+   * （送显只是它的副作用）⇒ 调用方**不能**用它判断视频帧的时间戳，丢帧收敛要用 [FFPlayer] 那边的
+   * `AvFrame.timeStamp`（单位同样是 `AV_TIME_BASE` 微秒）。
    *
-   * ⚠️ 交给平台的 `ByteBuffer` 是 **native 内存上的 direct buffer**（零拷贝）：实现必须
+   * 交给平台的 `ByteBuffer` 是 **native 内存上的 direct buffer**（零拷贝）：实现必须
    * **在同一调用里同步消费**，不能留存、不能跨帧使用 —— 下一帧 `sws_scale` / `swr_convert`
    * 会就地覆写这块内存。要留住像素，自己拷一份。
    */
@@ -130,10 +156,10 @@ abstract class AvPlayback(
     }
   }
 
-  /** 见 [flushFrame] 的 ⚠️：`buf` 是 direct buffer，必须同步消费。 */
+  /** 见 [flushFrame] 那条 direct buffer 约束：`buf` 必须同步消费。 */
   abstract suspend fun flushAudioBuffer(buf: ByteBuffer): Int
 
-  /** 见 [flushFrame] 的 ⚠️：`buf` 是 direct buffer，必须同步消费。 */
+  /** 见 [flushFrame] 那条 direct buffer 约束：`buf` 必须同步消费。 */
   abstract fun flushVideoBuffer(
     buf: ByteBuffer,
     width: Int,

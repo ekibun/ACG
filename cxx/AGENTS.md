@@ -128,5 +128,15 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
 - 自定义 AVIO 下的 seek 能力由 `HttpIO.seek` 的模拟质量决定（`aviobuf.c` 会因 seek 回调非空
   判为 `AVIO_SEEKABLE_NORMAL`）；语义有专属用例 `HttpSeekSemanticsTest` /
   `SeekWindowSemanticsTest`，动这块必须让它们保持绿。
+- **`AvIO.getBufferSize()` 默认 32768 是与 ffmpeg 对齐的，不是随手取的整数**
+  （`cxx/ffmpeg/ffmpeg/libavformat/aviobuf.c`）：
+  - `:36` `#define IO_BUFFER_SIZE 32768` —— avio 缓冲的默认值；
+  - `:43` `#define SHORT_SEEK_THRESHOLD 32768` —— 前向小跳「白读而不重开」的距离
+    （官方注释：*Do seeks within this distance ahead of the current buffer by skipping data
+    instead of calling the protocol seek function*）。
+
+  ⇒ 改它要连带三个地方：两个 IO 实现（它们共用这一个，`HttpIO.skipThreshold` 取的就是它）
+  与上面那条 seek 判据。⚠️ native 侧 `ffmpeg.cpp` **反射调用这个方法**取 `avio_alloc_context`
+  的实参 —— 改签名会静默要不到方法、连带整个播放起不来。
 - 解码路径已经处理 `EAGAIN` 并带 drain（native `ffmpeg.cpp` + Kotlin `AvCodec.drain()`，
   `FFPlayer` 在 EOF 主动 drain）。**不要**再把它当成"未实现"去重写。

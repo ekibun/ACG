@@ -3,6 +3,7 @@ package soko.ekibun.acg.ui.screen
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -22,6 +23,7 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
 import soko.ekibun.acg.player.HttpIO
 import soko.ekibun.acg.player.Playback
+import soko.ekibun.acg.ui.comp.VideoSurface
 import soko.ekibun.ffmpeg.AVMediaType
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvStream
@@ -50,8 +52,9 @@ fun PlayScreen() {
   }
 
   Surface {
-    Column {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
       TextField(
+        modifier = Modifier.fillMaxWidth(),
         maxLines = 1,
         trailingIcon = {
           TextButton(
@@ -97,6 +100,9 @@ fun PlayScreen() {
           onFrame = { p ->
             playing.value = p != null
             if (p != null && !seeking.value) pts.floatValue = p.toFloat()
+          },
+          onEvent = { e ->
+            println(e)
           },
         )
       }

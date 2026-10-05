@@ -346,14 +346,9 @@ class NativeWebViewHostTest {
         assertTrue(json.contains("\"sub\":true"), "the external script should have run: $json")
         assertTrue(json.contains("\"imgs\":1"), "the image subresource should be in the DOM: $json")
 
-        // 「没有返回值」的实际形态是 **字符串 `"null"`**，不是 Kotlin 的 null：
-        // WebView2 把结果 JSON 序列化，`undefined` 出来就是 JSON 的 null 四个字符。
-        // Kotlin 的 null 只表示**失败**（视图没了 / 控制器没起 / 超时），两者别混。
-        //
-        // 顺带记一笔已知的不一致：后台任务那条链路上，`init.js` 只判了
-        // `json == null || json === ""`，**没判 `"null"`**，所以后台脚本没返回值时
-        // 脚本侧拿到的是 `null` 而不是 `undefined`。要不要一并对齐，
-        // 取决于插件有没有依赖它。
+        // 「没有返回值」的实际形态是**字符串 `"null"`**（WebView2 把 `undefined` 序列化成 JSON null），
+        // 不是 Kotlin 的 null —— 后者只表示**失败**。已知不一致：后台链路的 `init.js` 没判 `"null"`，
+        // 故后台脚本没返回值时拿到 `null` 而非 `undefined`（要不要对齐取决于插件有没有依赖它）。
         assertEquals(
           "null",
           NativeWebView.evaluateScript(handle, "undefined"),

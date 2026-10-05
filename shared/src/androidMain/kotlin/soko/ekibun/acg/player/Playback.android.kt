@@ -21,9 +21,8 @@ import java.util.concurrent.Executors
 class AndroidPlayback(
   var surfaceTexture: SurfaceTexture,
   onFrame: (Long?) -> Unit,
-) : Playback(
-    onFrame,
-  ) {
+  onEvent: (Event) -> Unit,
+) : Playback(onFrame, onEvent) {
   private val playbackDispatcher by lazy {
     Executors.newSingleThreadExecutor().asCoroutineDispatcher()
   }

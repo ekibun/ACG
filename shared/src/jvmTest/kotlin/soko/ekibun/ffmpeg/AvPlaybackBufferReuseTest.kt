@@ -30,7 +30,7 @@ import kotlin.test.assertTrue
  */
 class AvPlaybackBufferReuseTest {
   /** 真上下文 + 空设备：只记下每帧拿到的缓冲地址。 */
-  private class Sink : AvPlayback({ _ -> }) {
+  private class Sink : AvPlayback({ _ -> }, { _ -> }) {
     override val sampleRate: Int = 48_000
     override val channels: Int = 2
     override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_S16

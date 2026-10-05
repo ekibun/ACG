@@ -12,6 +12,7 @@ import io.ktor.client.statement.bodyAsChannel
 import io.ktor.http.Headers
 import io.ktor.http.HttpHeaders
 import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.availableForRead
 import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -66,9 +67,8 @@ object Http {
     val done = CompletableDeferred<Unit>()
     // 响应就绪的信号。[requestStreaming] 等它拿到响应就返回；建立期的失败也从它这里出去。
     val ready = CompletableDeferred<Response>()
-    // 会话开在无父 scope 上：**不能**挂调用方的 job —— `runBlocking` 等所有子协程，而会话等
-    // [Response.close]、close 又等 `runBlocking` 返回，直接死锁（推导见 http-streaming.md 第四节）。
-    // 块**不**在这里返回（返回后 ktor 会 cleanup），靠 `done.await()` 挂住直到 close，故也不能直接 await。
+    // 会话开在**无父** scope 上：挂调用方的 job 会死锁（推导见 KDoc）。块也**不能**在这里返回
+    // （返回后 ktor 会 cleanup），靠 `done.await()` 挂住直到 close。
     val session =
       CoroutineScope(Dispatchers.IO).launch {
         try {
@@ -77,21 +77,18 @@ object Http {
             done.await()
           }
         } catch (t: Throwable) {
-          // [ready] 还没完成 = 失败在**建立期**（建连 / TLS / 等响应头）：必须从这里传出去，
-          // 否则上面 `ready.await()` 永远挂着。已经完成 = 响应已交出去、这次读自己会以
-          // EOF / 异常收场，没有人会 await 这条 job，不用传。
+          // [ready] 没完成 = 失败在**建立期**（建连 / TLS / 等响应头）：必须传出去，否则上面
+          // `ready.await()` 永远挂着。已完成 = 响应已交出去、这次读自己会以 EOF / 异常收场，不用传。
           if (!ready.isCompleted) ready.completeExceptionally(t)
         }
       }
     try {
-      // 建立期没有 abort 支（见 KDoc）：作废走**取消这条协程**，`ready.await()` 会被
-      // 一起掀掉。所以这里就一句 await —— 建连 / TLS 握手 / 等响应头多长都无所谓，
-      // 取消随时能到。
+      // 建立期没有 abort 支（见 KDoc）：作废走**取消这条协程**，`ready.await()` 会被一起掀掉。
+      // 所以这里就一句 await —— 建连 / TLS 握手 / 等响应头多长都无所谓，取消随时能到。
       return ready.await()
     } finally {
-      // 只在**没交出响应**时收会话：判据是 [ready]（响应有没有交出去）。成功那一路
-      // [session] 正挂在 `done.await()` 上、活得好好的，按别的判据（比如这条 job 自己的
-      // 完成状态）判断会把调用方马上要用的连接一刀切掉。
+      // 只在**没交出响应**时收会话：判据是 [ready] —— 成功那一路 [session] 正挂在 `done.await()`
+      // 上、活得好好的，按别的判据（比如 job 的完成状态）判断会把调用方马上要用的连接切掉。
       if (!ready.isCompleted) session.cancel()
     }
   }
@@ -100,11 +97,10 @@ object Http {
    * 一条**活着的**流式响应（= 一条连接）。只包一层 [delegate]，**不转发** ktor 的成员 —— 取元数据
    * 一律 `rsp.delegate.status` 这样写，需要什么取什么。
    *
-   * [delegate] 必须是 `execute` 块内捕获的那个 `HttpResponse`（块返回后 ktor 会 cleanup 它，所以
-   * [requestStreaming] 把块挂住直到 [close]）。
-   *
    * **关会话 ≠ 作废本轮**：作废是**一次性事件**（`HttpIO` 的哨兵取消整条读，会话**保留**）；
    * [close] **不可逆**，掀通道 + 放块回去 + ktor cleanup。
+   *
+   * 本类**不含任何 `runBlocking`**，阻塞交给调用方。
    */
   class Response internal constructor(
     /** ktor 响应本体。元数据（`status` / `headers` / `call` …）全部从这里取。 */
@@ -113,11 +109,8 @@ object Http {
     private val done: CompletableDeferred<Unit>,
   ) : AutoCloseable {
     /**
-     * 流总长度；**未知时 -1**，不是 0（0 会被 ffmpeg 当成「长度为零的流」，
-     * 把后续 seek 全判成越界）。
-     *
-     * 从 [delegate] 的 header 推 —— 200 给的是 `Content-Length`；206 给的是
-     * `Content-Range: bytes start-end/total`，其中 `/total` 才是流总长，两种都要看。
+     * 流总长度；**未知时 -1**，不是 0（0 会被 ffmpeg 当成「长度为零的流」，把后续 seek
+     * 全判成越界）。
      */
     val contentLength: Long =
       delegate.headers[HttpHeaders.ContentRange]
@@ -128,9 +121,7 @@ object Http {
         ?: -1L
 
     /**
-     * **网络游标**：本条响应在流里的绝对位置。起点**从 [delegate] 的 header 推**
-     * （206 的 `Content-Range` 给出起点；没这个头 —— 也就是 200 从头给 —— 则是 0），
-     * 之后由 [read] 自己推进（白读丢弃一样算）。
+     * **网络游标**：本条响应在流里的绝对位置，由 [read] 自己推进（白读丢弃一样算）。
      *
      * **不**从调用方灌进来 —— 「从哪开始」是服务端在 header 里**亲口说的**。
      * 解析为什么走字符串而不是 ktor 的 `parseRangesSpecifier`，见 `http-streaming.md` 第五节。
@@ -144,18 +135,24 @@ object Http {
         ?: 0
       private set
 
-    /**
-     * 响应体的解码通道，**首次访问时**挂起取来（`bodyAsChannel()` 是 suspend，`lazy` 装不下）。
-     * 那次访问一定发生在 `execute` 块**还没返回**的时候（[read] / [close] 都在块挂住期间被
-     * 调用），此时 [delegate] 仍是活的。
-     *
-     * 别用 `delegate.rawContent` 替代（**raw 未解码**、每次访问都新建一条）。本类**不含任何
-     * `runBlocking`**，阻塞交给调用方。
-     */
+    /** 响应体的解码通道；**别用 `delegate.rawContent` 替代**（raw 未解码、每次访问都新建一条）。 */
     private var channelOrNull: ByteReadChannel? = null
 
     private suspend fun channel(): ByteReadChannel =
       channelOrNull ?: delegate.bodyAsChannel().also { channelOrNull = it }
+
+    /**
+     * 通道里**已经到达、但还没被 [read] 取走**的字节数。
+     *
+     * 两条反直觉的性质（机制与实测见 `http-streaming.md` 第六节）：
+     * - **通道没建时返回的 0 是假的** —— 只说明本对象还没拿到通道引用，不说明网络上下过什么；
+     * - **存量不会自己涨** —— 搬运只发生在读侧，想让它变多只能靠读，而读会同时推进 [offset]。
+     *
+     * 不含引擎侧尚未交给 ktor 通道的字节（桌面路径的 JDK 块、Android 路径的 okio 段）⇒ 本值
+     * **偏小**，拿它当「已缓冲」是保守的。
+     */
+    val availableForRead: Int
+      get() = channelOrNull?.availableForRead ?: 0
 
     /**
      * **等数据到、再读一段** —— 「下一批数据到」与「闲置超时」两支竞速（全是事件驱动），前者赢就把
@@ -218,12 +215,11 @@ object Http {
     if (options["redirect"] == "follow") clientWithRedirect else clientWithoutRedirect
 
   /**
-   * 把 [options] 摊到请求上。两个入口**共用这一份** —— 抄两遍迟早只改一处，
-   * 而「少带一个 header」是难查的静默失效。
+   * 两个入口**共用这一份** —— 抄两遍迟早只改一处，而「少带一个 header」是难查的静默失效。
    */
   private fun HttpRequestBuilder.applyOptions(options: Map<Any, Any?>) {
     if (options["credentials"] == "omit") {
-      headers.remove(HttpHeaders.Cookie) // 移除自动带上的 Cookie
+      headers.remove(HttpHeaders.Cookie)
     }
 
     (options["headers"] as? Map<*, *>)?.forEach { (key, value) ->

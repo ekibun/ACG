@@ -40,9 +40,19 @@ must never return 0 but rather a proper AVERROR code."
 
 ## 二、为什么每次 `read` 有一条**私有**的作废信号
 
-「这一轮不要了」（seek / close，见 `AvFormat.resetChannel`）发生在**另一条线程**
-（avformat 线程）上，而那次读卡在 `av_read_frame` 里 —— **协程取消够不到它**
+「这一轮不要了」（seek / close，见 `AvFormat.resetChannel`）发生在**读所在线程之外**，
+而那次读卡在 `av_read_frame` 里 —— **协程取消够不到它**
 （取消是协作式的，阻塞的 JNI 调用里没有挂起点）。所以必须有一条**能被外部叫醒**的路。
+
+⚠️ **「外部」这个词是承重的，且有一条硬约束**：`AvFormat.resetChannel` **必须**在
+`formatDispatcher` **之外**的线程调。`ThreadDispatcher` 底层是
+`Executors.newSingleThreadExecutor` —— **纯排队、没有 event loop 能借道**，所以在
+avformat 线程**之内**调、或经 `Pointer.closeDeferred()` 的 `submit { }` 排进它的队列，
+`abort` 就**排在它要叫醒的那个读作业后面**，永远跑不到（2026-10-04 实测：`closeAsync`
+在网络冻住时 5 s 超时不返回；把 `resetChannel()` 提到 `closeDeferred().await()` **之前**、
+让它在 `FFPlayer.playerDispatcher` 上就地发出之后，15 ms 返回）。
+`AvFormat.releaseImpl` 因此**不能**「顺手」在里面补一次 —— 它正是经 `submit { }`
+排进同一根线程的。
 
 形态选择：**一次读一条私有信号**，`Handler` 只持一个投递口（`onSignal` 登记的 `raise`）：
 
@@ -141,8 +151,17 @@ seek 之后网络游标没到位时，要在这条响应上**白读白丢**地�
 3. **每一段都走 `rsp.read`**（内部先等数据到、再读），不要直接用 `readAvailable` ——
    后者在通道空时是裸的 `awaitContent()`，既没有超时、也不在本协程自己的取消点上。
 
-**换会话的判据是「要跳多远」**，不是「已缓冲多少字节」（后者量的是另一件事，且通道没有
-公开这个数，`InputStream.available()` 那套问不到）。见 `skipThreshold`。
+**换会话的判据是「白读的那部分里，还得从网络上取多少」** —— 即
+`offset - rsp.offset - rsp.availableForRead`。**通道里已有的那部分要减掉**：白读它们是纯内存
+memcpy、零网络成本，算进代价会高估，于是「其实一个字节都不用下」的时候也去重开会话，而重开要付
+TCP 往返 + TLS + 响应头的固定成本。量用 `Http.Response.availableForRead`（ktor 公开 API）。
+
+⚠️ **这条判据只在「复用缓存会话」时生效**，而那条通道必定已建立（每条缓存会话至少被 `read` 过
+一次）⇒ 扣减量可信。新建那条的存量恒为 0、扣减退化成 0 ⇒ **只会更倾向换会话**，最坏等于扣减前。
+
+⚠️ **别用「把 `skipThreshold` 调大」代替扣减**：阈值是常量，扣减按**实际缓冲量**算。缓冲量**极度
+依赖服务端发得多快** —— 实测慢发（≈ 400 KiB/s）时通道**恒空**、判据退化成扣减前；只有**快发**时
+才铺开到 ≈ 1 MiB。省不省得到全看生产侧落在哪一档。见 `Http.Response.availableForRead` 的 KDoc。
 
 **附：`Response.offset` 的起点为什么从 header 推**
 
@@ -154,3 +173,26 @@ seek 之后网络游标没到位时，要在这条响应上**白读白丢**地�
 `parseRangesSpecifier`：后者解析的是**请求侧**的 `Range: bytes=0-`，形态不同。
 
 ⇒ 这条也解释了 `getRange` 里那条注释「本函数只管请求，不管记账」的分工。
+
+## 六、通道存量（`availableForRead`）的三个反直觉点
+
+`Http.Response.availableForRead` 量的是 `readBuffer.buffer.size`，是「网络已经付过、ffmpeg 还没拿到」
+的那部分。下面三条都是实测来的（探针见 `HttpBufferedAmountProbeTest` /
+`HttpSkipThresholdTest`），**每一条都能让上层判断错**：
+
+1. **通道没建时它返回 0，而那个 0 不代表「网络上什么都没下」。** 下载与它无关：
+   `requestStreaming` 拿到响应时引擎侧**已经在拉 body** 了（实测：一次 `read` 都没调、
+   服务端已写出 704 KiB / 共 2 MiB）。0 的真正含义只是「本对象还没拿到通道引用」。
+   ⇒ 任何拿它当「网速慢 / 还没缓冲」的判据都是错的。
+
+2. **存量不会自己涨 —— 空等是等不来的。** 快发服务端 + 第一次读之后，存量稳定在 40879 B、
+   **空等 10 s 一字节不涨**。因为 ktor 的写入先进 `flushBuffer`，而 `flushBuffer` → `readBuffer`
+   的搬运**只发生在读侧**（`moveFlushToReadBuffer`，由 `awaitContent` / `readAvailable` 触发）。
+   ⇒ 想让「已缓冲」变多**只能靠读**，而读会同时推进 `Response.offset`。
+
+3. **存量**极度依赖服务端发得多快。慢发（4 KiB/块 + 块间 `sleep(10ms)`，≈ 400 KiB/s，
+   接近真实播放）时通道**恒空**、扣减量恒为 0；全速（64 KiB/块）时第一读之后 ≈ 1.0 MiB
+   —— 写侧被 `flush()` 挂起在 `CHANNEL_MAX_SIZE`（1 MiB，`internal const val`、编译期内联、
+   运行时改不了）附近，最后一次 flush 之前写进 `_writeBuffer` 的那个块不会被退回，
+   所以存量可以略微超过 1 MiB（实测跑出过 1,056,687 B = 1 MiB + 8 KiB）。
+   ⇒ **「按已缓冲量判代价」这个改法只在快发时有收益**（最多省 1 MiB），慢发时退化成原判据。

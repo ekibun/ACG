@@ -1,4 +1,4 @@
-package soko.ekibun.acg.ui.screen
+package soko.ekibun.acg.ui.comp
 
 import android.graphics.SurfaceTexture
 import android.view.TextureView
@@ -13,15 +13,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import soko.ekibun.acg.player.AndroidPlayback
 import soko.ekibun.acg.player.Playback
+import soko.ekibun.ffmpeg.AvPlayback
 
 @Composable
 actual fun VideoSurface(
   onPlayback: (Playback?) -> Unit,
   onFrame: (Long?) -> Unit,
+  onEvent: (AvPlayback.Event) -> Unit,
   modifier: Modifier,
 ) {
   val currentOnPlayback by rememberUpdatedState(onPlayback)
   val currentOnFrame by rememberUpdatedState(onFrame)
+  val currentOnEvent by rememberUpdatedState(onEvent)
   // 播放器在 factory 的 surfaceTexture 回调里才建得出来（TextureView 那侧
   // onSurfaceTextureDestroyed 恒 false、不代放，所有权归回调方），这里用状态
   // 把它接出来，销毁时按 common 契约（见 VideoSurface.kt）回调 null 并 close
@@ -48,7 +51,7 @@ actual fun VideoSurface(
               p1: Int,
               p2: Int,
             ) {
-              val created = AndroidPlayback(p0, currentOnFrame)
+              val created = AndroidPlayback(p0, currentOnFrame, currentOnEvent)
               playback = created
               currentOnPlayback(created)
             }

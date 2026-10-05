@@ -168,9 +168,39 @@
   - **demuxer 仍然只有读者碰**：`seekTo` 先 `resetChannel()`（cancel 掉通道 ⇒ 读作业在 `send`
     上退出），而这一句与 `seekToNative` 在**同一段不可打断的 `withPtr` 块**里、又都落在
     `avformat` 那条单线程上 ⇒ 没有并发访问者。
+  - ⚠️ **`close` 路径的 `resetChannel()` 反过来必须在 `formatDispatcher` 之外**（2026-10-04）：
+    `FFPlayer.closeAsync` 在 `playerDispatcher` 上先调它，让 `io.abort()` 就地发出、不排队。
+    在归属线程**之内**调（或经 `closeDeferred()` 的 `submit { }` 排进它的队列）就是自锁 ——
+    `ThreadDispatcher` 是 `newSingleThreadExecutor`、纯排队，abort 排在它要叫醒的读作业后面，
+    `closeAsync` 5 s 都返回不了。**不报错、只是关闭永远转圈**，`pause()` 却毫秒级返回
+    （它压根不碰 avformat）⇒ 判据要分别盯这两个，缺一个就漏掉这一段。详见
+    [`http-streaming.md`](./http-streaming.md) 第二节。
   - 代价：seek / close 那次 join 要等读作业**从 `send` 上醒来**（靠 cancel），不像常驻读循环
     那样「最多等一次 `getPacket` 返回」；但 `getPacket` 在 EOF 之后是**粘住的**（立刻返回 null），
     所以不会挂死（这正是 2026-10-02 修掉的那个 1~2 GB / 收不掉 的坑）。
+  - ⚠️ **`AvFormat.packetChannel` / `readerJob` 刻意不加 `@Volatile`**（2026-10-04）。
+    这两个字段确实跨线程读写，但**没有数据竞争** —— 加 `@Volatile` 也修不了什么，
+    它只保可见性、不保「读到的是不是这一轮的」这个逻辑判据。访问点与中间挡着的同步点：
+
+    | 访问 | 落在哪条线程 |
+    | --- | --- |
+    | `getPacket` 建通道、记 `readerJob`、消费 | **调用方线程**（整个函数体不碰 `formatDispatcher`） |
+    | 被 `FFPlayer.closeAsync` 调（`resetChannel`） | 同上（`playerDispatcher`），**同线程** |
+    | 被 `AvFormat.seekTo` 调（`resetChannel`） | `formatDispatcher`（`withPtr` 块内）⇒ 跨线程 |
+
+    跨线程那一路的可见性靠两个同步点，**都依赖别处的实现、不能当成自己的性质**：
+
+    1. 写（`getPacket`，playerDispatcher）→ 读（`seekTo` 里的 `resetChannel`，formatDispatcher）：
+       中间隔着 `FFPlayer.seekTo` 的 `takeOverPlayback()` → `FFPlayer.pause` → `playingJob.join()`，
+       而那个 job 正是跑 `getPacket` 的协程；随后 `withPtr` 派发本身又过一次执行器队列。
+    2. 反向（写在上面的 `resetChannel`、读在下一次 `getPacket`）：靠 `withPtr` 返回时
+       `withContext` 的恢复边。
+
+    ⇒ **这条不变量不局部**：它成立的前提是 `FFPlayer.pause` 里那个 `playingJob?.join()`，
+    以及换位置入口**必须**先过 `takeOverPlayback()`。哪天真把那个 join「反正有 join 也不用」
+    去掉，两处跨线程读立刻变成真竞态 —— 症状是**不报错的偶发读到上一轮的通道**（通道是粘住的，
+    会静默返回 EOF，见 `AvFormat.getPacket`）。真要拆掉这两条前提，得先换成显式的同步原语
+    （`AtomicReference` + CAS 建通道），**而不是补 `@Volatile`**。
 
 - **把 `try` 的本体搬走，`finally` 就会立刻执行（Kotlin / 协程）** → 「开关」在没人撑的时候
   静默熄灯，**不报错、只是什么也不发生**。`FFPlayer.resumeImpl` 原先是这样：
@@ -304,6 +334,15 @@
   ⇒ 结论：**固定常数 ε 不成立** —— 1ms 在 tb 1/12288 上够用、在 tb 1/24 上被半格吞掉。
   现状取 **ε = 3/4 × 已缓存的帧间隔**（`FFPlayer.frameIntervalUs`）：3/4 天然落在
   `半格 ≤ 间隔/2 < 3/4 间隔 < 间隔` 这段区间里，用不着把 `time_base` 从 native 暴露出来。
+
+- **`AvIO.read` 在文件尾返回 `0` 而不是 `AVERROR_EOF`（Kotlin / FFmpeg，2026-10-02 实测）**
+  → **无限空转**。aviobuf 的 `fill_buffer` 只把 `AVERROR_EOF` / 负数当终止（`aviobuf.c:551-558`），
+  返回 `0` 走的是「读空，继续要数据」那条路。
+  症状形状：wav / pcm 这类**没有重试逻辑**的 demuxer 播到文件尾后，avformat 线程 **100% CPU**、
+  不报错也不返回，GC 被每次 32 KB 的分配拖垮。
+  ⇒ `FileIO.read` 必须把 `RandomAccessFile` 的 `-1`翻成 `AVERROR_EOF`。同一族的坑在
+  `AvFormat.seek(whence = AVSEEK_SIZE)`：无法确定长度时返回 `-1`（AVERROR），
+  **返回 0 会被 ffmpeg 当成「长度为零的流」**，把后续 seek 全判成越界。
 
 - **作废预读通道用 `close()` 而不是 `cancel()`（Kotlin / kotlinx.coroutines）** → **不唤醒**
   停在 `channel.send` 上的读作业：预读灌满、没人消费时读作业就停在那儿，于是作废流程里紧随其后的

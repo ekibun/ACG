@@ -3,6 +3,7 @@ package soko.ekibun.ffmpeg
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -10,6 +11,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.util.concurrent.Executors
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -17,9 +19,9 @@ import kotlin.time.Duration.Companion.milliseconds
  * **seek 一定会回到关键帧** —— 容器索引的物理限制，不是靠调 `min_ts`/`max_ts` 窗口能绕开的
  * （`SeekWindowSemanticsTest` 钉着）。所以「平滑」要分两步（照 ffplay 的做法），**两者缺一不可**：
  * 落关键帧后立刻把主时钟拨到目标（`PTS(relate = ts)`），**再丢掉**关键帧→目标之间的帧
- * （[resumeImpl] 的 `resyncTo`）—— 不拨时钟则主时钟停在关键帧时间、一帧都丢不掉。逐项对照见
- * `silent-failures.md`。播放入口只能在 [playerDispatcher] 上调：读 [pts] 与随后的检查必须落在
- * 同一段不被打断的序列里。
+ * （[resumeImpl] 的 `resyncTo`）。逐项对照见 `silent-failures.md`。
+ *
+ * 播放入口只能在 [playerDispatcher] 上调：读 [pts] 与随后的检查必须落在同一段不被打断的序列里。
  */
 class FFPlayer(
   url: String,
@@ -178,8 +180,8 @@ class FFPlayer(
    * 负责（「同一时刻只允许一段播放」是不变量，理由见 [takeOverPlayback] 的文档）。
    *
    * **不换 [PTS] 对象**：本函数不换位置，在飞的 `decodeJob` 与它手里的包都还在当前位置上。换对象会把它们
-   * 判成「过时」丢掉，而包已经离开 `av_read_frame`、没有放回去的 API —— 丢一个就少一个参考帧，其后一路
-   * 错到下一个 IDR（症状是花屏加跳帧）。换位置的路径才换对象。
+   * 判成「过时」丢掉，而包已经离开 `av_read_frame`、补不回来 —— 丢一个就少一个参考帧，其后一路错到下一个
+   * IDR（症状是花屏加跳帧）。换位置的路径才换对象。
    *
    * [resyncTo] 是**本轮起跑要收敛到的目标时间戳**，一代一轮的一次性参数，所以走参数通道、不存在 [PTS]
    * 上 —— 存进去就得配「取走即清」，而 [seekImpl] 里任何一处守卫提前返回都会把它留在**当前活跃**的
@@ -370,7 +372,18 @@ class FFPlayer(
           delay(1.milliseconds)
           continue
         }
-        val packet = getPacket(pts.streams.values)
+        val packet =
+          try {
+            withTimeout(100.milliseconds) { getPacket(pts.streams.values) }
+          } catch (e: TimeoutCancellationException) {
+            playback?.isReadTimeOut = true
+            // 不额外退避：上面那个 `withTimeout` 本身就是节拍（100 ms 一轮）。超时**不会**重进
+            // native —— 通道还活着时 [AvFormat.getPacket] 走 `packetChannel` 的非空分支，那条读
+            // 作业始终是同一条、park 在 `getPacketNative` 里，一轮的代价只是消费侧
+            // `for (v in channel)` 空等到超时。
+            continue
+          }
+        playback?.isReadTimeOut = false
         if (packet == null) {
           if (frames.map { it.value.size }.sum() == 0) {
             break
@@ -460,6 +473,11 @@ class FFPlayer(
       // 作业还过了，此刻留在队列里的都是没人要的（轮次停下时就地留下的那些）。
       frames.values.forEach { list -> list.forEach { it.close() } }
       frames.clear()
+      // 作废读轮，**必须排在 [super.closeDeferred] 之前**：它要在 formatDispatcher 之外就地发出
+      // io.abort()（那根线程正被读作业的 runBlocking 占死，排队就排到自己要叫醒的东西后面），
+      // 并 join 到读作业死透 —— 后者保证 [AvFormat.releaseImpl] 销毁 native 上下文时没有读作业
+      // 还拿着它。理由与逐条判据见 [AvFormat.resetChannel] 的 KDoc。
+      resetChannel()
       super.closeDeferred().await()
       // 每个 codec 有自己的归属 dispatcher：这里要等**归还真的落地**，
       // 而不是投出去就返回 —— 所以 await 各自的 closeDeferred()。
