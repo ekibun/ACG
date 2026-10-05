@@ -31,10 +31,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * flutter_qjs 的 `_jsToDart`），所以本类目前唯一的子类是 [JSFunction]。
  *
  * 句柄由 native 侧交出来（构造点遍布 JNI 回调链），直接作为基类 [Pointer] 的构造参数。
- * 本类**不注入 dispatcher**：没有可切的归属线程，调用点（`jsCall` / `jsDupValue` /
- * `jsReleaseValue`，以及 [JSFunction] 的 `invoke`）也全在 [QuickJS] 的 native 回调链里，
- * 没有协程上下文可挂起。线程归属由 [QuickJS] 保证；要同步读句柄一律走
- * [Pointer.withPtrSync] —— 没有 dispatcher 时它就地在调用线程上返回。
+ * 本类注入的是 [ctx] 的 dispatcher（借 [QuickJS] 的归属线程，自己没有可关的线程）；
+ * 要同步读句柄一律走 [Pointer.withPtrSync] —— 已在归属线程就就地，否则投递过去。
  */
 open class JSRef internal constructor(
   nativePtr: Long,
@@ -85,10 +83,9 @@ open class JSRef internal constructor(
   /**
    * 泄漏诊断用的描述。
    *
-   * 关闭时若仍有未归零的引用，这里的内容会进入抛出的异常，形如
-   * flutter_qjs 的 `"  ADDR\tREF\tTYPE\tPROP"` 行。
+   * 关闭时若仍有未归零的引用，这里的内容会进入打印到 System.err 的泄漏报告。
    */
-  suspend fun describe(): String = withPtr { ptr -> "${javaClass.simpleName}(refs=$refCount, ptr=$ptr)" }
+  fun describe(): String = "${javaClass.simpleName}(refs=$refCount, ptr=$ptr)"
 }
 
 /**

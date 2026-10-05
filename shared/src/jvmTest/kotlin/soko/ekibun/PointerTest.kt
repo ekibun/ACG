@@ -23,9 +23,11 @@ import kotlin.test.assertTrue
  *    于是 `use {}` / `invokeOnCompletion` 这类自动调用点也关不到它（旧版靠「继承 + 覆写
  *    `close()` 抛异常」，那要跑到运行期才拦得住）。
  *
- * 读句柄有三个入口，一个都**不看** [Pointer.isClosed]（归还动作恰好跑在「已标记、
- * 未销毁」那个窗口里）：
- * - [Pointer.ptr] —— 公开的裸读：不判断也不投递，给「已经确定在归属线程上」的场合；
+ * 读句柄有三个入口：[Pointer.withPtr] / [Pointer.withPtrSync] **先查**
+ * [Pointer.isClosed]（标记即抛）；[Pointer.ptr] 裸读不设门 —— 归还动作恰好跑在
+ * 「已标记、未销毁」那个窗口里，直读它：
+ * - [Pointer.ptr] —— 公开的裸读：不判断也不投递，给「已经确定在归属线程上」的场合
+ *   （含归还窗口）；
  * - [Pointer.withPtr] —— 挂起：把「在归属线程上」与「拿到句柄」合成一个动作；
  * - [Pointer.withPtrSync] —— 同步版，给 JNI 回调链这种没有协程上下文的入口。
  *
@@ -254,22 +256,23 @@ class PointerTest {
   }
 
   /**
-   * [Pointer.ptr]：**不判断也不投递**的裸读门。
+   * [Pointer.ptr]：**不投递**的裸读门，但带同线程断言。
    *
    * 与 [Pointer.withPtr] 分工互补 —— 要挑线程就走挂起门，已经确定在归属线程上（`withPtr`
-   * 块里、native 回调链里）就直接读 `ptr`，别为了读一次句柄白投递一次。
+   * 块里、native 回调链里、标记窗口里的归还）就直接读 `ptr`，别为了读一次句柄白投递一次。
+   * 跑错线程的裸读是 use-after-free 类错误，断言（测试任务的 `-ea` 下）让它当场炸。
    */
   @Test
   fun nakedReadNeverDispatches() =
     withCountingOwner { counting ->
       val probe = runBlocking(counting) { Probe(0x1234L, counting) }
 
-      // 从别的线程读（此刻不在归属 dispatcher 上）：照样就地返回、不投递
+      // 从别的线程裸读：断言当场炸（零投递 —— 拦截发生在读之前，不是靠投递去拦）
       val base = counting.dispatches
-      assertEquals(0x1234L, probe.ptr)
-      assertEquals(0, counting.dispatches - base, "raw ptr read must not dispatch")
+      assertFailsWith<AssertionError> { probe.ptr }
+      assertEquals(0, counting.dispatches - base, "断言拦截本身不该投递")
 
-      // 已经在归属 dispatcher 上同理
+      // 已经在归属 dispatcher 上：裸读就地返回、零投递
       val (value, extra) =
         runBlocking {
           withContext(counting) {
@@ -398,8 +401,9 @@ class PointerTest {
     }
 
   /**
-   * 归还动作拿到的句柄是**参数**，而且此刻 [Pointer.isClosed] 已经置位 —— 读句柄的入口
-   * 都不能拿它当门，否则归还自己就被挡在门外，「`close()` 返回成功、其实什么都没释放」。
+   * 归还动作拿到的句柄是**参数**，而且此刻 [Pointer.isClosed] 已经置位 —— 归还**不走**
+   * 查 [Pointer.isClosed] 的两扇门（直读 [Pointer.ptr]），否则归还自己就被挡在门外，
+   * 「`close()` 返回成功、其实什么都没释放」。
    */
   @Test
   fun releaseImplReceivesHandleAfterCloseIsMarked() {
@@ -410,8 +414,8 @@ class PointerTest {
         override suspend fun releaseImpl(ptr: Long) {
           markedWhenRead = isClosed
           seen = ptr
-          // 门也不挡：归还动作跑在「已标记、未销毁」的窗口里
-          assertEquals(0xBEEFL, withPtrSync { it })
+          // 归还不经过查 isClosed 的两扇门：直读 ptr（此刻两扇门都会抛）
+          assertEquals(0xBEEFL, ptr)
         }
       }
     assertFalse(probe.isClosed)

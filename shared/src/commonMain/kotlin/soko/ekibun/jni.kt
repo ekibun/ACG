@@ -194,15 +194,18 @@ open class ThreadDispatcher(
  *   的地方一律走它。
  * - [withPtrSync] —— 同步版 [withPtr]，给**没有协程上下文**的入口用（JNI 直接进来的
  *   回调链）。已在归属线程上就地执行，否则 `runBlocking` 投过去。
- * - [ptr] —— `public`、同步、**不判断也不投递**的裸读：读得到就读。给「已经确定在归属
- *   线程上」的场合用（[withPtr] 块里、native 回调链里），形态就是 `frame.ptr` /
- *   `packet.ptr` 这类直接取值。它对应旧版那扇挂起门 `ptrValue()`（= `withPtr { it }`），
+ * - [ptr] —— `public`、同步、**不投递也不设 isClosed 门**的裸读：读得到就读。给「已经确定在归属
+ *   线程上」的场合用（[withPtr] 块里、native 回调链里、标记窗口里的归还），形态就是
+ *   `frame.ptr` / `packet.ptr` 这类直接取值。它对应旧版那扇挂起门 `ptrValue()`（= `withPtr { it }`），
  *   后者已删掉 —— 那些调用点本来就都在 [withPtr] 块里，多一层挂起没有意义。
+ *   带一条**同线程断言**（JVM `-ea`，测试与 run / hotRun 生效、生产关闭）：跑错线程在
+ *   测试期就炸，而不是偶发崩在 native 里。
  *
- * ⚠️ 三个入口**都不看 [isClosed]**。关闭是「先标记、后释放」，而归还动作恰好跑在
- * 「已标记、未销毁」那个窗口里（[releaseImpl] 自己就要读句柄），拿标记当门会把归还一起
- * 挡在外面。「标记即拒绝」只适用于**新操作**，由子类自己判（见 [soko.ekibun.quickjs.QuickJS]
- * 的 `evaluate` / `jsCallImpl`）。
+ * ⚠️ [withPtr] / [withPtrSync] **先查 [isClosed]**（标记即抛 [IllegalStateException]）：
+ * 关闭是「先标记、后释放」，标记了就当作已经删除，经这两扇门的操作一律拒绝。
+ * 归还动作恰恰跑在「已标记、未销毁」那个窗口里（[releaseImpl] 自己就要读句柄），
+ * 所以**不经过这两扇门** —— [releaseImpl] 的句柄以参数交进来，收尾直读 [ptr]。
+ * [ptr] 裸读仍无 isClosed 门（归还窗口要用），但带同线程断言（`-ea` 下生效，见 [ptr]）。
  *
  * ## 归属 dispatcher + 归属线程
  *
@@ -243,8 +246,8 @@ open class ThreadDispatcher(
  * 释放消息一定排在「它之前投递的所有操作」之后、「它之后投递的所有操作」之前。
  *
  * 需要确定性的场合（例如关门前清算泄漏清单）改用 [closeDeferred] 拿 [Deferred] 去 await。
- * ⚠️ [isClosed] **不参与**读句柄与投递的判据（见「读指针」一节）：归还动作恰恰跑在
- * 「已标记、未销毁」这个窗口里。
+ * ⚠️ [isClosed] 是读句柄两扇门的判据（见「读指针」一节）：标记即抛；归还动作跑在
+ * 「已标记、未销毁」窗口里，不走那两扇门（直读 [ptr]）。
  *
  * `closeDispatcherOnClose` 为真时，**归还落地之后**才关掉那条独占的 dispatcher —— 关早了会把
  * [releaseImpl] 一起拒在门外（那条线程的回收本身也是「一次归还」）。
@@ -330,7 +333,22 @@ abstract class Pointer protected constructor(
         }
       }
     }
-  val ptr: Long by ptrLazy
+
+  /**
+   * 裸读带**同线程断言**（走 JVM `-ea`：测试任务默认开、desktopApp 的 run / hotRun 由
+   * 构建里的 `jvmArgs("-ea:soko.ekibun...")` 开、生产打包的启动器不开 ⇒ 断言关闭，每次
+   * 读只剩一次静态标志判断）。跨线程读 ptr 是 use-after-free 类错误，让它**在测试期就炸**
+   * 而不是偶发崩在 native 里。
+   */
+  val ptr: Long
+    get() {
+      val d = dispatcher
+      assert(d == null || d.thread === Thread.currentThread()) {
+        "${javaClass.simpleName}.ptr 在 ${Thread.currentThread().name} 上被读，" +
+          "归属线程是 ${d?.thread?.name}"
+      }
+      return ptrLazy.value
+    }
 
   /**
    * 句柄来源 —— **只有**构造参数留 `null` 的子类才需要覆写它
@@ -371,10 +389,12 @@ abstract class Pointer protected constructor(
    * ⚠️ `internal` 而不是 `protected`：[soko.ekibun.quickjs.QuickJS] 的调用点遍布
    * native 回调链与 façade 内部，`protected` 到不了那些地方。
    *
-   * ⚠️ 它**不查 [isClosed]**（理由见类文档「读指针」一节）：归还动作跑在「已标记、
-   * 未销毁」的窗口里，把标记当门会把归还一起挡掉。「标记即拒绝」由子类对新操作自己判。
+   * ⚠️ 它**先查 [isClosed]**（标记即抛）：关闭是「先标记、后释放」，标记了就当作已经
+   * 删除。归还动作跑在标记窗口里，所以**不走这扇门** —— [releaseImpl] 的句柄以参数
+   * 交进来，收尾直读 [ptr]。
    */
   internal suspend fun <T> withPtr(block: suspend (Long) -> T): T {
+    if (isClosed) throw IllegalStateException("${javaClass.simpleName} is closed")
     val d = dispatcher ?: return block(ptr)
     if (currentCoroutineContext()[ContinuationInterceptor] === d) return block(ptr)
     return withContext(d) { block(ptr) }
@@ -390,9 +410,10 @@ abstract class Pointer protected constructor(
    *
    * ⚠️ 它会在**调用线程上阻塞**等归属 dispatcher 空出来，所以在归属线程自己身上调它
    * 最划算（就地）。同理，别在「归属线程正等着你返回」的场合调它。
-   * 同样**不查 [isClosed]**。
+   * 与 [withPtr] 一样**先查 [isClosed]**（标记即抛）。
    */
   internal fun <T> withPtrSync(block: (Long) -> T): T {
+    if (isClosed) throw IllegalStateException("${javaClass.simpleName} is closed")
     val d = dispatcher ?: return block(ptr)
     if (Thread.currentThread() == d.thread) return block(ptr)
     return runBlocking(d) { block(ptr) }
@@ -413,7 +434,7 @@ abstract class Pointer protected constructor(
    * ⚠️ 兜底那条 `CompletableDeferred(value = …)` 必须写**命名实参**：省掉它就成了
    * `CompletableDeferred(result)`，一旦 `T` 被实例化成 `Job` 之类，字面量式的重载解析会
    * 挑中 `CompletableDeferred(parent: Job?)`，造出一个**永不完成**的 Deferred 而 await 挂死
-   * —— 同一个坑已在 [soko.ekibun.quickjs.QuickJS.closeAndCollect] 踩过一次。
+   * —— 同一个坑已在 QuickJS 的关闭流程里踩过一次。
    */
   internal fun <T> submit(block: suspend () -> T?): Deferred<T?> =
     dispatcher?.let { CoroutineScope(it).async { block() } }
@@ -490,8 +511,9 @@ abstract class Pointer protected constructor(
    * - **只跑一次**（[markClosed] 抢到才跑）；
    * - **跑在归属 dispatcher 上**（`dispatcher` 为 `null` 时跑在调用线程上）。
    *
-   * ⚠️ 它跑在 [markClosed] **之后**，所以读句柄那几个入口**都不能**拿 [isClosed] 当门
-   * ——否则归还自己就被挡在门外，`close()` 会「返回成功、其实什么都没释放」。
+   * ⚠️ 它跑在 [markClosed] **之后** —— 所以归还**不经过**读句柄那两扇门（它们查
+   * [isClosed]、标记即抛），句柄以参数交进来；收尾还需要句柄的（如 [releaseRef] 类）
+   * 直读 [ptr]，否则归还自己就被挡在门外，`close()` 会「返回成功、其实什么都没释放」。
    *
    * 没有默认实现是有意的：`abstract` 让「忘了写归还」在**编译期**就吵出来（见类文档）。
    */

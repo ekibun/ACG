@@ -4,7 +4,6 @@
 
 #include <chrono>
 #include <cstring>
-#include <unordered_map>
 
 extern "C" {
 #include "quickjs/cutils.h"
@@ -17,6 +16,10 @@ struct JSRuntimeOpaque {
   JavaVM* javaVm;
   jobject thiz;
   JSClassID javaClassID;
+  // ArrayBuffer 的 class id：quickjs.h 不导出 class 枚举（长在 quickjs.c
+  // 内部）， initContext 拿一个真 ArrayBuffer 问一次 JS_GetClassID
+  // 自标定，submodule 升级也不会漂。
+  JSClassID arrayBufferClassId;
   // 0 表示不限制：memoryLimit 为 0 就不调 JS_SetMemoryLimit。
   int64_t memoryLimit;
   int64_t timeoutMs;
@@ -24,15 +27,20 @@ struct JSRuntimeOpaque {
   bool interrupted;
 };
 
-// 两件**分开**的事，故意不合成一件：
+// 「放引用」与「销毁包装」是两件**分开**的事，故意不合成一件：
 //
 //   jsReleaseValue  -> 放掉一票 JS 引用（JS_FreeValue）
 //   jsDestroyHandle -> 释放堆上的包装（delete）
 //
-// 以前两者合成一个 jsFreeValue()，`definePropertyValue` 正是因此写不对：释放
-// 包装会顺带把 JS 引用计数减一，于是只想放掉自己包装的调用点会**悄悄偷走**
-// 别人的一票。拆开之后，同一个句柄可以在多次 JS 操作之间复用（每次配一次
-// jsDupValue），而包装仍然只销毁一次。
+// 合成一个的后果：`definePropertyValue` 的 k / v 各只要其一（k 只放引用、v
+// 只销毁 包装），合并版会**悄悄偷走**别人的一票 —— 释放包装会顺带把 JS
+// 引用计数减一。 拆开还有第二个好处：同一个句柄可以在多次 JS
+// 操作之间复用（每次配一次 jsDupValue），而包装仍然只销毁一次（坑的取证见
+// ownership 手册规则 1）。
+//
+// 分层：这两个 helper 只在 C 内部按需取用（`definePropertyValue` 的 k / v）；
+// Kotlin 侧的释放入口永远是「两件都要」，走下面把两步并成**一次 JNI 过界**的
+// jsFreeValue 导出，细粒度操作不暴露给 Kotlin。
 void jsReleaseValue(jlong ctx, jlong obj) {
   if (obj == 0) return;
   JS_FreeValue((JSContext*)ctx, *((JSValue*)obj));
@@ -48,7 +56,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
   JSRuntime* rt = JS_NewRuntime();
   if (rt == nullptr) return 0;
   auto opaque = new JSRuntimeOpaque{
-      javaVm,     env->NewWeakGlobalRef(ctx),       0,    memory_limit,
+      javaVm,     env->NewWeakGlobalRef(ctx),       0,    0, memory_limit,
       timeout_ms, std::chrono::steady_clock::now(), false};
   // QuickJS 自己默认给 1MB 的栈预算（JS_DEFAULT_STACK_SIZE），和 JVM 线程栈
   // （约 1MB）同量级 —— 深递归真把**宿主**线程栈走穿，挂的是整个进程。
@@ -141,6 +149,10 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
     delete opaque;
     return 0;
   }
+  // ArrayBuffer class id 的自标定（见 struct 里字段注释）。
+  auto abProbe = JS_NewArrayBufferCopy(jsc, (const uint8_t*)"", 0);
+  opaque->arrayBufferClassId = JS_GetClassID(abProbe);
+  JS_FreeValue(jsc, abProbe);
   return (jlong)jsc;
 }
 extern "C" JNIEXPORT void JNICALL
@@ -245,13 +257,11 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_soko_ekibun_quickjs_QuickJS_isException(JNIEnv*, jclass, jlong obj) {
   return JS_IsException(*(JSValue*)obj);
 }
-extern "C" JNIEXPORT void JNICALL
-Java_soko_ekibun_quickjs_QuickJS_jsReleaseValue(JNIEnv*, jclass, jlong ctx,
-                                                jlong obj) {
+extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_quickjs_QuickJS_jsFreeValue(
+    JNIEnv*, jclass, jlong ctx, jlong obj) {
+  // 放引用 + 销毁包装一次过界 —— Kotlin 侧没有「只要其一」的调用点，细粒度
+  // helper 不出 C（见文件头那段的分层说明）。
   jsReleaseValue(ctx, obj);
-}
-extern "C" JNIEXPORT void JNICALL
-Java_soko_ekibun_quickjs_QuickJS_jsDestroyHandle(JNIEnv*, jclass, jlong obj) {
   jsDestroyHandle(obj);
 }
 extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_evaluate(
@@ -307,240 +317,174 @@ Java_soko_ekibun_quickjs_QuickJS_getException(JNIEnv* env, jclass, jlong ctx) {
   return ret;
 }
 
-static jobject jsToJavaObject(JNIEnv* env, JSContext* ctx, JSValue obj,
-                              std::unordered_map<void*, jobject>& cache);
+// ===== JS → Java 的透传原语 =====
+//
+// 类型分派、递归、防环 cache、释放策略全在 Kotlin 侧（`QuickJS.jsToJava`）——
+// 分层对齐 flutter_qjs：native 只做 QuickJS C API 的一对一薄包装，不做任何转换
+// 判断；tag / 属性 / 标量怎么读、句柄什么时候放，都由 Kotlin 决定。
 
-/**
- * 标量（非对象）转换。对象由下面统一的 [jsToJava] 分派器交给 [jsToJavaObject]，
- * 所以这里根本不必知道对象的存在 —— 也就不会对着对象悄悄返回 NULL。
- */
-static jobject jsToJavaScalar(JNIEnv* env, JSContext* ctx, JSValue obj) {
-  int tag = JS_VALUE_GET_TAG(obj);
-  if (JS_TAG_IS_FLOAT64(tag)) {
-    double p;
-    JS_ToFloat64(ctx, &p, obj);
-    jclass jclazz = env->FindClass("java/lang/Double");
-    jmethodID jmethod = env->GetMethodID(jclazz, "<init>", "(D)V");
-    return env->NewObject(jclazz, jmethod, p);
+// jsGetTag 返回的稳定 tag 码由 Kotlin 侧的 JS_TAG_* 常量解释（QuickJS.kt）：把
+// 反向映射内联在 return 里，QuickJS 的原始 tag —— 包括随构建配置变形的
+// JS_TAG_IS_FLOAT64 —— 不出 native，Kotlin 不镜像 ABI。五个名字之外的 tag
+// （NULL / UNDEFINED / EXCEPTION / symbol / bigint）一律返回 0，Kotlin 侧不
+// 命名它，由分派器的 else 接住转 null。
+extern "C" JNIEXPORT jint JNICALL
+Java_soko_ekibun_quickjs_QuickJS_jsGetTag(JNIEnv*, jclass, jlong obj) {
+  int tag = JS_VALUE_GET_TAG(*(JSValue*)obj);
+  if (tag == JS_TAG_OBJECT) return 5;    // JS_TAG_OBJECT
+  if (tag == JS_TAG_STRING) return 4;    // JS_TAG_STRING
+  if (tag == JS_TAG_BOOL) return 1;      // JS_TAG_BOOL
+  if (tag == JS_TAG_INT) return 2;       // JS_TAG_INT
+  if (JS_TAG_IS_FLOAT64(tag)) return 3;  // JS_TAG_FLOAT64
+  return 0;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_soko_ekibun_quickjs_QuickJS_jsValueGetPtr(JNIEnv*, jclass, jlong obj) {
+  return (jlong)JS_VALUE_GET_PTR(*(JSValue*)obj);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_soko_ekibun_quickjs_QuickJS_jsIsFunction(JNIEnv*, jclass, jlong ctx,
+                                              jlong obj) {
+  return JS_IsFunction((JSContext*)ctx, *(JSValue*)obj);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_soko_ekibun_quickjs_QuickJS_jsIsError(JNIEnv*, jclass, jlong ctx,
+                                           jlong obj) {
+  return JS_IsError((JSContext*)ctx, *(JSValue*)obj);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_soko_ekibun_quickjs_QuickJS_jsIsPromise(JNIEnv*, jclass, jlong ctx,
+                                             jlong obj) {
+  return JS_IsPromise((JSContext*)ctx, *(JSValue*)obj);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_soko_ekibun_quickjs_QuickJS_jsIsArray(JNIEnv*, jclass, jlong ctx,
+                                           jlong obj) {
+  return JS_IsArray((JSContext*)ctx, *(JSValue*)obj);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL Java_soko_ekibun_quickjs_QuickJS_jsToBool(
+    JNIEnv*, jclass, jlong ctx, jlong obj) {
+  return JS_ToBool((JSContext*)ctx, *(JSValue*)obj);
+}
+
+extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_jsToInt64(
+    JNIEnv*, jclass, jlong ctx, jlong obj) {
+  int64_t p;
+  JS_ToInt64((JSContext*)ctx, &p, *(JSValue*)obj);
+  return p;
+}
+
+extern "C" JNIEXPORT jdouble JNICALL
+Java_soko_ekibun_quickjs_QuickJS_jsToFloat64(JNIEnv*, jclass, jlong ctx,
+                                             jlong obj) {
+  double p;
+  JS_ToFloat64((JSContext*)ctx, &p, *(JSValue*)obj);
+  return p;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_soko_ekibun_quickjs_QuickJS_jsToCString(JNIEnv* env, jclass, jlong ctx,
+                                             jlong obj) {
+  auto pstr = JS_ToCString((JSContext*)ctx, *(JSValue*)obj);
+  if (pstr == nullptr) {
+    // 失败（OOM，或对象的 toString 抛错）会留下待处理异常；失败信号已由 null
+    // 传达，把异常清掉，别污染后续调用（与 jsGetArrayBuffer 的探针同款卫生）。
+    JS_FreeValue((JSContext*)ctx, JS_GetException((JSContext*)ctx));
+    return nullptr;
   }
-  switch (tag) {
-    case JS_TAG_BOOL: {
-      jclass jclazz = env->FindClass("java/lang/Boolean");
-      jmethodID jmethod = env->GetMethodID(jclazz, "<init>", "(Z)V");
-      return env->NewObject(jclazz, jmethod, JS_ToBool(ctx, obj));
-    }
-    case JS_TAG_INT: {
-      int64_t p;
-      JS_ToInt64(ctx, &p, obj);
-      jclass jclazz = env->FindClass("java/lang/Long");
-      jmethodID jmethod = env->GetMethodID(jclazz, "<init>", "(J)V");
-      return env->NewObject(jclazz, jmethod, p);
-    }
-    case JS_TAG_STRING: {
-      return jsToString(env, ctx, obj);
-    }
-    default:
-      return nullptr;
-  }
-}
-
-/**
- * 所有 JS → Java 转换的唯一入口。
- *
- * 对象分支放在**这里**而不是各个调用点，是有原因的：递归转换（数组元素、promise
- * 的 `then`）以前走的是只认标量的辅助函数，于是顺着它们碰到的对象一律悄悄
- * 变成 NULL。把分派收在一处，这种错就不可能再发生。
- *
- * `cache`
- * 走**指针**而不是值：整棵对象图必须共用同一张表。按值传的话递归那一层拿到的是副本，它新登记的条目回不到上层
- * —— 环（`a['a'] = a`）还能靠「登记早于复制」侥幸命中，但**共享子对象**（`a.b =
- * c; a.d = c`）会被转成两份不同的副本，身份当场断掉。空指针 =
- * 「最外层调用，自己开一张」。
- */
-jobject jsToJava(JNIEnv* env, JSContext* ctx, JSValue obj,
-                 std::unordered_map<void*, jobject>* cache = nullptr) {
-  std::unordered_map<void*, jobject> local;
-  if (cache == nullptr) cache = &local;
-  if (JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT)
-    return jsToJavaObject(env, ctx, obj, *cache);
-  return jsToJavaScalar(env, ctx, obj);
-}
-
-/**
- * 这个子值是不是已经登记在 [cache] 里（也就是：本次遍历中转过的容器）。
- *
- * 唯一的用途是**决定能不能删它的 JNI local ref**。cache 里存的全是 local ref；
- * 递归命中 cache 时，交还给我们的就是那一个 —— 删掉它等于销毁调用方（甚至外层
- * 容器本身）还要用的引用。`a['a'] = a` 时 `jVal` 正是 `map` 自己，删完全局返回
- * null（**不报错**，只是值凭空消失）。
- *
- * 判据只能是「递归**之后**它在不在 cache 里」：容器在（新建的也在，因为现在
- * 全图共用一张表），标量 / 字符串不在 —— 后者照删，别让 local ref 白涨。
- */
-static bool cachedRefExists(const std::unordered_map<void*, jobject>& cache,
-                            JSValue v) {
-  return JS_VALUE_GET_TAG(v) == JS_TAG_OBJECT &&
-         cache.find(JS_VALUE_GET_PTR(v)) != cache.end();
-}
-
-/**
- * [jsToJava] 的对象 / 函数分支。单独拆出来的原因是上面那条标量快路径不该夹带
- * 任何 Java 上行调用，而只有这里才需要 `cache`。
- */
-static jobject jsToJavaObject(JNIEnv* env, JSContext* ctx, JSValue obj,
-                              std::unordered_map<void*, jobject>& cache) {
-  {  // ArrayBuffer
-    size_t size;
-    uint8_t* buf = JS_GetArrayBuffer(ctx, &size, obj);
-    if (!buf) {
-      // 这里只是探个类型：非 ArrayBuffer 的对象，JS_GetArrayBuffer 已经抛了
-      // TypeError（"ArrayBuffer object expected"）。把它留着不清理，后面每个
-      // 「返回 NULL 却不抛异常」的 API 都会被这个旧异常污染。放掉它。
-      JS_FreeValue(ctx, JS_GetException(ctx));
-    } else {
-      jbyteArray arr = env->NewByteArray((jsize)size);
-      env->SetByteArrayRegion(arr, 0, (jsize)size, (int8_t*)buf);
-      return arr;
-    }
-  }
-  // javaObject
-  auto opaque = (JSRuntimeOpaque*)JS_GetRuntimeOpaque(JS_GetRuntime(ctx));
-  auto javaObj = JS_GetOpaque(obj, opaque->javaClassID);
-  if (javaObj) return (jobject)javaObj;
-  // 同一个 JS 对象在一次转换里只转一次：命中就复用。这也是循环引用
-  // （`a['a'] = a`）能收敛的唯一原因。
-  //
-  // 与 flutter_qjs 的 `_jsToDart` 一致，`cache` 是**每次调用新建**的临时表（见
-  // [jsToJava] 的形参默认值 +
-  // [jsToJavaEntry]），只在**一次**转换遍历内有效。跨调用的对象身份由 Kotlin
-  // 侧决定 —— 那里已经没有包装了，整图展开出来的 `Map`
-  // 就是数据本身，不存在「同一个 JS 对象要给同一个包装」这回事。
-  auto ptr = JS_VALUE_GET_PTR(obj);
-  if (cache.find(ptr) != cache.end()) return cache[ptr];
-  if (JS_IsFunction(ctx, obj)) {
-    // 函数是全图里**唯一**保留的包装：它是可调用的活对象，展开成数据没有意义。这一票新引用由拿到它的人负责
-    // `free()` 归还。
-    //
-    // 函数**不**登记进 `cache` —— 对齐上游 `_jsToDart`：它的函数分支直接
-    // `return _JSFunction(ctx, val)`，只有数组和普通对象两支才写
-    // `cache[valptr]`。于是同一个函数出现在两个位置时是**各造一个独占包装**，谁拿到谁还。
-    //
-    // 登记进 cache
-    // 会反过来制造共享：同一个函数只造一个包装，而它随时可能被某个拿到的人
-    // `close()` 掉（Promise 分支的 `then` 就是这样），另一个位置再命中 cache
-    // 得到的便是**已关闭**的包装 —— 读已析构的
-    // `JSValue`，不报错、只失效。实测（2026-09-20）：`[Promise.reject,
-    // Promise.resolve, new Promise]` 每个 promise 的 `then` 都是同一个
-    // `Promise.prototype.then`，重跑 3 次挂 2 次，报 `TypeError: not a
-    // function`；偶发是因为已析构内存还没被覆写时看着仍像函数。
-    jclass clazz = env->FindClass("soko/ekibun/quickjs/JSFunction");
-    jmethodID init =
-        env->GetMethodID(clazz, "<init>", "(JLsoko/ekibun/quickjs/QuickJS;)V");
-    return env->NewObject(
-        clazz, init, (jlong) new JSValue(JS_DupValue(ctx, obj)), opaque->thiz);
-  } else if (JS_IsError(ctx, obj)) {
-    return jsToThrowable(env, ctx, obj);
-  } else if (JS_IsPromise(ctx, obj)) {
-    // promise 不展开成数据：它要等 `then` 回调，落在这个位置的值是个 `Deferred`
-    // —— 对齐上游 `_jsToDart` 的 `completer.future`（Dart 的 `Future` 对应
-    // Kotlin 的 `Deferred`）。这里只保证一次遍历内同一个 promise 给同一个
-    // Deferred。
-    jclass clazz = env->GetObjectClass(opaque->thiz);
-    jmethodID wrap = env->GetMethodID(
-        clazz, "wrapJSPromiseAsync",
-        "(JLsoko/ekibun/quickjs/JSFunction;)Lkotlinx/coroutines/Deferred;");
-    auto thenJs = JS_GetPropertyStr(ctx, obj, "then");
-    // 只把**函数**递过去：`then` 不是函数（或是个 thenable 对象）时给
-    // `nullptr`，Kotlin 那边按「promise 没有可调用的 then」处理。
-    //
-    // 不能无条件 `jsToJava`：它会把非函数的 `then` 展开成 `Map`，穿过 JNI
-    // 塞进声明为 `JSFunction` 的形参里，Kotlin 一侧再 `close()` 就是对着 `Map`
-    // 调不存在的方法。
-    jobject thenJava = JS_IsFunction(ctx, thenJs)
-                           ? jsToJava(env, ctx, thenJs, &cache)
-                           : nullptr;
-    JS_FreeValue(ctx, thenJs);
-    auto ret = env->CallObjectMethod(opaque->thiz, wrap,
-                                     (jlong) new JSValue(JS_DupValue(ctx, obj)),
-                                     thenJava);
-    // Kotlin 侧已经把它取用完了（`then` 只活在 `wrapJSPromiseAsync` 里），
-    // local ref 可以当场收掉。
-    if (thenJava != nullptr) env->DeleteLocalRef(thenJava);
-    cache[ptr] = ret;
-    return ret;
-  } else if (JS_IsArray(ctx, obj)) {
-    auto jsArrLen = JS_GetPropertyStr(ctx, obj, "length");
-    int64_t arrLen;
-    JS_ToInt64(ctx, &arrLen, jsArrLen);
-    JS_FreeValue(ctx, jsArrLen);
-    auto list = env->NewObjectArray(
-        (int)arrLen, env->FindClass("java/lang/Object"), nullptr);
-    cache[ptr] = list;
-    for (int i = 0; i < arrLen; i++) {
-      auto jsprop = JS_GetPropertyUint32(ctx, obj, i);
-      auto jval = jsToJava(env, ctx, jsprop, &cache);
-      env->SetObjectArrayElement(list, i, jval);
-      // 登记在 cache 里的 local ref **不能删**：`arr[0] = arr` 时它就是这个
-      // list 自己。判定与理由见 [cachedRefExists]。
-      if (!cachedRefExists(cache, jsprop)) env->DeleteLocalRef(jval);
-      JS_FreeValue(ctx, jsprop);
-    }
-    return list;
-  } else {
-    // 普通对象：**整图展开**成 `java.util.LinkedHashMap`（对齐 flutter_qjs 的
-    // `_jsToDart` 对象分支）。展开出来的是纯数据，与 JS 侧脱钩 —— 改它不会影响
-    // JS，也就不需要包装 + 引用计数 + 常驻映射表那一整套。
-    //
-    // `cache[ptr] = map` 必须在**填之前**登记：递归回自身时命中
-    // cache，拿到的正是那个还在填的 map，于是 `a['a'] === a`
-    // 天然成立（上游同样是先 `cache[valptr] = ret` 再循环填）。
-    jclass mapClazz = env->FindClass("java/util/LinkedHashMap");
-    auto map =
-        env->NewObject(mapClazz, env->GetMethodID(mapClazz, "<init>", "()V"));
-    cache[ptr] = map;
-    auto put = env->GetMethodID(
-        mapClazz, "put",
-        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
-    JSPropertyEnum* ptab;
-    uint32_t plen;
-    if (JS_GetOwnPropertyNames(ctx, &ptab, &plen, obj, -1) == 0) {
-      for (uint32_t i = 0; i < plen; i++) {
-        auto jsKey = JS_AtomToValue(ctx, ptab[i].atom);
-        auto jsVal = JS_GetProperty(ctx, obj, ptab[i].atom);
-        auto jKey = jsToJava(env, ctx, jsKey, &cache);
-        auto jVal = jsToJava(env, ctx, jsVal, &cache);
-        auto old = env->CallObjectMethod(map, put, jKey, jVal);
-        if (old != nullptr) env->DeleteLocalRef(old);
-        // 理由同数组那一支 —— `a['a'] = a` 时 `jVal` 就是 `map` 自己。
-        if (!cachedRefExists(cache, jsKey)) env->DeleteLocalRef(jKey);
-        if (!cachedRefExists(cache, jsVal)) env->DeleteLocalRef(jVal);
-        JS_FreeValue(ctx, jsKey);
-        JS_FreeValue(ctx, jsVal);
-        JS_FreeAtom(ctx, ptab[i].atom);
-      }
-      js_free(ctx, ptab);
-    }
-    return map;
-  }
-}
-
-jobject jsToJavaEntry(JNIEnv* env, JSContext* ctx, JSValue obj) {
-  return jsToJava(env, ctx, obj);
-}
-
-extern "C" JNIEXPORT jobject JNICALL Java_soko_ekibun_quickjs_QuickJS_jsToJava(
-    JNIEnv* env, jclass, jlong ctx, jlong obj) {
-  auto ret = jsToJavaEntry(env, (JSContext*)ctx, *(JSValue*)obj);
-  // jsToJava 会吃掉给它的那一票（JS_GetProperty / JS_Call 的返回值是**交出来**
-  // 而不是借出），所以在这里放掉。函数包装若被造了出来，它持的是自己新 dup 的
-  // 一票，不受影响 —— 生命周期之后归调用方显式管理。
-  jsReleaseValue(ctx, obj);
-  // 这个句柄也是本次调用的一次性产物：Kotlin 拿到转换结果之后不会再碰它
-  // （包装的 ptr 是 jsToJavaObject 里另造的那一份）。只放引用不销毁包装，
-  // 每转换一次就漏 16 字节 —— 「两步」里被漏掉的那一步。
-  jsDestroyHandle(obj);
+  auto ret = env->NewStringUTF(pstr);
+  JS_FreeCString((JSContext*)ctx, pstr);
   return ret;
 }
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_soko_ekibun_quickjs_QuickJS_jsGetArrayBuffer(JNIEnv* env, jclass,
+                                                  jlong ctx, jlong obj) {
+  // 先按 class id 过滤（initContext 自标定）：JS_GetArrayBuffer 对非
+  // ArrayBuffer 会往 runtime 里抛
+  // TypeError，逐对象探针等于每节点白分配一个错误对象再吞掉 ——
+  // 在同一个原语里问完再取，Kotlin 侧一次过界拿结果。
+  auto opaque =
+      (JSRuntimeOpaque*)JS_GetRuntimeOpaque(JS_GetRuntime((JSContext*)ctx));
+  if (JS_GetClassID(*(JSValue*)obj) != opaque->arrayBufferClassId)
+    return nullptr;
+  size_t size;
+  uint8_t* buf = JS_GetArrayBuffer((JSContext*)ctx, &size, *(JSValue*)obj);
+  if (!buf) {
+    // 有 class id 把门理论上不该失败；万一失败（比如 detached buffer），抛出的
+    // TypeError 必须就地清掉，否则后面每个「返回 NULL 却不抛异常」的 API 都会被
+    // 这个旧异常污染。放掉它。
+    JS_FreeValue((JSContext*)ctx, JS_GetException((JSContext*)ctx));
+    return nullptr;
+  }
+  jbyteArray arr = env->NewByteArray((jsize)size);
+  env->SetByteArrayRegion(arr, 0, (jsize)size, (int8_t*)buf);
+  return arr;
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_soko_ekibun_quickjs_QuickJS_jsGetOpaque(JNIEnv*, jclass, jlong ctx,
+                                             jlong obj) {
+  auto opaque =
+      (JSRuntimeOpaque*)JS_GetRuntimeOpaque(JS_GetRuntime((JSContext*)ctx));
+  // 取的是 `jsWrapObject` 挂在 JavaObject 类上的 global ref；经 JNI 返回时
+  // JVM 会另建一个 local ref 指向同一对象，global ref 本身的所有权不变。
+  return (jobject)JS_GetOpaque(*(JSValue*)obj, opaque->javaClassID);
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_soko_ekibun_quickjs_QuickJS_jsGetPropertyStr(JNIEnv* env, jclass,
+                                                  jlong ctx, jlong obj,
+                                                  jstring name) {
+  auto pstr = env->GetStringUTFChars(name, nullptr);
+  auto ret = (jlong) new JSValue(
+      JS_GetPropertyStr((JSContext*)ctx, *(JSValue*)obj, pstr));
+  env->ReleaseStringUTFChars(name, pstr);
+  return ret;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_soko_ekibun_quickjs_QuickJS_jsGetPropertyUint32(JNIEnv*, jclass, jlong ctx,
+                                                     jlong obj, jint index) {
+  return (jlong) new JSValue(
+      JS_GetPropertyUint32((JSContext*)ctx, *(JSValue*)obj, (uint32_t)index));
+}
+
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_soko_ekibun_quickjs_QuickJS_jsGetOwnProperties(JNIEnv* env, jclass,
+                                                    jlong ctx, jlong obj) {
+  JSPropertyEnum* ptab;
+  uint32_t plen;
+  auto cctx = (JSContext*)ctx;
+  // 旗标 -1 = 全部自有属性（含不可枚举与 symbol）。
+  if (JS_GetOwnPropertyNames(cctx, &ptab, &plen, *(JSValue*)obj, -1) != 0)
+    return nullptr;
+  // (key, value) 交错铺进一个 LongArray：key 由 atom
+  // 就地物化（JS_AtomToValue）， value 按同一个 atom 取（JS_GetProperty），atom
+  // 随取随放 —— 它是 C 侧的 计数资源，不过 JNI
+  // 界。整组打包成一次过界，省掉逐属性 4 次（atom 取值、 按 atom 取
+  // value、FreeAtom，加 Kotlin 侧的配对开销）；四支句柄的消费都在 Kotlin 侧的
+  // jsToJava。
+  auto arr = env->NewLongArray((jsize)(plen * 2));
+  auto handles = new jlong[plen * 2];
+  for (uint32_t i = 0; i < plen; ++i) {
+    handles[i * 2] = (jlong) new JSValue(JS_AtomToValue(cctx, ptab[i].atom));
+    handles[i * 2 + 1] =
+        (jlong) new JSValue(JS_GetProperty(cctx, *(JSValue*)obj, ptab[i].atom));
+    JS_FreeAtom(cctx, ptab[i].atom);
+  }
+  env->SetLongArrayRegion(arr, 0, (jsize)(plen * 2), handles);
+  delete[] handles;
+  js_free(cctx, ptab);
+  return arr;
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_soko_ekibun_quickjs_QuickJS_jsNewCFunction(JNIEnv*, jclass, jlong ctx,
                                                 jlong obj) {
@@ -558,20 +502,21 @@ Java_soko_ekibun_quickjs_QuickJS_jsNewCFunction(JNIEnv*, jclass, jlong ctx,
         auto clazz = env->GetObjectClass(opaque->thiz);
         jmethodID invoke =
             env->GetMethodID(clazz, "handleJSInvokable",
-                             "(Lsoko/ekibun/quickjs/JSInvokable;[Ljava/lang/"
-                             "Object;Ljava/lang/Object;)J");
-        auto list = env->NewObjectArray(
-            (int)argc, env->FindClass("java/lang/Object"), nullptr);
-        for (int i = 0; i < argc; ++i) {
-          auto v = jsToJava(env, ctx, argv[i]);
-          env->SetObjectArrayElement(list, i, v);
-          env->DeleteLocalRef(v);
-        }
-        auto thisJava = jsToJava(env, ctx, this_val);
+                             "(Lsoko/ekibun/quickjs/JSInvokable;[JJ)J");
+        // 实参与 this 不在 C 里转换：dup 成句柄递给 Kotlin，转换连同句柄的消费
+        // 都在 Kotlin 侧的 jsToJava 里做。递的是 jlong 不是 jobject，没有任何
+        // local ref 要簿记；argv 是 JSValueConst（借用），dup 出的票由 Kotlin
+        // 还。
+        auto argvHandles = env->NewLongArray(argc);
+        auto handles = new jlong[argc];
+        for (int i = 0; i < argc; ++i)
+          handles[i] = (jlong) new JSValue(JS_DupValue(ctx, argv[i]));
+        env->SetLongArrayRegion(argvHandles, 0, argc, handles);
+        delete[] handles;
+        auto thisHandle = (jlong) new JSValue(JS_DupValue(ctx, this_val));
         auto retPtr = (JSValue*)env->CallLongMethod(opaque->thiz, invoke, obj,
-                                                    list, thisJava);
-        env->DeleteLocalRef(list);
-        env->DeleteLocalRef(thisJava);
+                                                    argvHandles, thisHandle);
+        env->DeleteLocalRef(argvHandles);
         JSValue ret = *retPtr;
         delete retPtr;
         return ret;

@@ -8,6 +8,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.ByteArrayOutputStream
+import java.io.PrintStream
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -52,6 +54,28 @@ class QuickJSTest {
     flag: Int = JSEvalFlag.GLOBAL,
   ): Any? = runBlocking { ctx.evaluate(cmd, name, flag) }
 
+  /**
+   * 捕获 System.err 并等关闭落地（清算与泄漏报告都在 [QuickJS.releaseImpl] 里），
+   * 返回捕获到的输出 —— 泄漏断言读它，生产代码不为测试保留结果通道。
+   */
+  private fun QuickJS.closeCapturingStderr(): String {
+    val buf = ByteArrayOutputStream()
+    val old = System.err
+    System.setErr(PrintStream(buf, true, Charsets.UTF_8))
+    try {
+      runBlocking { closeDeferred().await() }
+    } finally {
+      System.setErr(old)
+    }
+    return buf.toString("UTF-8")
+  }
+
+  /** 关闭并断言 stderr 里没有泄漏报告。 */
+  private fun QuickJS.closeAndAssertNoLeak() {
+    val err = closeCapturingStderr()
+    assertTrue("reference leak" !in err, "close 不该报泄漏：\n$err")
+  }
+
   @Test
   fun evaluatePrimitives() {
     val ctx = context()
@@ -62,7 +86,7 @@ class QuickJSTest {
       assertEquals(0.5, eval(ctx, "0.5"))
       assertEquals(null, eval(ctx, "null"))
     } finally {
-      runBlocking { ctx.closeAndCollect().await() }
+      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
@@ -77,7 +101,7 @@ class QuickJSTest {
         "message should carry the JS text, got: ${err.message}",
       )
     } finally {
-      runBlocking { ctx.closeAndCollect().await() }
+      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
@@ -93,7 +117,7 @@ class QuickJSTest {
         "expected a stack overflow error, got: ${err.message}",
       )
     } finally {
-      runBlocking { ctx.closeAndCollect().await() }
+      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
@@ -105,7 +129,7 @@ class QuickJSTest {
       assertIs<JSFunction>(eval(ctx, "async (a) => a", name = "<testWrap>")).use { wrap ->
         assertEquals(null, callAsync(wrap, null))
         val primitives = listOf<Any?>(0, 1, 0.1, true, false, "str")
-        val wrapped = callAsync(wrap, primitives) as Array<*>
+        val wrapped = callAsync(wrap, primitives) as List<*>
         assertEquals(primitives.size, wrapped.size)
         for (i in primitives.indices) {
           val expected = primitives[i]
@@ -115,7 +139,7 @@ class QuickJSTest {
         }
       }
     } finally {
-      runBlocking { ctx.closeAndCollect().await() }
+      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
@@ -145,33 +169,33 @@ class QuickJSTest {
       }
     } finally {
       // 显式归还之后不该有残留；有残留会在这里抛出来（而不是让进程 abort）
-      runBlocking { ctx.closeAndCheckLeaks() }
+      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
   /**
    * flutter_qjs: `test('reference leak')`。
    *
-   * 那条测试的用意是：**故意**不释放 `()=>{}` 的返回值，然后断言 close 时抛出
-   * `reference leak:` 前缀的异常。这验证的是「泄漏不会静默变成 C 层断言」。
+   * 那条测试的用意是：**故意**不释放 `()=>{}` 的返回值，然后断言 close 在 stderr 打出
+   * `reference leak:` 前缀的报告。这验证的是「泄漏不会静默变成 C 层断言」。
    *
    * 对照本工程重构前的表现：同样场景会让 QuickJS 在 `JS_FreeRuntime` 里
    * `assert(list_empty(&rt->gc_obj_list))` 失败并 `abort()`，整个测试进程死掉，
-   * 根本轮不到断言。现在它变成了一条普通的、可捕获的 JSError。
+   * 根本轮不到断言。现在它变成 close 时打印到 System.err 的一份报告，测试捕获断言。
    */
   @Test
   fun referenceLeak() {
     val ctx = context()
     // 故意不 close()：这个 JSFunction 包装在 close 时仍被登记着
     eval(ctx, "()=>{}", name = "<eval>")
-    val err = assertFailsWith<JSError> { runBlocking { ctx.closeAndCheckLeaks() } }
+    val err = ctx.closeCapturingStderr()
     assertTrue(
-      err.message?.startsWith("reference leak:") == true,
-      "expected a reference leak report, got: ${err.message}",
+      "reference leak:" in err,
+      "expected a reference leak report, got: $err",
     )
   }
 
-  /** 正常路径不该报泄漏：所有包装都显式归还后，closeAndCheckLeaks 必须安静通过 */
+  /** 正常路径不该报泄漏：所有包装都显式归还后，close 的 stderr 必须安静 */
   @Test
   fun noLeakWhenEverythingIsReleased() {
     val ctx = context()
@@ -179,7 +203,7 @@ class QuickJSTest {
     assertEquals(1L, fn.invoke())
     fn.close()
     // 不抛异常即通过
-    runBlocking { ctx.closeAndCheckLeaks() }
+    runBlocking { ctx.closeAndAssertNoLeak() }
   }
 
   /** dup/free 的计数语义：多持有一次就要多归还一次 */
@@ -200,7 +224,7 @@ class QuickJSTest {
       fn.free()
       fn.close()
     } finally {
-      runBlocking { ctx.closeAndCheckLeaks() }
+      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
@@ -237,7 +261,7 @@ class QuickJSTest {
         call.close()
       }
     } finally {
-      runBlocking { ctx.closeAndCheckLeaks() }
+      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
@@ -265,7 +289,7 @@ class QuickJSTest {
         setter.close()
       }
     } finally {
-      runBlocking { ctx.closeAndCollect().await() }
+      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
@@ -280,7 +304,7 @@ class QuickJSTest {
             ctx,
             "[Promise.reject('reject'), Promise.resolve('resolve'), new Promise(() => {})]",
             name = "<promises>",
-          ) as Array<*>
+          ) as List<*>
         assertEquals(3, promises.size)
         assertTrue(promises.all { it is Deferred<*> }, "each promise should map to a Deferred")
 
@@ -298,7 +322,7 @@ class QuickJSTest {
         // 永不 settle 的 promise 不应完成
         assertEquals(null, withTimeoutOrNull(200) { pending.await() })
       } finally {
-        runBlocking { ctx.closeAndCollect().await() }
+        runBlocking { ctx.closeAndAssertNoLeak() }
       }
     }
 
@@ -322,7 +346,7 @@ class QuickJSTest {
           consume.close()
         }
       } finally {
-        runBlocking { ctx.closeAndCollect().await() }
+        runBlocking { ctx.closeAndAssertNoLeak() }
       }
     }
 
@@ -331,16 +355,16 @@ class QuickJSTest {
   fun arrayElementsConvertOnce() {
     val ctx = context()
     try {
-      // jsToJava 的数组分支用 NewObjectArray 构造，所以回来的是 Object[]（Array<*>）
-      val arr = eval(ctx, "[1, 'a', true, null, [2, 3]]", name = "<arr>") as Array<*>
+      // jsToJava 的数组分支用 ArrayList 承接，回来的是 List
+      val arr = eval(ctx, "[1, 'a', true, null, [2, 3]]", name = "<arr>") as List<*>
       assertEquals(5, arr.size)
       assertEquals(1L, arr[0])
       assertEquals("a", arr[1])
       assertEquals(true, arr[2])
       assertEquals(null, arr[3])
-      assertEquals(listOf(2L, 3L), (arr[4] as Array<*>).toList())
+      assertEquals(listOf(2L, 3L), arr[4])
     } finally {
-      runBlocking { ctx.closeAndCollect().await() }
+      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
@@ -357,7 +381,7 @@ class QuickJSTest {
         wrap.close()
       }
     } finally {
-      runBlocking { ctx.closeAndCollect().await() }
+      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
@@ -382,12 +406,12 @@ class QuickJSTest {
         assertEquals("text", wrapped["s"])
         assertEquals(true, wrapped["b"])
         assertContentEquals(byteArrayOf(9, 8, 7), wrapped["bytes"] as ByteArray)
-        assertEquals(listOf(1L, 2L, 3L), (wrapped["list"] as Array<*>).toList())
+        assertEquals(listOf(1L, 2L, 3L), wrapped["list"])
       } finally {
         wrap.close()
       }
     } finally {
-      runBlocking { ctx.closeAndCheckLeaks() }
+      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
@@ -411,7 +435,7 @@ class QuickJSTest {
       val default = assertIs<Map<*, *>>(awaited["default"])
       assertEquals("test module", default["data"])
     } finally {
-      runBlocking { ctx.closeAndCheckLeaks() }
+      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
@@ -432,7 +456,7 @@ class QuickJSTest {
         "expected module load failure, got: ${err.message}",
       )
     } finally {
-      runBlocking { ctx.closeAndCollect().await() }
+      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
@@ -452,7 +476,7 @@ class QuickJSTest {
         wrap.close()
       }
     } finally {
-      runBlocking { ctx.closeAndCheckLeaks() }
+      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
@@ -463,29 +487,34 @@ class QuickJSTest {
    * 不成立。`JS_FreeRuntime` 结尾有 `assert(list_empty(&rt->gc_obj_list))`，只要还有
    * 活引用就会 abort，整个进程死掉、测试连报告都发不出来。
    *
-   * [QuickJS.closeAndCheckLeaks] 的正确行为是两件事一起做：
+   * [QuickJS.collectLeaks] 的正确行为是两件事一起做：
    * 1. 把仍在册的对象**报告**出来（这就是「泄漏」的可断言形式）；
    * 2. 在销毁 runtime 之前把它们逐个**归还**，从而避开 C 层断言。
    *
    * 对照 flutter_qjs 的 `test('reference leak')`：那边只断言「抛异常」，
-   * 这边进一步确认「抛异常 + 进程存活」，少了任何一半都不算通过。
+   * 这边进一步确认「报告 + 进程存活」，少了任何一半都不算通过。
    */
   @Test
-  fun unclosedValuesAreSweptByCloseAndCheckLeaks() {
+  fun unclosedValuesAreSweptOnClose() {
     val ctx = context()
     // 故意不 close()：函数是整图展开之后**唯一**还持票的东西 —— 普通对象现在直接
     // 展开成纯数据的 Map，拿它们造泄漏已经造不出来了。
     repeat(64) {
       eval(ctx, "(() => 1)", name = "<leak>")
     }
-    // 64 个函数都没归还 → closeAndCheckLeaks 必须报出来
-    val err = assertFailsWith<JSError> { runBlocking { ctx.closeAndCheckLeaks() } }
+    // 64 个函数都没归还 → close 时必须在 stderr 里逐一报告
+    val err = ctx.closeCapturingStderr()
     assertTrue(
-      err.message?.startsWith("reference leak:") == true,
-      "expected a reference leak report, got: ${err.message}",
+      "reference leak:" in err,
+      "expected a reference leak report, got: $err",
     )
-    // 再次调用应当幂等（已关闭）
-    runBlocking { ctx.closeAndCheckLeaks() }
+    assertEquals(
+      64,
+      err.split("\n").count { it.contains("JSFunction") },
+      "64 个在册函数应逐一进报告",
+    )
+    // 再次调用应当幂等（已关闭）：报告不会重复打印
+    assertEquals("", ctx.closeCapturingStderr())
   }
 
   /** close 之后的 QuickJS 不应再被使用（当前实现会抛错，属于可接受行为） */
@@ -493,7 +522,7 @@ class QuickJSTest {
   fun closedContextIsInert() {
     val ctx = context()
     assertEquals(2L, eval(ctx, "1 + 1"))
-    runBlocking { ctx.closeAndCollect().await() }
+    ctx.close()
     assertFailsWith<Throwable> { eval(ctx, "1 + 1") }
   }
 
@@ -502,14 +531,14 @@ class QuickJSTest {
    *
    * `JS_FreeRuntime` 不可重入 —— 同一个句柄调两次就是双重释放。出场守卫
    * （一次性取走句柄）与 `closed` 标志共同挡住第二次；这里从两条入口穿插关闭，
-   * 覆盖 `close()` 与 `closeAndCheckLeaks()` 互为第二次的情况。
+   * 覆盖 `close()`（fire-and-forget）与 `closeDeferred().await()` 互为第二次的情况。
    */
   @Test
   fun closeIsIdempotentAcrossEntryPoints() {
     val ctx = context()
-    runBlocking { ctx.closeAndCollect().await() }
-    runBlocking { ctx.closeAndCheckLeaks() }
-    runBlocking { ctx.closeAndCollect().await() }
+    runBlocking { ctx.closeDeferred().await() }
+    ctx.close()
+    runBlocking { ctx.closeAndAssertNoLeak() }
   }
 
   /** flutter_qjs: 'infinite loop' —— timeout 必须把死循环变成可捕获的 JS 错误 */
@@ -524,7 +553,7 @@ class QuickJSTest {
         "expected an interrupt error, got: ${err.message}",
       )
     } finally {
-      runBlocking { ctx.closeAndCollect().await() }
+      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 

@@ -46,20 +46,20 @@ void jsDestroyHandle(jlong obj) { delete (JSValue *) obj; }
 
 （上游 flutter_qjs 的 `cxx/ffi.cpp` 恰恰就是**一个** `jsFreeValue(ctx, v, int32_t free)`，
 第三参为 `1` 时顺带 `delete v`。两种拆法本身都能用，但要让**调用点的口径一致** ——
-混着来就是上面那个坑。本工程选的是拆成两个。）
+混着来就是上面那个坑。本工程现在**两层都有**：粒度 helper 留在 C 内部、给
+`definePropertyValue` 按「只要其一」取用；Kotlin 面的 JNI 导出是合并版
+`jsFreeValue`（2026-10-05 起，把「放引用 + 销毁包装」并成一次过界）—— Kotlin 侧
+没有「只要其一」的调用点，所以合并版在那里是安全的，粒度 helper 不出 C。）
 
-Kotlin 侧**只暴露一个**释放出口，让调用点没有选择余地：
+Kotlin 侧的释放入口**只有 [jsFreeValue] 一个**（没有第二种语义可选），且**不设
+包装**：所有调用点都在自己的 withPtr / withPtrSync 块内（它们本来就握着 `ptr`），
+直接调它（2026-10-05 前还有个 `releaseValue` 包装兼管「任意线程投递」，实测
+七个调用点全在 JS 线程的块内，包装是空转，删了）：
 
 ```kotlin
-internal fun releaseValue(handle: Long) {
-  if (handle == 0L) return
-  // ⚠️ 别照抄成裸调两个 native 函数：`closed` 的判断在 onJsThreadQuietly 里面，
-  // 整段还要回 JS 线程（理由与取舍见规则 7）。仓库现状是下面这样。
-  onJsThreadQuietly {
-    jsReleaseValue(ptr, handle)
-    jsDestroyHandle(handle)
-  }
-}
+// jsToJava 的收尾 / jsCallImpl 的 finally / releaseRef / javaToJsImpl……
+// 全是这一个形状：
+withPtrSync { ptr -> jsFreeValue(ptr, handle) }
 ```
 
 ---
@@ -106,55 +106,58 @@ Java_..._definePropertyValue(JNIEnv *, jclass, jlong ctx, jlong obj, jlong k, jl
 症状：一堆互不相关的用例同时挂掉，报 `promise has no callable then` /
 `null cannot be cast to non-null type Array`。
 
-修法是让分发函数成为唯一入口，由它再扇出：
+修法是让分发函数成为唯一入口，由它再扇出（2026-10-05 起分发器在 Kotlin 的
+`QuickJS.jsToJava`，native 只留薄原语，分层对齐 flutter_qjs 的 `_jsToDart`）：
 
-```cpp
-static jobject jsToJavaScalar(JNIEnv *, JSContext *, JSValue);      // 非对象
-static jobject jsToJavaObject(JNIEnv *, JSContext *, JSValue, std::unordered_map<void*,jobject>&);
-
-jobject jsToJava(JNIEnv *env, JSContext *ctx, JSValue obj,
-                 std::unordered_map<void *, jobject> cache = {}) {
-  if (JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT)
-    return jsToJavaObject(env, ctx, obj, cache);
-  return jsToJavaScalar(env, ctx, obj);
+```kotlin
+private fun jsToJava(ptr: Long, obj: Long, cache: MutableMap<Long, Any?> = HashMap()): Any? {
+  val tag = jsGetTag(obj)   // C 侧已反向映射成稳定码（TAG_OBJECT=5 等），Kotlin 不见原始 tag
+  if (tag != TAG_OBJECT) return /* 标量分派：BOOL/INT/float64/STRING，否则 null */
+  /* 对象分支：ArrayBuffer 探针 → javaObject 还原 → cache → 函数 → Error
+     → Promise → 数组 → 普通对象 */
 }
 ```
 
-之后递归点一律调 `jsToJava(env, ctx, elem, cache)`，**永远不要**直接调标量那个。
+之后递归点一律调 `jsToJava(ptr, elem, cache)`，**永远不要**绕开它直接调标量原语。
 
 ---
 
 ## 规则 4 —— 普通对象**整图展开**成纯数据；函数是唯一保留的包装
 
-`jsToJavaObject` 对普通对象**不造包装**，而是递归填一个 `java.util.LinkedHashMap`：
+`jsToJava` 的对象分支对普通对象**不造包装**，而是递归填一个 `LinkedHashMap`：
 
-```cpp
-auto map = env->NewObject(env->FindClass("java/util/LinkedHashMap"), ...);
-cache[ptr] = map;                      // ⚠️ 必须在**填之前**登记
-for (每个自有属性) {                     // JS_GetOwnPropertyNames + JS_GetProperty
-  map->put(jsToJava(jsKey, cache), jsToJava(jsVal, cache));
+```kotlin
+val map = LinkedHashMap<Any?, Any?>()
+cache[key] = map                        // ⚠️ 必须在**填之前**登记（key = jsValueGetPtr(obj)）
+// jsGetOwnProperties 已在 C 侧把每项取成 (key, value) 交错句柄对，atom 不过界
+for (i in pairs.indices step 2) {
+  map[jsToJava(ptr, pairs[i], cache)] = jsToJava(ptr, pairs[i + 1], cache)
 }
-return map;
+return map
 ```
 
-- **`cache[ptr] = map` 必须在填之前**：递归回自身时命中的正是那个**还在填的** `map`，
+- **`cache[key] = map` 必须在填之前**：递归回自身时命中的正是那个**还在填的** `map`，
   于是 `a['a'] === a` 天然成立。填完再登记就晚了 —— 环上会无限递归。
-- `cache` 是**每次调用新建**的局部变量（`jsToJava` 的默认形参 + `jsToJavaEntry`），
+- `cache` 是**每次顶层调用新建**的局部表（`jsToJava` 的 `cache` 形参默认值），
   只在一次遍历内有效。这不是权宜之计：产物既然是纯数据，就**不存在**"跨调用的对象身份"。
 - 展开出来的东西与 JS 侧**脱钩**：改 `Map` 不会影响 JS，也没有 `close()` / 引用计数这回事。
-- 数组走 `Object[]`，规则同上。
+- 数组走 `List`（`ArrayList` 实例），规则同上。
 - **函数是唯一的例外**：`JSFunction` 是可调用的活对象，展开成数据没有意义，所以仍然造包装、
-  持一票、要 `close()`。`jsToJavaObject` 里 `JS_IsFunction` 单独一个分支就是为它。
+  持一票、要 `close()`。`jsToJava` 对象分支里的 `JS_IsFunction` 单独一个分支就是为它。
 - promise 同理不展开：它要等 `then` 回调，落在这个位置的值是个 `Deferred` —— 上游
   `_jsToDart` 是 `completer.future`（Dart 的 `Future` 对应 Kotlin 的 `Deferred`），
   两边是同一件事。
-- ⚠️ **别删 cache 里那些 JNI local ref**。`a['a'] = a` 时递归交还的 `jVal` 就是 `map`
-  自己，对它 `DeleteLocalRef` 等于把要返回的引用一并销毁 —— 表现是**静默变成 null**
-  （不抛异常、不崩溃，值就没了）。2026-09-20 实测：环形对象整个转成 null，
-  而普通对象一切正常，非常容易误判成"展开没写对"。
-  判据：递归**之后** `cachedRefExists(cache, v)` 为真就别删 —— 进 cache 的只有**容器**
-  （数组、普通对象，以及 promise 那个 `Deferred`）；**函数包装不进** cache（理由见下一条），
-  标量 / 字符串也不进 —— 这两类照删，别让 local ref 白涨。
+- Error 展开成 `JSError`（纯数据，无票）：`message` 是 Error 本体的 ToString；
+  `stack` 走**标准分派**收字符串 —— 真栈等价，数字 / 对象 / symbol / 缺失一律
+  null（旧 C++ 对任意值做 ToString，会吐出 `"5"`、`"[object Object]"` 这类串，
+  2026-10-05 改掉；上游用 `jsToBool != 0` 判空，会把 `0` / `""` 也判没，都不如
+  「只收字符串」干净）。
+- **JNI local ref 簿记这条坑已随转换上移 Kotlin 整体消失**（2026-10-05）。旧 C++ 实现里
+  cache 存的是 jobject local ref，`a['a'] = a` 时递归交还的 `jVal` 就是 `map` 自己，
+  误删它（`DeleteLocalRef`）的表现是**静默变成 null**（不抛异常、不崩溃，值就没了；
+  2026-09-20 实测：环形对象整个转成 null，极易误判成"展开没写对"）。现在跨界只有
+  Long 句柄与原始类型，这一类 bug 没有载体了；留在这里是为了对照旧代码或上游 C 层
+  时不再困惑。
 - ⚠️ **函数包装不进 cache —— 这条是 2026-09-20 用一次真实 bug 换来的**。
   上游 `_jsToDart` 的函数分支是直接 `return _JSFunction(ctx, val)`，只有数组和普通对象
   两支才写 `cache[valptr] = ret`。本工程上一版（ff531fe）给函数也写了
@@ -196,7 +199,7 @@ promise 必须排除在表外……而这些在 `_jsToDart` 的模型里**一个
 `expect(wrapA['a'], wrapA, reason: 'recursive object')` 断言的正是这件事。
 
 函数分支两边也一致：**都不写回 `cache`**（上游直接 `return _JSFunction(ctx, val)`，
-本工程的 `jsToJavaObject` 同理）。于是同一个函数出现在两个位置时，两边都得到两个包装 ——
+本工程的 `jsToJava` 函数分支同理）。于是同一个函数出现在两个位置时，两边都得到两个包装 ——
 这是**故意**的：包装是独占的一票，谁拿到谁还，谁也不能替别人 `close()`。
 
 另一处：`javaToJsImpl` 用于断环的 cache **必须是 `IdentityHashMap`**。
@@ -234,22 +237,19 @@ class QuickJS(
     val sharedDispatcher: ThreadDispatcher = ThreadDispatcher("quickjs")
   }
 
-  private val runtimeAlive = AtomicBoolean(true)   // 「已销毁」标记，与 isClosed 不是一回事
-
   // 唯一覆写者：本类要拿 this 换句柄（规则 5.1 第 2 条）。基类保证它**只调一次**、且那次调用
   // 推迟到**首次读句柄**那一刻才发生（[withPtr] / [withPtrSync] 的块里，也就是投递之后）——
   // 于是构造参数都已就位、而且跑在归属线程上，`JS_NewRuntime` 的 `stack_top` 基准靠的就是它。
   // 建失败返回 0 由基类 check。
   override fun initPtr(): Long = initContext(this@QuickJS, stackSize, memoryLimit, timeout)
 
-  override suspend fun releaseImpl(ptr: Long) {    // 门只在上游：closeAndCollect() 先 markClosed()
-    runtimeAlive.set(false)                        // 先落「已销毁」，onJsThreadQuietly 才会停
+  override suspend fun releaseImpl(ptr: Long) {    // 门只在上游：closeDeferred() 先 markClosed()
+    updateChannel.close()                          // 泵退出：关通道让 for 循环正常结束
+    val leaked = collectLeaks()                    // 先清算：登记在册的 JSRef 必须在销毁前归还
+    if (leaked.isNotEmpty()) { /* 打印泄漏报告到 System.err */ }
     destroyContext(ptr)                            // 句柄**以参数交进来**，不必自己去读
   }
-
-  override fun close() {                           // 投递即返回，不等释放
-    submit { /* closeAndCollect().await() + 打印泄漏 */ }   // 不在归属线程上也无需 withContext
-  }
+  // close() 用基类的（fire-and-forget）：submit { releaseImpl(ptr) }，清算与报告都在上面这步里
 }
 ```
 
@@ -259,11 +259,11 @@ class QuickJS(
   **取走式**原子动作（`getAndSet` / `compareAndSet`），裸 `if (destroyed) return` 挡不住。
   2026-09-20 起这一类守卫统一收进 `Pointer.markClosed()`。
 - **`releaseImpl()` 里不能叠一道自己的 `markClosed()` ——「关闭」这道门全局只该有一处。**
-  基类的入口（`Pointer.closeDeferred()`、本类的 `closeAndCollect()`）**先抢名额、再调
-  `releaseImpl()`**；实现里再抢一次必然失败，结果是「`close()` 返回成功、其实没销毁」，
-  runtime 连同它整个堆漏在 native。2026-09-20 收口后的形态：门只在 `closeAndCollect()`
-  那次 `Pointer.markClosed()`，`releaseImpl(ptr)` 就是裸销毁 `destroyContext(ptr)`
-  外加把 `runtimeAlive` 落下（句柄由基类当参数交进来）。此前那套两层叠法（`destroyNow()` 自己再抢一次 + 裸
+  基类的入口（`Pointer.closeDeferred()`）**先抢名额、再调 `releaseImpl()`**；实现里再抢
+  一次必然失败，结果是「`close()` 返回成功、其实没销毁」，runtime 连同它整个堆漏在
+  native。2026-09-20 收口后的形态：门只在 `closeDeferred()` 那次 `Pointer.markClosed()`，
+  `releaseImpl(ptr)` 就是清算 + 裸销毁 `destroyContext(ptr)`
+  （句柄由基类当参数交进来）。此前那套两层叠法（`destroyNow()` 自己再抢一次 + 裸
   `releaseImpl()`）在「基类那条路」上是错的，已整段删掉。
 - **runtime 句柄必须建在归属线程上**（`initContext` 那一步，2026-09-20 起由挂起工厂
   `create()` 强制；2026-09-21 删掉工厂后改由 **`Pointer` 的读门**担保 —— 首次读句柄发生在
@@ -279,8 +279,8 @@ class QuickJS(
   `AutoCloseable`）之后，像 `asyncReleasing(vararg values: AutoCloseable?)` 这种
   「用完即还」的形参就会把 runtime 当成可归还的值 —— `invokeOnCompletion` 一触发就是
   整个 runtime 被销毁。收窄成 `JSRef?`。
-- `use {}` 调的是 `close()`，而 `QuickJS.close()` 对泄漏只打印不抛；要断言泄漏仍须
-  `closeAndCheckLeaks()`（它 `await()` 清算结果）。
+- `use {}` 调的是 `close()`，而泄漏只打印不抛；要断言泄漏，测试捕获 System.err
+  （泄漏报告打印在那里）。
 - 丢掉 GC 兜底是有代价的：**忘记 `close()` 就真的永久泄漏**，测试与调用方必须自己
   保证关闭路径。这也正是规则 6 存在的理由。
 
@@ -357,7 +357,7 @@ class QuickJS(
     `AutoCloseable.close()` 这类非挂起签名），`CoroutineScope(dispatcher).async/launch`
     是**不等结果**的投递或长驻循环。
     ⚠️ 其中「**发消息、不等结果**」的那一种**不用手抄**：`submit` 也抬成了 `internal`
-    （2026-09-20）。`QuickJS` 直接继承 `Pointer`，于是 `closeAndCollect()` 直接
+    （2026-09-20）。`QuickJS` 直接继承 `Pointer`，于是关闭流程直接
     `submit {}`；不继承的那一类（`AvFormat.ctx` 等）就拿内部子类去调。原先 `QuickJS`
     里那份同名私有 `submit` 已删除。只有 `launch` 那种（长驻循环、fire-and-forget 且
     **不希望异常被 `Deferred` 吞掉**）才继续用 `CoroutineScope(dispatcher).launch`。
@@ -483,9 +483,9 @@ class QuickJS(
   dispatcher 队列就返回。不等返回不会 use-after-free —— 同一个单线程 dispatcher 是
   **FIFO** 的，释放消息一定排在「它之前投递的操作」之后、「它之后投递的操作」之前；
   新操作靠 `isClosed` 在入口被拒（**不是**靠「句柄还在不在」）。需要确定性时用
-  `closeDeferred()`，`QuickJS` 另给了 `closeAndCollect(): Deferred<List<String>>`。
+  `closeDeferred().await()` —— 清算与销毁都在 `releaseImpl` 里，`await()` 即落地。
 - ⚠️ **「句柄是不是 0」不能当守卫**：指针不可更改，销毁之后它仍是原值。判「还活着吗」
-  看 `isClosed`，或各 façade 自己的一次性标记（`QuickJS.runtimeAlive`）。
+  看 `isClosed`。
 - ⚠️ `close()` 的**短路分支必须返回已完成的 `CompletableDeferred`**：写成空的 `async {}`
   没人 complete，调用方 `await()` 会永久挂住。**已完成还有第二个用途**：`closeDispatcherOnClose`
   的关闭动作挂在完成上，短路分支返回的就是已完成的 Deferred ⇒ 关闭**当场同步执行**，于是
@@ -541,12 +541,12 @@ internal fun collectLeaks(): List<String> {
 
 顺序是承重的：**记录**本身就是泄漏的定义（此刻还在册 = 调用方没还），
 **归还**是为了不让它升级成 `JS_FreeRuntime` 的 `abort()`。
-`close()` 打印；`closeAndCheckLeaks()` 抛 `JSError("reference leak:\n...")`。
+`releaseImpl` 把它打印到 System.err（`close()` 路径异步可见）；测试捕获 System.err 断言。
 
 ⚠️ **别拿测试 XML 里 `reference leak` 的出现次数当泄漏数**：`JSError` 的 `init` 里就有
 `printStackTrace()`，凡 `assertFailsWith<JSError>` 的用例都会往 `<system-err>` 留一份。
 本仓有两条**故意**泄漏的用例（`QuickJSTest.referenceLeak` 的 1 个 `JSFunction`、
-`unclosedValuesAreSweptByCloseAndCheckLeaks` 的 64 个 `JSFunction`），所以基线恒为 **2**。
+`unclosedValuesAreSweptOnClose` 的 64 个 `JSFunction`），所以基线恒为 **2**。
 （那 64 条**必须**用函数造：普通对象整图展开之后是纯数据、没有票可漏，拿它造不出泄漏。）
 真正的意外信号是 **`close()` 路径**打印的 `QuickJS reference leak`（`QuickJS.kt`），它必须是 0。
 
@@ -559,6 +559,10 @@ internal fun collectLeaks(): List<String> {
   残留撑到 `JS_FreeRuntime` 的 `gc_obj_list` 断言 → `abort()`」。
   换句话说：**先标记后释放是可以的**（`close()` 就该这么做），前提是「归还」另有一个
   判据，而不是去读 `closed`。
+  （2026-10-05 起这套落地成**路径分离**：`isClosed` 门长在 `withPtr` / `withPtrSync`
+  两扇门上，归还路径**不经过门** —— `releaseImpl` 句柄以参数收、`releaseRef` 直读
+  `ptr`；`runtimeAlive` 随之删除（事件泵靠通道关闭退出）。`releaseValue` / `onJsThreadQuietly` 已随
+  「Kotlin 直调 `jsFreeValue`」删除。）
 - `refs` 必须是**强引用**身份集
   （`Collections.newSetFromMap(IdentityHashMap<JSRef, Boolean>())`）。
   用 `WeakHashMap<Long, JSRef>`（键是 native 指针）会同时踩两个雷：
@@ -573,31 +577,33 @@ QuickJS 是**单线程**的：引用计数是裸 `int`、GC 链表与 Shape 哈�
 崩在 `get_shape_prop` / `list_del` 这类地方），要么漏减（对象/Shape 卡在 `gc_obj_list`，
 `JS_FreeRuntime` 的断言 `abort()`）。**症状是偶发崩、重跑就变绿**，因此极易被误判成环境问题。
 
-`QuickJS` 只有一个专用线程（`sharedDispatcher`），三类入口分工不同：
+`QuickJS` 只有一个专用线程（`sharedDispatcher`）。读句柄的两扇门（`withPtr` /
+`withPtrSync`）自带 `isClosed` 门 —— 标记即抛，「标记即拒绝」由门自动兜住（2026-10-05
+起，此前由 `runOnJsThread` / `evaluate` 入口各自手判）：
 
-| 入口 | 用哪个 | 关闭之后 |
-|---|---|---|
-| 会**返回**东西的同步调用（`jsCallImpl`、`javaToJsImpl`…） | `runOnJsThread`（= `isClosed` 守卫 + `withPtrSync`） | 抛 `IllegalStateException`（判据 `isClosed`） |
-| `evaluate` —— public 且**已 suspend** | `withPtr {}`（内部 `withContext(d)`） | 抛 `IllegalStateException`（判据 `isClosed`） |
-| 只**归还 / 撤登记**的收尾动作（`releaseValue`、`releaseRef`） | `onJsThreadQuietly`（= `runtimeAlive` 判据 + `withPtrSync`，**已在 JS 线程上时就地执行**） | **静默跳过**（判据 `runtimeAlive`） |
+| 入口 | 关闭之后 |
+|---|---|
+| **新操作**（`jsCallImpl`、`evaluate`、`handleJSInvokable`、`toJava`…）—— 全部经两扇门 | 抛 `IllegalStateException`（判据 `isClosed`） |
+| **归还**（`releaseRef`、`releaseImpl` 的销毁）—— **不走门**：`releaseImpl` 句柄以参数收，收尾直读 `ptr` | 正常执行（标记窗口内的合法动作） |
 
-- **两类入口的判据不一样，别统一。** 新操作用 `isClosed`（标记即拒绝，否则它会排在销毁
-  消息**后面** → use-after-free）；归还动作必须用「runtime 还在不在」，否则清算那一轮
-  归还全变空操作 → 残留撑到 `JS_FreeRuntime` 的断言 `abort()`。见规则 6 第一条。
+- **归还路径与门分离，别把归还塞回门里。** 新操作被门拒绝（否则它会排在销毁消息
+  **后面** → use-after-free）；归还要在标记窗口里照常跑（否则清算那一轮全变空操作 →
+  残留撑到 `JS_FreeRuntime` 的断言 `abort()`）。见规则 6 第一条。
 - **`evaluate` 已经 suspend 化**（2026-09-20）：构造期**不再有 `runBlocking`** —— 构造
-  入口是主构造器 `QuickJS(…)`（2026-09-21 前是挂起工厂 `create()`，已删）。阻塞只剩 `runOnJsThread` /
-  `withPtrSync` 那条给 native 回调链用的**同步**出口，以及 `onJsThreadQuietly` 在非 JS
-  线程上被调时的那一次。
-  native 回调（`@Keep` 的 `loadModule` / `handleJSInvokable` / `wrapJSPromiseAsync`）
-  是 native 线程直接调进来的，那里**没有协程上下文**，改 suspend 只能在里面再
-  `runBlocking`，反而更糟 —— 所以它们保持同步。
-- **返回值与转换结果也要留在 dispatcher 上**：`jsToJava` 要递归遍历整个对象图，全都在碰
-  这个 runtime。只把调用收回 dispatcher、把转换丢在调用方线程上，就是历史上那个偶发崩溃的
-  根因（调用 → 转换 与 `executePendingJob` / GC 并发）。`JSFunction.invoke` 因此把两步
-  包在同一个 `withPtrSync` 块里 —— 调用与转换之间不再有线程切换的缝。
-- `releaseValue` / `releaseRef` 的调用方可以是**任意线程**（`close()` 出现在 `finally` 里）；
-  非 JS 线程时它们要 `runBlocking` 一次调度 —— **UI 线程 `close()` 会等一次调度，这是明确
-  接受的取舍**，别改成「异步投递、投递完就返回」（runtime 可能已经被销毁）。
+  入口是主构造器 `QuickJS(…)`（2026-09-21 前是挂起工厂 `create()`，已删）。阻塞只剩
+  `withPtrSync` 那条给 native 回调链用的**同步**出口。
+  native 回调（`@Keep` 的 `loadModule` / `handleJSInvokable`）是 native 线程直接调进来的，
+  那里**没有协程上下文**，改 suspend 只能在里面再 `runBlocking`，反而更糟 —— 所以它们
+  保持同步（`wrapJSPromiseAsync` 曾是其中之一，2026-10-05 转换上移 Kotlin 后改为直调）。
+- **返回值与转换结果也要留在 dispatcher 上**：`jsToJava`（现是 `QuickJS` 的 Kotlin 分派器，
+  探型 / 读属性 / 递归每一步都在碰这个 runtime）必须与调用**同块**落在 `withPtr` /
+  `withPtrSync` 块内。只把调用收回 dispatcher、把转换丢在调用方线程上，就是历史上那个
+  偶发崩溃的根因（调用 → 转换 与 `executePendingJob` / GC 并发）。`JSFunction.invoke`
+  因此把两步包在同一个 `withPtrSync` 块里 —— 调用与转换之间不再有线程切换的缝。
+- **归还只发生在 JS 线程上**（2026-10-05 起）：直接调 [jsFreeValue] 的调用点全在
+  withPtr / withPtrSync 块内；跨线程发起的 `close()` / `free()` 由 `Pointer.submit`
+  先落到 dispatcher 才碰 runtime。别把归还改成「异步投递、投递完就返回」（runtime
+  可能已经被销毁）—— 顺序必须保持「清算 → 归还 → 销毁」（规则 6）。
 - ⚠️ **别把 runtime 句柄当值句柄用。** `releaseRef(ref)` 把 ref 的值句柄交给 `releaseValue` 是
   唯一的正确写法：`onJsThreadQuietly { handle -> … }` 的块参数是**这个 Pointer 自己的
   runtime 句柄**，而 `releaseValue` 要的是**某个 JS 值**的句柄 —— 两个都是 `Long`，混用
@@ -673,10 +679,15 @@ grep -o 'Java_soko_ekibun_quickjs_[A-Za-z0-9_]*' cxx/quickjs/quickjs.cpp | sort 
 
 2026-09-20 实测（javap 与手写 class 解析器两法互证，数字一致）：`QuickJS` 25 ↔ 25、
 `Highlight` 2 ↔ 2，两向差集皆空；`QuickJS$Companion` 里 **0 个** native。
+2026-10-05 jsToJava 上移 Kotlin（-1 旧转换出口 +19 透传原语）、随后清掉冗余原语
+（`jsTagIsFloat64` / `jsReleaseValue` / `jsDestroyHandle` / `jsGetProperty` /
+`jsAtomToValue` / `jsFreeAtom` / `jsGetOwnPropertyNames` 换成 `jsFreeValue` /
+`jsGetOwnProperties`，`jsIsArrayBuffer` 并回 `jsGetArrayBuffer`）后重对：
+`QuickJS` **38**、两向差集皆空。
 
 **JNI 面不止 QuickJS 一个**：`soko/ekibun/quickjs/Highlight.class` 也声明了 2 个 native
-（`isIdentFirst` / `isIdentNext`）。cpp 侧 `Java_soko_ekibun_quickjs_*` 共 **27** 个符号
-= QuickJS 25 + Highlight 2。查符号、改类结构时别只盯 QuickJS。
+（`isIdentFirst` / `isIdentNext`）。cpp 侧 `Java_soko_ekibun_quickjs_*` 共 **40** 个符号
+= QuickJS 38 + Highlight 2。查符号、改类结构时别只盯 QuickJS。
 
 ---
 
@@ -742,6 +753,8 @@ QuickJS 派发线程**空闲在 `LinkedBlockingQueue.take`**，且**没有任何
 `JS_VALUE_GET_TAG(v) == ((int32_t)(v).tag)`。
 `JS_TAG_OBJECT = -1`，所以调试打印里看到 `tag=-1` 是一个**完全健康的对象**。
 `JS_TAG_EXCEPTION = 6`。得出"tag 为 -1 说明有异常"会把你带上一条很长的错路。
+⚠️ 这说的是 **native 侧的原始 tag**：Kotlin 侧 `jsGetTag` 已反向映射成稳定码
+（`TAG_OBJECT = 5` 等，映射 enum 在 quickjs.cpp），两边别混着读。
 
 ### `JS_GetArrayBuffer` 对非 ArrayBuffer 一定会抛
 
@@ -754,15 +767,20 @@ uint8_t *buf = JS_GetArrayBuffer(ctx, &size, obj);
 if (!buf) JS_FreeValue(ctx, JS_GetException(ctx));
 ```
 
-重构时删掉这个探针，会换来一波莫名其妙的失败（`promise has no callable then` 等）。
+2026-10-05 起探针与取字节合在**一个**原语里：`jsGetArrayBuffer` 先用
+`JS_GetClassID` 比对 initContext 自标定的 class id 过滤（这一步**不抛**），非
+ArrayBuffer 直接给 null —— 普通对象节点不再为探针白分配一个 TypeError；命中
+后内部那段清异常逻辑保留作保险。重构时别把清异常那段从原语里删掉，会换来
+一波莫名其妙的失败（`promise has no callable then` 等）。
 
 ---
 
 ## 移植检查清单
 
-1. native 侧两个释放函数；Kotlin 侧只有一个 `releaseValue`。
+1. native 侧两个粒度释放 helper（C 内部用）+ 合并导出 `jsFreeValue`；Kotlin 侧
+   不设释放包装，调用点在 withPtr 块内直接调它。
 2. `definePropertyValue` 释放 `k`、不释放 `v`；两个包装都 delete。
-3. 唯一的 `jsToJava` 分发点；递归点全部走它。
+3. 唯一的 `jsToJava` 分发点（`QuickJS.jsToJava`，Kotlin）；递归点全部走它。
 4. 普通对象整图展开（`cache[ptr]` 要在**填之前**登记）；**函数不进 `cache`**（包装独占，
    谁拿到谁还）；promise 展开成 `Deferred`（上游是 `Future`）；java→js 的 cache 用 `IdentityHashMap`。
 5. 销毁只走显式 `close()`（实现 `AutoCloseable` 只为语法契约）；一次性守卫是**取走式**

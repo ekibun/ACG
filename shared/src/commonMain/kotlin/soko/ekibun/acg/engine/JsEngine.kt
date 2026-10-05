@@ -76,14 +76,14 @@ class JsEngine {
               // `Array<Any?>`），`thisVal` 是隐式接收者、不占位。`when` **直接调**各能力、不按名字找 ⇒
               // `private` 天然不受影响、写错名字是编译错误（反射走不通，依据见 [ability-bridge]）。
               JSInvokable { argv ->
-                val args = argv[1] as Array<*>
+                val args = argv[1] as List<*>
                 when (argv[0] as String) {
                   "encode" -> encode(args[0] as String, args[1] as String?)
                   "decode" -> decode(args[0] as ByteArray, args[1] as String?)
                   "fetch" -> fetchAsync(args[0] as Map<Any, Any?>)
                   // args[1] 是 console.log(...) 的**实参数组**，作为 args 的元素整体送达，
                   // 不是摊平成位置参数。
-                  "console" -> console(args[0] as String, args[1] as Array<Any?>)
+                  "console" -> console(args[0] as String, args[1] as List<Any?>)
                   // webview 的 4 个实参打进 args，不是位置参数。args[3] 是回调，
                   // 它的归属语义见 [webviewAsync]。
                   "webview" ->
@@ -126,9 +126,9 @@ class JsEngine {
 
   private fun console(
     type: String,
-    data: Array<Any?>,
+    data: List<Any?>,
   ) {
-    println("$type\n${data.toList()}")
+    println("$type\n$data")
   }
 
   private fun encode(
@@ -272,7 +272,7 @@ class JsEngine {
           ),
         )
       } catch (e: Throwable) {
-        console("error", arrayOf("onInterceptRequest 回调出错，按放行处理: $e"))
+        console("error", listOf("onInterceptRequest 回调出错，按放行处理: $e"))
         return null
       }
     try {

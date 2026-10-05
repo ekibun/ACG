@@ -438,6 +438,35 @@
   ⚠️ 它管的是**量级**不是精确值：把 `delay(100)` 加回去会变成 200 ms 上下、仍在预算内 ⇒
   抓不到那种回归；要钉精确值得另写判据。
 
+### B23. JS 侧流式 response（缓做，随 E8 数据源契约落地）
+
+- **现状**（2026-10-05 评估）：`JsEngine.fetchAsync` 走 `Http.request(options).execute()` 再
+  `bodyAsChannel().toByteArray()` 整包缓冲，body 的读取**没有任何超时** —— 服务端把响应头
+  发完就停住不吐 body 时，脚本的 `await fetch(...)` 永远挂着（协程与连接一起漏，不报错）。
+  流式执行已备好（`Http.request(...)` 备好 statement 后 `executeStreaming()`，目前仅播放器
+  `HttpIO` 在用），JS 侧未接。
+- **方案**（2026-10-05 定稿，被否的备选一并记录）：
+  - 贴 web 标准、**默认**流式化：`fetchAsync` 改走 `executeStreaming()`，响应头到达即返回；
+    不做 opt-in 标记（web 标准里没有 `{stream: true}`）、**不造** `getReader`。`body` 是
+    `{read, close}` 两个 `JSInvokable` 闭包（不是 id 注册表）：`read` 每次开
+    `CoroutineScope(Dispatchers.IO).async` 返回 `Deferred<ByteArray?>`（过桥自动变 Promise），
+    `n <= 0` 映射 null = 流尾；8s 闲置超时（`IdleTimeoutException`）自然 reject，重试留给
+    脚本（不搬播放器 `HttpIO` 的换会话机制）。单次 read 缓冲 64KB。
+  - `arrayBuffer() / text() / json()` 循环 read 聚合到流尾、`finally` 里 close —— 现有脚本
+    这三种用法行为不变，回归面因此很小；`clone()` 对流式 body 是共享同一条流的浅拷贝
+    （非 tee）；read 需 `await` 串行（不设并发防）。
+  - **被否**：`openStreams` 登记表 + `reset()` 收口 —— 生产路径没人调 reset、测试里
+    `server.stop(0)` 本身兜底，登记表买不到东西；改在契约注释里写死「不读到底就 close，
+    否则这条连接挂到进程结束」（无 GC 钩子，忘 close 是正常用法不是病态）。
+- **为什么缓做**：近期无脚本需要增量读 —— 内置 JS 只有 init.js 与 crypto.js，现有套路全是
+  整包消费；播放链路不走 JS（`HttpIO` 直连 Kotlin 契约）；全员收益只有「治 fetch 卡死」
+  一项（低频故障）。E8 的「JS 数据源契约」是可预见的消费方，随它一起落地。
+- **完成判据**：定点测试 `JsEngineDispatchTest` 加两条 —— ① 渐进读：服务端 3 片写、片间
+  sleep 250ms，断言「fetch 返回 → 读完」的时间差 ≥ 150ms（整包缓冲版 ≈0 会红）、聚合总数
+  == 发出总数、reads ≥ 2（64KB cap 保证，TCP 合片也不误判）、close 后 read 为 null；② 跨
+  chunk 多字节 UTF-8："a中" 的字节拆两片写，`text()` == "a中"；既有 `fetchBranchIsReachable`
+  （走 `json()`）不改断言保持绿。
+
 ## C. 事实未实测，文档里暂无据
 
 ### C1. Android APK 产物路径
@@ -630,7 +659,7 @@
   （2026-10-02，调研纪要见 [docs/research-2026-10-02.md](./docs/research-2026-10-02.md)），未落地。
 - **落地顺序**（architecture.md §5）：`epochTimeMs()` 墙钟原语 + kotlinx-serialization 依赖
   （**改依赖需用户确认**）→ `acg.model` 领域类型 → `acg.catalog.bgm`（DTO + mapper + 限流退避）
-  → 持久化分片 + 收藏/历史仓库 → `HtmlParser` 宿主原语 + JS 数据源契约 + Line 绑定 →
+  → 持久化分片 + 收藏/历史仓库 → `HtmlParser` 宿主原语 + JS 数据源契约（含 B23 流式 response）+ Line 绑定 →
   业务四页 → WebView 投前台（悬浮按钮方案，先 Android 验证、桌面动 C++ 摘 `background` 标志）
   → P2：AniList mapper / per-episode 精确进度 / animeko 订阅兼容解释器 / 边播边缓存 / torrent。
 - **完成判据**：按 §5 分条验收，每条落地后回来更新本条状态；全部落地后删条目

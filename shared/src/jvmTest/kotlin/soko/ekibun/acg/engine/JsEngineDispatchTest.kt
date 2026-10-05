@@ -154,7 +154,7 @@ class JsEngineDispatchTest {
   /**
    * `console`：`args[0]` 是 level、`args[1]` 是**实参数组整体**作为 `args` 的一个元素。
    *
-   * 写成 `['log', a, b]` 的话，`console(type, data: Array<Any?>)` 会收到 `b` 而不是数组。
+   * 写成 `['log', a, b]` 的话，`console(type, data: List<Any?>)` 会收到 `b` 而不是数组。
    * 这条验的是**分支可达**：下标错位会落到 `else` 上抛 `JSError`
    * （`console(type, data)` 两个形参类型不同，错位必然炸，不会静默）。
    *
@@ -360,7 +360,7 @@ class JsEngineDispatchTest {
       )
     val m = assertIs<Map<*, *>>(out, "FormData 断言脚本该返回一个对象，实际是 $out")
     assertEquals("FormData", m["proto"], "`__js_proto__` 是 Http.kt 分派 multipart 的入口")
-    val items = assertIs<Array<*>>(m["items"], "__items__ 必须是数组，实际是 ${m["items"]}")
+    val items = assertIs<List<*>>(m["items"], "__items__ 必须是数组，实际是 ${m["items"]}")
 
     // 前三项：普通字段 —— 没有 filename 就没有 type，Kotlin 走 append(name, value)
     for (i in 0..2) {
@@ -383,23 +383,23 @@ class JsEngineDispatchTest {
       "带 filename 的项必须带 type，否则 Http 的 `type is String && value is ByteArray` 走不到",
     )
 
-    assertEquals(listOf("1", "2"), assertIs<Array<*>>(m["getAllA"]).toList(), "同名 append 应累积")
+    assertEquals(listOf("1", "2"), assertIs<List<*>>(m["getAllA"]), "同名 append 应累积")
     assertEquals("4", m["getB"], "get 返回 value 而非 item 对象")
     assertEquals(true, m["hasB"])
     assertEquals(false, m["hasZ"])
     assertEquals(
       listOf("a", "a", "b", "file"),
-      assertIs<Array<*>>(m["keys"]).toList(),
+      assertIs<List<*>>(m["keys"]),
       "keys() 要给出全部项（含重复名）",
     )
     assertEquals(
       listOf("1", "2", "4", "bytes:3"),
-      assertIs<Array<*>>(m["values"]).toList(),
+      assertIs<List<*>>(m["values"]),
       "values() 要给出 value 序列",
     )
     assertEquals(
       listOf("a|1|<absent>", "a|2|<absent>", "b|4|<absent>", "file|bytes:3|x.bin"),
-      assertIs<Array<*>>(m["entries"]).toList(),
+      assertIs<List<*>>(m["entries"]),
       "entries() 要给出 [name, value, filename] 三元组（forEach 就走它）",
     )
   }

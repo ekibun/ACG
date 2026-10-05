@@ -41,7 +41,8 @@ Kotlin 侧对应 `JSInvokable { argv -> … }`：**lambda 只有一个值参数*
 **这个错只有真派发才暴露** —— 桩测试都自己实现 [JSInvokable] 接口、直接拿 `argv`，
 所以三条老测试全绿。`JsEngineDispatchTest` 第一次跑就撞上了它。
 
-实参走 `args` 数组**不改变所有权语义**（查 `cxx/quickjs/quickjs.cpp` 的 `jsToJava`）：
+实参走 `args` 数组**不改变所有权语义**（查 `QuickJS.jsToJava`，2026-10-05 起转换在
+Kotlin 侧）：
 函数元素与顶层 `argv` 走的是同一个函数分支，产出的 `JSFunction` 一票归「拿到它的人」
 `free()`；数组元素为 JS `null` 时得到 Java `null`，与顶层位置参数同路。
 
@@ -144,8 +145,8 @@ Kotlin 用手攥的 `CompletableDeferred` 决定何时放行」—— 那个闸�
 
 ⚠️ **断言 JS 返回值时别套 `JSON.stringify`** —— 真派发的返回路径就是 `jsToJava`
 （`cxx/quickjs/quickjs.cpp`）：JS 普通对象**整图展开**成 `java.util.LinkedHashMap`、
-数组展开成 `ObjectArray`（Kotlin 侧是 `Array<*>`，不是 `List`）、`ArrayBuffer` 变 `ByteArray`。
-所以测试里直接 `return {…}`，Kotlin 侧 `assertIs<Map<*, *>>` / `assertIs<Array<*>>` 就行；
+数组展开成 `List`（`ArrayList` 实例）、`ArrayBuffer` 变 `ByteArray`。
+所以测试里直接 `return {…}`，Kotlin 侧 `assertIs<Map<*, *>>` / `assertIs<List<*>>` 就行；
 套了 `JSON.stringify` 会得到 `String`（`assertIs<Map>` 当场红），而且 `ArrayBuffer`
 还会被降级成 `{}` —— 顺带丢掉了「它其实是个有长度的二进制缓冲」这条信息。
 这条等价于「断言 Kotlin 侧真实的跨语言类型」，比断言 JSON 文本更贴近生产路径。
