@@ -86,7 +86,8 @@ class HttpIO(
     Http.request(
       options +
         mapOf(
-          "headers" to (options["headers"] as? Map<*, *> ?: mapOf<Any, Any>()) +
+          "headers" to
+            (options["headers"] as? Map<*, *> ?: mapOf<Any, Any>()) +
             mapOf(
               "range" to "bytes=$start-",
             ),
@@ -185,9 +186,11 @@ class HttpIO(
       try {
         job.await()
       } catch (e: CancellationException) {
-        // 哨兵叫醒的收场：`job.cancel()` 让这里抛 `CancellationException`。
-        // 这就是「本轮作废」，翻 `AVERROR_EXIT` 且静默（不是故障）。
-        AvFormat.AVERROR_EXIT
+        // 哨兵叫醒的收场：`job.cancel()` 让这里抛 `CancellationException`，即「本轮作废」。
+        // 必须返回正数 `buf.size`（谎报读满 —— 字节并没有，但那条包必然被丢），不是任何错误码：
+        // 翻错误码会让 demuxer 再读一轮、重开 range 会话干等超时，`closeAsync` 被拖到 8s 量级。
+        // 逐档推演见 `http-streaming.md` 第二节。
+        buf.size
       } catch (e: Throwable) {
         // 真故障才出声。被作废叫醒的读走上面那条，落不到这里 —— 不必再查旗标。
         e.printStackTrace()

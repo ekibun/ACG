@@ -86,7 +86,7 @@ val job = async { readSuspend(buf) }
 val abort = async { signal.await(); job.cancel() }   // ✅ 只 cancel，不作声
 handler.onSignal { signal.raise() }
 try { job.await() }
-catch (e: CancellationException) { AvFormat.AVERROR_EXIT }
+catch (e: CancellationException) { buf.size }        // ✅ 谎报读满，见下一小节
 finally { abort.cancel(); handler.onSignal(null) }
 ```
 
@@ -104,6 +104,25 @@ job="coroutine#26":BlockingCoroutine{Cancelling}`。
 **`finally` 里两句都不能省**：`abort.cancel()`（哨兵正常收场时永远挂在 `signal.await()`
 上，不取消它 `runBlocking` 会一直等）、`handler.onSignal(null)`（摘投递口 ——
 正常返回 / 作废收场 / 真故障三条路都要摘，否则下一条会话会被上一条的死读误伤）。
+
+### 作废收场返回正数 `buf.size`，不是任何错误码
+
+被叫醒的那次读必须返回一个**正数**，且取本次请求的长度 `buf.size`（`buf` 是调用方的、
+并没有真的填）。这是让 demuxer **就此收手**的唯一办法，三种返回实测（2026-10-06，
+BBB faststart 素材 + `TestMediaServer`）：
+
+| 返回 | ffmpeg 侧的走向 | 后果 |
+| --- | --- | --- |
+| 负值（`AVERROR_EOF` / `AVERROR_EXIT` / `AVERROR(EAGAIN)` 实测都一样） | `ff_read_packet`（demux.c:660）的 `if (err < 0)` 分支：`raw_packet_buffer` 非空且 `request_probe > 0` 时 `!pktl \|\| err == AVERROR(EAGAIN)`（demux.c:668）都不成立 ⇒ `continue` **再读一次** | 多出来的那次读没有 abort 可用 ⇒ 开一条**新 range 会话**、干等闲置超时 —— `closeAsync` 被拖到 **8 s** 量级 |
+| `0` | `avio_read` 的 bypass 直读分支（`size > buffer_size`，开流路径正是）里 `size -= 0` 恒真 | 回调被**原地死循环**重调，连开流都过不去 |
+| 正数 | `read_packet` 正常返回 ⇒ `handle_new_packet` ⇒ `err == 0` ⇒ 当场 `return`（demux.c:687），**不循环** | 作废后再无重进，`closeAsync` **43 ms** 返回 |
+
+**谎报「读满」为什么安全**：返回的字节并没有被读出来，但这条数据必然被丢弃 ——
+读作业把它交进 `AvFormat.packetChannel` 时通道已被 `resetChannel` 掀掉，`send` 当场抛错、
+读作业收场，包永远到不了解码器。「谎报读满」在这里只是让 demuxer 停下的手段。
+
+**值取 `buf.size` 而不是随便一个正数**：`append_packet_chunked`（utils.c）的 `do/while`
+靠 `ret == read_size` 才继续凑包（`ret != read_size` 即 `break`），一次请求的长度正好对上。
 
 ## 三、为什么 `abort` **只叫醒**、不掀会话
 
@@ -177,8 +196,9 @@ TCP 往返 + TLS + 响应头的固定成本。量用 `Http.Response.availableFor
 ## 六、通道存量（`availableForRead`）的三个反直觉点
 
 `Http.Response.availableForRead` 量的是 `readBuffer.buffer.size`，是「网络已经付过、ffmpeg 还没拿到」
-的那部分。下面三条都是实测来的（探针见 `HttpBufferedAmountProbeTest` /
-`HttpSkipThresholdTest`），**每一条都能让上层判断错**：
+的那部分。下面三条都是实测来的（探针见 `HttpBufferedAmountProbeTest`；判据级用例见
+`HttpReadContractTest` 的 `forwardSeekWithinBufferedRangeKeepsSessionButFarSeekDoesNot`），
+**每一条都能让上层判断错**：
 
 1. **通道没建时它返回 0，而那个 0 不代表「网络上什么都没下」。** 下载与它无关：
    `Http.request` 拿到响应时引擎侧**已经在拉 body** 了（实测：一次 `read` 都没调、

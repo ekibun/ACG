@@ -4,10 +4,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import soko.ekibun.TestMedia
 import soko.ekibun.acg.player.FileIO
 import java.nio.ByteBuffer
-import java.nio.file.Files
-import java.nio.file.Path
 import java.util.Collections
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -26,7 +25,7 @@ import kotlin.test.assertTrue
  *
  * 用**真 native 上下文**（`initNative` 真跑，走的是真正的 `getBuffer`）+ **空设备**
  * （不碰 SDL / 声卡；音频只用挂起模拟设备节拍）—— 不需要任何设备就能在 jvmTest 里跑。
- * 素材是仓库根下的 `.workbuddy/test.mp4`（gitignore），找不到就跳过。
+ * 素材用随源码入库的 [TestMedia.BBB_640X360_12S_FASTSTART]，换台机器 / CI 也真跑。
  */
 class AvPlaybackBufferReuseTest {
   /** 真上下文 + 空设备：只记下每帧拿到的缓冲地址。 */
@@ -73,26 +72,12 @@ class AvPlaybackBufferReuseTest {
     override suspend fun stop() = Unit
   }
 
-  private fun findVideo(): Path? {
-    var dir: Path? = Path.of("").toAbsolutePath()
-    while (dir != null) {
-      val candidate = dir.resolve(".workbuddy/test.mp4")
-      if (Files.exists(candidate)) return candidate
-      dir = dir.parent
-    }
-    return null
-  }
-
-  @Test
+  @Test(timeout = 120_000)
   fun videoBufferIsZeroCopyAndReused() {
-    val url = findVideo()
-    if (url == null) {
-      println("skip: .workbuddy/test.mp4 not found (gitignored, not shipped with the repo)")
-      return
-    }
+    val media = TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART)
     runBlocking {
       val sink = Sink()
-      val player = FFPlayer(url.toString(), FileIO.Handler(), sink)
+      val player = FFPlayer(media.toString(), FileIO.Handler(), sink)
       try {
         val video = player.getStreams().first { it.codecType == AVMediaType.VIDEO }
         val job = launch { player.play(mapOf(AVMediaType.VIDEO to video), 0) }

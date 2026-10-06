@@ -1,12 +1,8 @@
 package soko.ekibun.acg.player
 
-import com.sun.net.httpserver.HttpExchange
-import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
+import soko.ekibun.TestMediaServer
 import soko.ekibun.acg.common.Http
-import java.net.InetSocketAddress
-import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -36,62 +32,10 @@ import kotlin.test.assertTrue
  * 落在服务端第几次 write 之后）⇒ **不能**拿「缓冲非空」当断言。「缓冲能堆起来」由快发那条钉。
  */
 class HttpBufferedAmountProbeTest {
-  /** 慢发媒体服务：认 Range（206），记录打过来几次请求。 */
-  private class MediaServer(
-    private val body: ByteArray,
-    private val chunkSize: Int = 4096,
-    private val chunkDelayMs: Long = 10,
-  ) : AutoCloseable {
-    private val pool = Executors.newFixedThreadPool(4)
-    private val requests = AtomicInteger(0)
-    val requestCount: Int get() = requests.get()
-
-    private val server =
-      HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
-        executor = pool
-        createContext("/media.bin") { handle(it) }
-        start()
-      }
-
-    val url: String get() = "http://127.0.0.1:${server.address.port}/media.bin"
-
-    private fun handle(exchange: HttpExchange) {
-      requests.incrementAndGet()
-      val rangeStart =
-        exchange.requestHeaders
-          .getFirst("Range")
-          ?.removePrefix("bytes=")
-          ?.substringBefore('-')
-          ?.toIntOrNull()
-          ?: 0
-      val status = if (rangeStart > 0) 206 else 200
-      val length = body.size - rangeStart
-      if (status == 206) {
-        exchange.responseHeaders.add("Content-Range", "bytes $rangeStart-${body.size - 1}/${body.size}")
-      }
-      exchange.sendResponseHeaders(status, length.toLong())
-      exchange.responseBody.use { out ->
-        var position = rangeStart
-        while (position < body.size) {
-          val count = minOf(chunkSize, body.size - position)
-          out.write(body, position, count)
-          out.flush()
-          position += count
-          if (chunkDelayMs > 0) Thread.sleep(chunkDelayMs)
-        }
-      }
-    }
-
-    override fun close() {
-      server.stop(0)
-      pool.shutdownNow()
-    }
-  }
-
   @Test(timeout = 60_000)
   fun measuresHowMuchIsLeftInTheChannelAfterSequentialReads() {
     val body = ByteArray(512 * 1024) { (it % 251).toByte() }
-    MediaServer(body, chunkSize = 4096, chunkDelayMs = 10).use { server ->
+    TestMediaServer(body, chunkDelayMs = 10).use { server ->
       val rsp =
         runBlocking {
           Http.request(
@@ -117,7 +61,7 @@ class HttpBufferedAmountProbeTest {
           "[probe] 读到的字节数 / 读后通道存量：" +
             samples.joinToString(prefix = "[", postfix = "]") { "${it.first}/${it.second}" },
         )
-        println("[probe] body=${body.size}B  服务端被打了 ${server.requestCount} 次")
+        println("[probe] body=${body.size}B  服务端被打了 ${server.requests} 次")
         println("[probe] 末次存量=$lastBuffered B（约 ${lastBuffered / 1024.0} KiB）")
 
         // **不**断言「缓冲非空」：慢发下存量是**竞态**（实测出现过 `[4096, 4096, 0, ...]`，
@@ -134,7 +78,7 @@ class HttpBufferedAmountProbeTest {
         )
         println("[probe]anyNonZero=$anyNonZero（竞态，仅记录不作断言）")
 
-        assertEquals(1, server.requestCount, "整个探针期间不该重开会话（这条只验单会话连续读）")
+        assertEquals(1, server.requests, "整个探针期间不该重开会话（这条只验单会话连续读）")
       } finally {
         rsp.close()
       }
@@ -154,7 +98,7 @@ class HttpBufferedAmountProbeTest {
   fun fastServerAccumulatesMoreThanSlowServer() {
     val body = ByteArray(4 * 1024 * 1024) { (it % 251).toByte() }
     // 块间不睡：让服务端以本机速度灌满 TCP 缓冲，写侧放开跑。
-    MediaServer(body, chunkSize = 64 * 1024, chunkDelayMs = 0).use { server ->
+    TestMediaServer(body, chunkSize = 64 * 1024).use { server ->
       val rsp =
         runBlocking {
           Http.request(
@@ -186,7 +130,7 @@ class HttpBufferedAmountProbeTest {
           afterRead <= 1024 * 1024 + 64 * 1024,
           "快发时存量应在 1 MiB 上限附近，实际 $afterRead B —— 背压理解有误？",
         )
-        assertEquals(1, server.requestCount, "快发期间不该重开会话")
+        assertEquals(1, server.requests, "快发期间不该重开会话")
       } finally {
         rsp.close()
       }

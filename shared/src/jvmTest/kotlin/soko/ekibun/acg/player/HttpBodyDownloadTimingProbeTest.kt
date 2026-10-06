@@ -1,12 +1,8 @@
 package soko.ekibun.acg.player
 
-import com.sun.net.httpserver.HttpExchange
-import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
+import soko.ekibun.TestMediaServer
 import soko.ekibun.acg.common.Http
-import java.net.InetSocketAddress
-import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -19,51 +15,14 @@ import kotlin.test.assertTrue
  * 两者对 seek 判据的含义完全相反。
  *
  * 服务端只管把 body 写完（**不等**客户端读），并统计**服务端实际写出去多少字节**。
- * 若 `bytesSent` 在客户端一次 `read` 之前就已经很大 ⇒ **下载与 `bodyAsChannel()`
+ * 若 [TestMediaServer.served] 在客户端一次 `read` 之前就已经很大 ⇒ **下载与 `bodyAsChannel()`
  * 无关**，ktor 在拿到响应时就已经在拉了。
  */
 class HttpBodyDownloadTimingProbeTest {
-  private class CountingServer(
-    private val body: ByteArray,
-    private val chunkSize: Int = 64 * 1024,
-  ) : AutoCloseable {
-    private val pool = Executors.newFixedThreadPool(4)
-    private val sent = AtomicLong(0)
-    val bytesSent: Long get() = sent.get()
-
-    private val server =
-      HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
-        executor = pool
-        createContext("/media.bin") { handle(it) }
-        start()
-      }
-
-    val url: String get() = "http://127.0.0.1:${server.address.port}/media.bin"
-
-    private fun handle(exchange: HttpExchange) {
-      exchange.sendResponseHeaders(200, body.size.toLong())
-      exchange.responseBody.use { out ->
-        var pos = 0
-        while (pos < body.size) {
-          val n = minOf(chunkSize, body.size - pos)
-          out.write(body, pos, n)
-          out.flush()
-          sent.addAndGet(n.toLong())
-          pos += n
-        }
-      }
-    }
-
-    override fun close() {
-      server.stop(0)
-      pool.shutdownNow()
-    }
-  }
-
   @Test(timeout = 60_000)
   fun downloadsBeforeBodyAsChannelIsEverCalled() {
     val body = ByteArray(2 * 1024 * 1024) { (it % 251).toByte() }
-    CountingServer(body).use { server ->
+    TestMediaServer(body, chunkSize = 64 * 1024, honorRange = false).use { server ->
       // 建连。这一步内部会调 `delegate.bodyAsChannel()` 吗？—— 那正是要测的。
       val rsp =
         runBlocking {
@@ -77,12 +36,12 @@ class HttpBodyDownloadTimingProbeTest {
       try {
         // 关键观测点：**一次 read 都没调**（`availableForRead` 此时必为 0，因为通道没建）。
         assertEquals(0, rsp.availableForRead, "通道没建时 availableForRead 应为 0")
-        val sentBeforeRead = server.bytesSent
+        val sentBeforeRead = server.served
         println("[probe-timing] 第一次 read 之前，服务端已写出 ${sentBeforeRead}B / 共 ${body.size}B")
 
         // 不调 read，只等一会儿，看服务端能推多少。
         Thread.sleep(500)
-        val sentAfterWait = server.bytesSent
+        val sentAfterWait = server.served
         println("[probe-timing] 空等 500ms 后，服务端已写出 ${sentAfterWait}B / 共 ${body.size}B")
 
         // 断言一：还没 read 过，服务端**已经**在往外推数据 ⇒ 下载不由 `bodyAsChannel()` 触发。
@@ -113,7 +72,7 @@ class HttpBodyDownloadTimingProbeTest {
         val afterRead = rsp.availableForRead
         println(
           "[probe-timing] 第一次 read 拿到 ${firstRead}B、之后 availableForRead=$afterRead B" +
-            "（此刻服务端共写出 ${server.bytesSent}B）",
+            "（此刻服务端共写出 ${server.served}B）",
         )
         assertTrue(
           afterRead > 0,

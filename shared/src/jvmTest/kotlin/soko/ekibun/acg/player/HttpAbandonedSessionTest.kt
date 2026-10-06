@@ -1,17 +1,38 @@
 package soko.ekibun.acg.player
 
-import com.sun.net.httpserver.HttpServer
-import soko.ekibun.TestIo
-import soko.ekibun.ffmpeg.AvFormat
+import soko.ekibun.TestMediaServer
 import soko.ekibun.ffmpeg.AvIO
-import java.net.InetSocketAddress
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class HttpAbandonedSessionTest {
+  /**
+   * 一次**可能永久阻塞**的 [AvIO.read]，丢到**守护线程**上跑并给 `join` 带上超时。
+   *
+   * 测试不许被它吊死 —— 一次没回来的读会让整个构建挂住。超时就把线程栈打出来再失败，
+   * 站在报告里能直接看出卡在哪。
+   */
+  private fun readBounded(
+    io: AvIO,
+    size: Int,
+    timeoutMs: Long = 10_000,
+  ): Int {
+    val result = AtomicInteger(Int.MIN_VALUE)
+    val reader =
+      Thread { result.set(io.read(ByteArray(size))) }.apply {
+        isDaemon = true
+        start()
+      }
+    reader.join(timeoutMs)
+    if (reader.isAlive) {
+      println("[diag] read($size) 在 ${timeoutMs}ms 内没返回，栈：\n" + reader.stackTrace.joinToString("\n"))
+      throw AssertionError("read($size) 在 ${timeoutMs}ms 内没有返回（见 stdout 的栈）")
+    }
+    return result.get()
+  }
+
   /**
    * 服务端**完全忽略 Range**、一路 200 从 0 重发。`getRange` 建好响应之后如果在前推途中抛出
    * （abort 正好落在前推中间），那条响应不能没人关 —— 它已经挂到 `cachedRsp` 上了，读自己的
@@ -23,46 +44,17 @@ class HttpAbandonedSessionTest {
   @Test(timeout = 120_000)
   fun abandonedSessionIsClosedWhenAdvanceToThrows() {
     val body = ByteArray(200_000) { (it % 251).toByte() }
-    val entered = AtomicInteger(0)
-    val exited = AtomicInteger(0)
-    val pool = Executors.newFixedThreadPool(8)
-    val server =
-      HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
-        executor = pool
-        createContext("/media.bin") { exchange ->
-          entered.incrementAndGet()
-          // 完全忽略 Range：一律 200 + 从 0 给整个 body。
-          exchange.sendResponseHeaders(200, 0)
-          val out = exchange.responseBody
-          try {
-            var position = 0
-            while (position < body.size) {
-              out.write(body, position, minOf(4096, body.size - position))
-              out.flush()
-              position += 4096
-              Thread.sleep(80)
-            }
-            // 心跳：持续探socket，客户端一关就能尽快察觉。
-            while (true) {
-              out.write(1)
-              out.flush()
-              Thread.sleep(50)
-            }
-          } catch (_: Exception) {
-            // 管道断 / 复位 == 客户端松手了 —— 这正是要数的那种退出。
-          } finally {
-            exited.incrementAndGet()
-            runCatching { out.close() }
-          }
-        }
-        start()
-      }
-    val url = "http://127.0.0.1:${server.address.port}/media.bin"
-    try {
+    TestMediaServer(
+      body,
+      chunkDelayMs = 80,
+      honorRange = false,
+      declareLength = false,
+      heartbeat = true,
+    ).use { server ->
       val handler = HttpIO.Handler()
-      val io = handler.open(url)
+      val io = handler.open(server.url)
       // 先读一次让会话存在，再把它丢掉：`cachedRsp` 变 null。
-      assertTrue(TestIo.readBounded(io, 4096) > 0, "first read")
+      assertTrue(readBounded(io, 4096) > 0, "first read")
       io.close()
 
       // 逻辑 offset 拉得很远；`cachedRsp` 是 null，所以下一次读必须在网络游标 0 上新建一条
@@ -84,17 +76,14 @@ class HttpAbandonedSessionTest {
 
       // 静默期：等每个 handler 察觉并退出。
       val deadline = System.nanoTime() + 8_000_000_000L
-      while (System.nanoTime() < deadline && exited.get() < entered.get()) Thread.sleep(50)
-      println("ret=$ret entered=${entered.get()} exited=${exited.get()} leaked=${entered.get() - exited.get()}")
-      assertEquals(AvFormat.AVERROR_EXIT, ret, "aborted read must report AVERROR_EXIT")
+      while (System.nanoTime() < deadline && server.exited < server.entered) Thread.sleep(50)
+      println("ret=$ret entered=${server.entered} exited=${server.exited} leaked=${server.entered - server.exited}")
+      assertEquals(4096, ret, "aborted read must report a full-buffer read (buf.size)")
       assertEquals(
-        entered.get(),
-        exited.get(),
+        server.entered,
+        server.exited,
         "a session was left parked (entered>exited): the response abandoned by discard is never closed",
       )
-    } finally {
-      server.stop(0)
-      pool.shutdownNow()
     }
   }
 }

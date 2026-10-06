@@ -4,83 +4,111 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import soko.ekibun.TestMedia
 import soko.ekibun.ffmpeg.AVMediaType
+import soko.ekibun.ffmpeg.AvFormat
+import soko.ekibun.ffmpeg.AvPlayback
 import soko.ekibun.ffmpeg.FFPlayer
-import java.nio.file.Files
-import java.nio.file.Path
+import java.nio.ByteBuffer
+import java.util.Collections
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * 单帧步进登记的前后帧时间戳（[FFPlayer] 的 `lastFrameTs` / `prevFrameTs`）。
+ * 单帧步进（[FFPlayer.stepForward] / [FFPlayer.stepBack]）前后的**显示帧序列**。
  *
- * 素材是仓库根下的 `.workbuddy/test.mp4` —— 那个目录整体 gitignore，所以**没有素材就跳过**
- * （与仓库里"环境不全就返回"的用例同一种做法，见 `NativeWebViewHostTest`）。
+ * 观测点是 [AvPlayback.onFrame]（`FFPlayer` 每显示一帧时回调当前时间戳、播完回调 `null`）——
+ * 这是播放器的**公开输出**，不是内部字段。判据直接落在「画面上换成了哪一帧」上：
+ * 前进时时间戳单调推进，后退时沿原路一帧一帧走回去。
  *
  * 为什么值得留：这条路走错时的症状全是**不报错**的 —— 每按一次「前进一帧」跳过一帧、
  * 或退帧落到隔一帧的位置，光看画面看不出是代码错了。实测踩过一次（播放轮次结束时，
- * 队列把"已取到但没显示"的那一帧丢掉，于是只有一半的帧能靠步进走到），所以留个用例。
+ * 队列把「已取到但没显示」的那一帧丢掉，于是只有一半的帧能靠步进走到），所以留个用例。
  *
- * 位置没法从公开 API 观察（进度是 [FFPlayer.play] 那条路里的 `Playback.onFrame` 给的），
- * 所以用反射读那两个私有字段 —— 至少不为了测试在生产代码上开钩子。
+ * 素材用随源码入库的 [TestMedia.BBB_640X360_12S_FASTSTART]（h264 25fps），换台机器 / CI 也真跑。
  */
 class FFPlayerStepTest {
-  private fun FFPlayer.field(name: String): Long? {
-    val field = FFPlayer::class.java.getDeclaredField(name)
-    field.isAccessible = true
-    return field.get(this) as Long?
+  /**
+   * 空播放设备：只把 [AvPlayback.onFrame] 的时间戳收进 [frames]，不送显不送声。
+   *
+   * `frames` 当**构造参数**传：super 实参位置上的 lambda 只能引用构造参数 —— 引用类体属性
+   * 捕获的是还没初始化的 `this`（`Pointer` KDoc 记过的坑）。播放线程写、测试协程并发读 ⇒ 同步列表。
+   */
+  private class Sink(
+    val frames: MutableList<Long?> = Collections.synchronizedList(ArrayList<Long?>()),
+  ) : AvPlayback({ v -> frames.add(v) }, { }) {
+    override val sampleRate: Int = 48_000
+    override val channels: Int = 2
+    override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_S16
+
+    override suspend fun flushAudioBuffer(buf: ByteBuffer): Int = 0
+
+    override fun flushVideoBuffer(
+      buf: ByteBuffer,
+      width: Int,
+      height: Int,
+    ) = Unit
+
+    override suspend fun resume() = Unit
+
+    override suspend fun pause() = Unit
+
+    override suspend fun stop() = Unit
   }
 
-  private fun FFPlayer.state(): Pair<Long?, Long?> = field("lastFrameTs") to field("prevFrameTs")
+  /** 从 `frames` 里截出**本次动作新增**的那些非 null 时间戳。 */
+  private fun List<Long?>.since(mark: Int): List<Long> = drop(mark).filterNotNull()
 
-  /** 从测试的工作目录往上找仓库根下的素材；找不到就返回 null（用例跳过）。 */
-  private fun findVideo(): Path? {
-    var dir: Path? = Path.of("").toAbsolutePath()
-    while (dir != null) {
-      val candidate = dir.resolve(".workbuddy/test.mp4")
-      if (Files.exists(candidate)) return candidate
-      dir = dir.parent
-    }
-    return null
-  }
-
-  @Test
+  @Test(timeout = 120_000)
   fun stepForwardAndBackWalkFrames() {
-    val url = findVideo()
-    if (url == null) {
-      println("skip: .workbuddy/test.mp4 not found (gitignored, not shipped with the repo)")
-      return
-    }
+    val media = TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART)
+    val sink = Sink()
     runBlocking {
-      val player = FFPlayer(url.toString(), FileIO.Handler(), null)
+      val player = FFPlayer(media.toString(), FileIO.Handler(), sink)
       try {
         val video = player.getStreams().first { it.codecType == AVMediaType.VIDEO }
         // play() 要一直挂到整个播放轮次结束（withContext 会等自己的子协程，而轮次就是那个
         // 子协程），所以不能 await —— UI 里也是 fire-and-forget 地 launch。
         val playJob = launch { player.play(mapOf(AVMediaType.VIDEO to video), 0) }
-        withTimeout(10_000) {
-          while (player.state().first == null) delay(5)
-        }
+        // 等到至少显示过一帧（onFrame 非 null 回调），再暂停 —— 步进要有「当前帧」才能走。
+        withTimeout(10_000) { while (sink.frames.none { it != null }) delay(5) }
         player.pause()
         playJob.join()
 
-        // 连续前进：每一步的「前一帧」都要接得上上一步的「当前帧」，且时间戳必须前进
+        val beforeSteps = sink.frames.size
+
+        // 连续前进：每一次「新增的显示帧」都要接得上，且时间戳必须单调前进。
         val forward =
           (0 until 5).map {
+            val mark = sink.frames.size
             player.stepForward()
-            player.state()
+            sink.frames.since(mark).singleOrNull()
+              ?: error("stepForward 应当恰好显示一帧，实际新增 ${sink.frames.since(mark)}")
           }
         forward.zipWithNext().forEach { (a, b) ->
-          assertEquals(a.first, b.second, "prevFrameTs should be the previous current frame: $a -> $b")
-          assertTrue(b.first!! > a.first!!, "timestamps must move forward: $a -> $b")
+          assertTrue(b > a, "步进的时间戳必须前进：$a -> $b")
+        }
+        // 步长应当是恒定的帧间隔（这条素材 25fps ⇒ 40000µs）。
+        val step = forward[1] - forward[0]
+        forward.zipWithNext().forEach { (a, b) ->
+          assertEquals(step, b - a, "帧间隔应当恒定：$forward")
         }
 
-        // 连续后退：沿原路一帧一帧走回去，连「前一帧」也要对上
-        forward.dropLast(1).asReversed().forEach { expect ->
-          assertTrue(player.stepBack(), "stepBack should succeed")
-          assertEquals(expect, player.state(), "state after stepBack should be $expect")
-        }
+        // 连续后退：沿原路一帧一帧走回去，每一步的显示帧都要等于前进时的对应帧。
+        val back =
+          (0 until 4).map {
+            val mark = sink.frames.size
+            assertTrue(player.stepBack(), "stepBack 应当成功")
+            sink.frames.since(mark).singleOrNull()
+              ?: error("stepBack 应当恰好显示一帧，实际新增 ${sink.frames.since(mark)}")
+          }
+        assertEquals(
+          forward.dropLast(1).asReversed(),
+          back,
+          "后退应当沿前进的原路一帧一帧走回去：forward=$forward back=$back",
+        )
+        assertTrue(sink.frames.size > beforeSteps, "步进应当持续产生 onFrame 回调")
       } finally {
         player.closeAsync()
       }

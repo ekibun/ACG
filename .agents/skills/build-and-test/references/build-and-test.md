@@ -25,6 +25,42 @@ JAVA_HOME=<任意一份 JDK> ./gradlew :androidApp:assembleDebug                
 [`cxx/AGENTS.md`](../../../../cxx/AGENTS.md)）、**Android SDK**（`local.properties` 里的 `sdk.dir`，
 本机私有、已忽略）。
 
+### 调试播放：本地媒体服务器（test 与桌面端共用）
+
+hotRun 的应用进程由 premain agent（`DevToolsAgent`）托管 dev 服务器：**agent 在应用启动时
+spawn 服务器进程、应用退出时经 shutdown hook 一并收场** —— 服务器与应用进程同生共死，Gradle
+侧没有任何 start/stop 任务。素材与端口用 `-PdevMedia=<路径>` / `-PdevPort=<n>` 指定；
+硬杀 Gradle 客户端的残留，下一次 hotRun spawn 前会按 PID 文件自愈（清掉再起新的）。
+手动常驻（curl 调试，无控制条）：
+
+```bash
+JAVA_HOME=<任意一份 JDK> ./gradlew :shared:devMediaServer   # 默认素材即入库测试媒体、端口 8099
+JAVA_HOME=<任意一份 JDK> ./gradlew :shared:devMediaServer --args="--port 9000 --media D:/x.mp4"
+```
+
+（任务在 `:shared` 而不是 `:desktopApp`：`DevServerKt` / `DevToolsAgent` / `DevStrip` 与
+`TestMediaServer` 同住 `:shared` 的 jvmTest，同模块直取测试类路径最省事；`:desktopApp` 只是
+hotRun 的宿主，它的 `hotRun` 由 `:shared` 侧经 `evaluationDependsOn(":desktopApp")` 反向注入
+`-javaagent` 与 `-D`。）
+
+- PlayScreen 的默认 URL 就是它（`http://127.0.0.1:8099/media`）；应用主窗口右上角会有一条
+  **无标题栏的 DEV 控制条**（冻结 / 恢复 / 限速 / 不限速，**Compose/material3 绘制**）——
+  由 premain agent（`shared:devToolsAgentJar` 产的 jar，`-javaagent` 挂进应用进程）在主窗口
+  OPENED 时创建：无边框/owner/跟随靠 AWT `Window(owner)` 外壳（ComposeWindow 是 JFrame 拿不到
+  owner），内容是 `ComposePanel`；Compose 类经 parent-first 委派用的是**应用自己的**那份运行时，
+  面板代码本身经 `-Dacg.dev.classpath` 的子 ClassLoader 装载，应用类路径与生产打包上都没有它
+  （架构照 hot reload 的 devToolsClasspath 模式）。控制条与 dev 服务器的对话走 `/__control/*`。
+  （曾走过两条弯路：往应用组合树挂 Compose 面板 —— hot reload 插件自己解析类路径写
+  `build/run/main/main.argfile`，对 `JavaExec.classpath` 的外部追加会被静默丢弃，只有 jvmArgs
+  能落地；后来又试过 dev 进程自建独立窗 —— 跨进程拿不到 AWT owner，无法跟随主窗口。）
+- 播放中途热改行为：`curl http://127.0.0.1:8099/__control/freeze`（掐断，复现 stall 收场）、
+  `/resume`、`/throttle?bps=<n>`（0 = 解除），响应是当前状态；`/shutdown` 结束 dev 进程。
+- 素材缺省用随源码入库的测试媒体（moov 在头的 faststart，见 `TestMedia`）；
+  `--media` / `-PdevMedia` 可换任意本地文件。
+- **测试不经过这个常驻进程**：用例各自进程内起自己的 `TestMediaServer`（ephemeral 端口、
+  计数器隔离）—— 常驻实例会让请求计数与冻结状态跨用例串味。细节见
+  `shared/src/jvmTest/kotlin/soko/ekibun/DevServer.kt` 的 KDoc。
+
 **结果落盘再读**，别靠终端实时输出下判断：Windows 上 JVM 按控制台代码页编解码，与 UTF-8 的日志
 对不上就是乱码。加 `--console=plain` 让输出变成可线性读的纯文本。
 

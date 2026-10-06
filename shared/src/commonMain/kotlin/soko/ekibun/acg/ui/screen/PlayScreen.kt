@@ -36,7 +36,7 @@ import soko.ekibun.ffmpeg.FFPlayer
 fun PlayScreen() {
   val playback = remember { mutableStateOf<Playback?>(null) }
   val url =
-    remember { mutableStateOf("https://media.w3.org/2010/05/sintel/trailer.mp4") }
+    remember { mutableStateOf("http://127.0.0.1:8099/media") }
   val player = remember { mutableStateOf<FFPlayer?>(null) }
   val duration = remember { mutableFloatStateOf(0f) }
   val pts = remember { mutableFloatStateOf(0f) }

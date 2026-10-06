@@ -1,14 +1,8 @@
 package soko.ekibun.acg.player
 
-import com.sun.net.httpserver.HttpExchange
-import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
+import soko.ekibun.TestMediaServer
 import soko.ekibun.acg.common.Http
-import java.net.InetSocketAddress
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertTrue
 
@@ -22,69 +16,17 @@ import kotlin.test.assertTrue
  * 3. [soko.ekibun.acg.common.Http.Response.close] 才是结束会话的那一下（对照：不 close 会漏连接）。
  */
 class RunBlockingExitProbeTest {
-  /**
-   * 分块慢发 + 记进出场：发完 [chunks] 块后**继续发心跳**直到 [stopped] ——
-   * 客户端撒手时服务端要尽快察觉到，否则 `exited` 永远追不上 `entered`。
-   */
-  private class SlowServer(
-    private val chunks: Int,
-    private val chunkSize: Int,
-    private val delayMs: Long,
-  ) : AutoCloseable {
-    private val pool = Executors.newFixedThreadPool(2)
-    private val stopped = CountDownLatch(1)
-    private val block = ByteArray(chunkSize) { (it % 251).toByte() }
-
-    val entered = AtomicInteger(0)
-    val exited = AtomicInteger(0)
-
-    private val server =
-      HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
-        executor = pool
-        createContext("/media.bin") { serve(it) }
-        start()
-      }
-
-    val url: String get() = "http://127.0.0.1:${server.address.port}/media.bin"
-
-    private fun serve(exchange: HttpExchange) {
-      entered.incrementAndGet()
-      try {
-        exchange.sendResponseHeaders(200, 0)
-        val out = exchange.responseBody
-        try {
-          repeat(chunks) {
-            out.write(block)
-            out.flush()
-            Thread.sleep(delayMs)
-          }
-          while (!stopped.await(0, TimeUnit.MILLISECONDS)) {
-            out.write(1)
-            out.flush()
-            Thread.sleep(50)
-          }
-        } finally {
-          runCatching { out.close() }
-        }
-      } catch (_: Exception) {
-        // Broken pipe / reset == 客户端放掉了。
-      } finally {
-        exited.incrementAndGet()
-      }
-    }
-
-    override fun close() {
-      stopped.countDown()
-      server.stop(0)
-      pool.shutdownNow()
-    }
-  }
-
   @Test(timeout = 60_000)
   fun runBlockingReturnsBeforeBodyFinishedAndConnectionStaysUsable() {
     val chunk = 4096
     val chunks = 10
-    SlowServer(chunks = chunks, chunkSize = chunk, delayMs = 300).use { server ->
+    TestMediaServer(
+      body = ByteArray(chunks * chunk) { (it % 251).toByte() },
+      chunkDelayMs = 300,
+      honorRange = false,
+      declareLength = false,
+      heartbeat = true,
+    ).use { server ->
       val wholeMs = (chunks - 1) * 300L
       var afterExit = 0
 
@@ -122,7 +64,13 @@ class RunBlockingExitProbeTest {
 
   @Test(timeout = 60_000)
   fun closeIsWhatEndsTheSessionNotRunBlockingExit() {
-    SlowServer(chunks = 20, chunkSize = 4096, delayMs = 200).use { server ->
+    TestMediaServer(
+      body = ByteArray(20 * 4096) { (it % 251).toByte() },
+      chunkDelayMs = 200,
+      honorRange = false,
+      declareLength = false,
+      heartbeat = true,
+    ).use { server ->
       val rsp =
         runBlocking {
           val r = Http.request(mapOf("url" to server.url))
@@ -131,16 +79,16 @@ class RunBlockingExitProbeTest {
         }
       // 不 close：runBlocking 早已返回，但会话还挂着 ⇒ 服务端 handler 不出场。
       Thread.sleep(1_500)
-      val leaked = server.entered.get() > server.exited.get()
+      val leaked = server.entered > server.exited
       runBlocking { rsp.close() }
       Thread.sleep(800)
       assertTrue(
         leaked,
-        "不 close 时连接应一直挂着（entered=${server.entered.get()} exited=${server.exited.get()}）",
+        "不 close 时连接应一直挂着（entered=${server.entered} exited=${server.exited}）",
       )
       assertTrue(
-        server.entered.get() == server.exited.get(),
-        "close 之后 handler 应收场（entered=${server.entered.get()} exited=${server.exited.get()}）",
+        server.entered == server.exited,
+        "close 之后 handler 应收场（entered=${server.entered} exited=${server.exited}）",
       )
     }
   }

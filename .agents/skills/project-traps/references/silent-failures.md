@@ -310,7 +310,7 @@
   val abort = async { signal.await(); job.cancel() }     // ✅ 只 cancel，不作声
   handler.onSignal { signal.raise() }
   try { job.await() }
-  catch (e: CancellationException) { AvFormat.AVERROR_EXIT }   // 哨兵叫醒的唯一收场
+  catch (e: CancellationException) { buf.size }          // 哨兵叫醒的唯一收场（为何返回正数见 http-streaming.md 第二节）
   finally { abort.cancel(); handler.onSignal(null) }
   ```
 
@@ -345,6 +345,14 @@
   ⇒ `FileIO.read` 必须把 `RandomAccessFile` 的 `-1`翻成 `AVERROR_EOF`。同一族的坑在
   `AvFormat.seek(whence = AVSEEK_SIZE)`：无法确定长度时返回 `-1`（AVERROR），
   **返回 0 会被 ffmpeg 当成「长度为零的流」**，把后续 seek 全判成越界。
+
+- **作废收场翻错误码而不是返回正数（Kotlin / FFmpeg，2026-10-06 实测）** → `closeAsync` **静默拖到
+  8 s 量级**。seek / close 作废读作业后，`HttpIO.read` 的 `catch (CancellationException)` 若返回
+  `AVERROR_*` 之类负值，demuxer 不就此收手而是**再读一轮**（`ff_read_packet` 的 `continue` 分支，
+  demux.c:660/668），那次读没有 abort 可用 ⇒ 开一条新 range 会话干等闲置超时；返回 `0` 更糟，
+  avio 的 bypass 直读分支 `size -= 0` 恒真、**原地死循环**。
+  ⇒ 必须返回正数 `buf.size`（谎报读满 —— 那条包必然被丢，安全）。逐档推演见
+  [`http-streaming.md`](http-streaming.md) 第二节。
 
 - **作废预读通道用 `close()` 而不是 `cancel()`（Kotlin / kotlinx.coroutines）** → **不唤醒**
   停在 `channel.send` 上的读作业：预读灌满、没人消费时读作业就停在那儿，于是作废流程里紧随其后的

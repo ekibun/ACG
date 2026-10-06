@@ -1,22 +1,18 @@
 package soko.ekibun.acg.player
 
-import com.sun.net.httpserver.HttpExchange
-import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import soko.ekibun.TestMedia
+import soko.ekibun.TestMediaServer
 import soko.ekibun.ffmpeg.AVMediaType
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvPlayback
 import soko.ekibun.ffmpeg.AvStream
 import soko.ekibun.ffmpeg.FFPlayer
 import java.io.File
-import java.io.OutputStream
-import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.util.Collections
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertTrue
@@ -30,7 +26,7 @@ import kotlin.test.assertTrue
  * `withTimeout`。这里卡在**播到一半**（已经有帧送显了），走的正是取包循环那条路。
  *
  * 冻住之后考察的是这一串：
- * 1. 服务端不再发字节（[FreezableServer.served] 不再涨）且**总长大于已发**（数据确实还没发完）——
+ * 1. 服务端不再发字节（[TestMediaServer.served] 不再涨）且**总长大于已发**（数据确实还没发完）——
  *    确认「网络真的在播放中途停了」；
  * 2. 读作业卡在 [AvFormat.getPacket] 里那次 `getPacketNative` → [HttpIO.read] 的 `runBlocking`
  *    上（[HttpIO.readSuspend] 当前是**无限重试**），那根**单线程** `formatDispatcher`
@@ -76,14 +72,19 @@ import kotlin.test.assertTrue
  *
  * ## 两条前提，缺一个这个用例就测不准
  *
- * **媒体必须自己造**（理由见 [FastStartMedia]）：仓库自带的 `TestMedia.SILENT_BLACK_25S` 只有
- * 46 KB 且 `moov` 在**尾部** —— 用它时 [FFPlayer.getStreams] **自己就卡死了**，冻结还没开始，
- * 测到的是「压根打不开流」而不是 stall。
+ * **媒体要 moov 在头部**：用随源码入库的 [TestMedia.BBB_640X360_12S_FASTSTART]（天然
+ * faststart）。moov 在**尾部**的媒体经 HttpIO 打开时 [FFPlayer.getStreams] **自己就卡死**，
+ * 断流还没开始，测到的是「压根打不开流」而不是 stall。
  *
- * **服务端必须节流**（[FreezableServer.bytesPerSecond]）：环回不节流的话 20 MB 媒体**一瞬间**
- * 就发完了（实测：22 MB 只用了 400 ms，而播放要 30 s）—— 冻结时服务端早已无字节可断，
- * 播放一路走到 EOF，判据全绿而**什么都没测到**。节流到播放消耗速率的两倍，冻结时才能保证
- * 「客户端手里还有数据没播完」。
+ * **断点要落在播放期、且剩得下数据**：faststart 素材开流只读前 ~32 KB（索引 `moov` 全在
+ * 前 11,381 字节内 ⇒ 32 KB 档位就够 probe 起来，实测 `getStreams()` 8 ms、发 196,608 字节），
+ * 所以 443 KB 的体量**足够**支撑 stall 现场 —— 「媒体必须够大」只对碎片化 mp4 成立
+ * （每个 `moof` 都要 seek 回去重读索引，开流会反复重读同一区域）。这里不靠媒体够大凑，
+ * 靠的是断点（[TestMediaServer.servedLimit]）卡在播放期、且**总长还明显大于已发**。
+ *
+ * **断点按「服务器一共发出去多少字节」计**：[TestMediaServer] 累计写到 [SERVED_LIMIT] 就停笔、
+ * 不 close。为什么用累计字节、上限怎么取，见 [TestMediaServer.servedLimit] 与 [SERVED_LIMIT]
+ * 的 KDoc。
  *
  * **播放不能等 [FFPlayer.play] 返回**：这套 [Sink] 下 `play()` 会一路跟着播完整轮才返回
  * （实测同步阻塞 30 s），等它返回就等于「等播放结束」，冻结永远晚一步。所以
@@ -96,7 +97,7 @@ import kotlin.test.assertTrue
  *
  * | 段 | 预算 | 依据 |
  * | --- | --- | --- |
- * | 转封装出媒体 | ffmpeg `-c copy -t 3`，约 0.5 s | 不重新编码，只搬 box 并截前 3 秒 |
+ * | 读素材进内存 | 感知不到 | 443 KB，随源码入库 |
  * | 开流 + 等首帧 | 10 s 上限 | 本地环回 + faststart，通常 1～2 s；上限只防「压根没播起来」 |
  * | 等停滞 | 8 s 上限，**连续 1.5 s 不出新帧就提前走** | 这才是「已经卡在网络上」的判据。**不要**改成固定时长死等 |
  * | [FFPlayer.pause] 探测 | 5 s 上限，另有 **1 s 量级上界** | 置 `playing = false` 后要等当前那个循环轮次走完（实测 7～108 ms）|
@@ -150,9 +151,8 @@ class FFPlayerStallMidPlaybackTest {
    * 空播放设备：只记帧数与事件上报，不送显不送声（`flushVideoBuffer` 不碰像素，`flushAudioBuffer`
    * 按采样数 `delay` 当声卡节拍，让播放按真实时长推进）。不碰 SDL / 声卡 ⇒ jvmTest 里能跑。
    *
-   * `events` 必须当**构造参数**传进 super（照 [FFPlayerAudioOnlyTest] 同一个坑）：写在 super
-   * 实参位置上的 lambda 会隐式捕获还没初始化的 `this`，那一行 `{ events.add(it) }` 在 `events`
-   * 还是 null 时就跑。
+   * `events` 必须当**构造参数**传：super 实参位置上的 lambda 引用类体属性，捕获的是还没初始化的
+   * `this`（`Pointer` KDoc 记过的坑），只能引用构造参数。
    */
   private class Sink(
     /** 收到的事件（[AvPlayback.onEvent] 的实参）。播放线程写、测试协程并发读 ⇒ 同步读。 */
@@ -202,108 +202,10 @@ class FFPlayerStallMidPlaybackTest {
   }
 
   /**
-   * 认 Range（回 206，起点与总长都给全 —— [Http.Response] 的 `offset` / `contentLength` 全靠
-   * `Content-Range`），按 [bytesPerSecond] **节流**发；[frozen] 一旦置上，**正在发的那条响应立刻
-   * 停笔、后续请求也只发响应头就停住**，且**不 close**（close = body 结束 = 截断，不是 stall）。
-   *
-   * 用**可缓存线程池**而不是固定池：冻结期间挂住的 handler 会一直占着线程，而 [HttpIO] 的重试
-   * 还会发新请求 —— 固定池会被挂死的那些吃光，新请求根本进不来。
-   */
-  private class FreezableServer(
-    private val body: ByteArray,
-    /**
-     * 发送速率上限（字节/秒）。**不能省**（实测：不节流时 22 MB 在 400 ms 内发完，冻结时无事可断，
-     * 用例空跑）。取值取「播放消耗速率的两倍」—— 再慢会拖累开流（`avformat_find_stream_info`
-     * 自己要读几 MB），再快则冻结时可能已经发完。
-     */
-    private val bytesPerSecond: Long,
-  ) : AutoCloseable {
-    private val pool = Executors.newCachedThreadPool()
-    private val stopped = CountDownLatch(1)
-
-    /** 冻结期间攥着的响应体 —— [close] 时统一收掉，别让 handler 线程吊死。 */
-    private val parked = Collections.synchronizedList(mutableListOf<OutputStream>())
-
-    /** 收到的请求数（诊断用：冻结期间该涨 —— [HttpIO] 的重试会重发）。 */
-    val requestCount = AtomicInteger(0)
-
-    /** 已经真正发出去的字节数（不含响应头）。冻结后它不再涨 = 网络确实停了。 */
-    val served = AtomicInteger(0)
-
-    @Volatile
-    var frozen: Boolean = false
-
-    private val server =
-      HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
-        executor = pool
-        createContext("/media.mp4") { handle(it) }
-        start()
-      }
-
-    val url: String get() = "http://127.0.0.1:${server.address.port}/media.mp4"
-
-    private fun handle(exchange: HttpExchange) {
-      requestCount.incrementAndGet()
-      val rangeStart =
-        exchange.requestHeaders
-          .getFirst("Range")
-          ?.removePrefix("bytes=")
-          ?.substringBefore('-')
-          ?.toIntOrNull()
-          ?: 0
-      val from = rangeStart.coerceIn(0, body.size)
-      val status = if (rangeStart > 0) 206 else 200
-      if (status == 206) {
-        exchange.responseHeaders.add("Content-Range", "bytes $from-${body.size - 1}/${body.size}")
-      }
-      exchange.sendResponseHeaders(status, (body.size - from).toLong())
-      val out = exchange.responseBody
-      // 节流基准只按**本条响应**算：每条 range 请求从头限速，客户端感知到的就是一个恒定速率的流。
-      val startedAt = System.nanoTime()
-      var sentHere = 0L
-      try {
-        var pos = from
-        while (pos < body.size) {
-          if (frozen) {
-            parked += out
-            // 停笔。解冻（frozen 回 false）就接着发；close() 则 countDown 把它放出去。
-            while (stopped.count != 0L && frozen) Thread.sleep(20)
-            if (stopped.count != 0L) continue
-            break
-          }
-          val n = minOf(16 * 1024, body.size - pos)
-          out.write(body, pos, n)
-          out.flush()
-          served.addAndGet(n)
-          sentHere += n
-          pos += n
-          // 「按已发字节数，现在至少应该发到哪」与真实时间的差 —— 差多少就补睡多少。
-          val shouldHaveTakenMs = sentHere * 1000L / bytesPerSecond
-          val actuallyTakenMs = (System.nanoTime() - startedAt) / 1_000_000L
-          val behind = shouldHaveTakenMs - actuallyTakenMs
-          if (behind > 0) Thread.sleep(behind)
-        }
-      } catch (_: InterruptedException) {
-      } catch (_: java.io.IOException) {
-        // 客户端自己断了（正常收场路径）
-      }
-    }
-
-    /** 幂等：测试体与 `use` 各会调一次。 */
-    override fun close() {
-      stopped.countDown()
-      parked.forEach { runCatching { it.close() } }
-      server.stop(0)
-      pool.shutdownNow()
-    }
-  }
-
-  /**
    * 把一段**可能永不返回**的挂起调用丢到守护线程上跑，[join] 带超时。
    *
    * 超时不算失败（判据由调用方自己判），只把线程栈打到 diag —— 站在报告里能直接看出它卡在哪。
-   * 守护线程是必须的：本用例测的就是「可能永久阻塞」，挂在上面会把整个构建吊死
-   * （同 `TestIo.readBounded` 的理由）。
+   * 守护线程是必须的：本用例测的就是「可能永久阻塞」，挂在上面会把整个构建吊死。
    */
   private fun probeBounded(
     label: String,
@@ -439,67 +341,63 @@ class FFPlayerStallMidPlaybackTest {
   @Test(timeout = 90_000)
   fun playbackStalledMidStreamDoesNotHangForever() {
     Diag.log("=== 开跑 ===")
-    // 前提不满足（缺 ffmpeg / 缺素材）就当跳过：提前 return，不算失败。
-    val bytes =
-      FastStartMedia.produce()
-        ?: run {
-          Diag.log("=== 跳过 ===")
-          return
-        }
+    val bytes = Files.readAllBytes(TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART))
     runStallScenario(bytes)
   }
 
   private fun runStallScenario(bytes: ByteArray) {
-    FreezableServer(bytes, bytesPerSecond = 1_500_000L).use { server ->
+    // 断点由**服务器**定，不靠媒体够大（见类 KDoc）：累计写出 [SERVED_LIMIT] 字节后停笔。
+    TestMediaServer(bytes, chunkSize = 16 * 1024, servedLimit = SERVED_LIMIT).use { server ->
       val sink = Sink()
       val player = FFPlayer(server.url, HttpIO.Handler(), sink)
       try {
         runBlocking {
           // ---- 第一段：先确认播得起来，否则「后面没反应」分不清是 stall 造成的 ----
-          // getStreams() 只读头部的 moov（faststart，见 FastStartMedia），不会自己卡死。
+          // getStreams() 只读头部的 moov（faststart）。
           Diag.log("第一段：getStreams() 开始（faststart，moov 在头部）")
           val video = player.getStreams().first { it.codecType == AVMediaType.VIDEO }
           Diag.log(
             "第一段：getStreams() 回来，video index=${video.index} ${video.width}x${video.height}；" +
-              "已发 ${server.served.get()}/${bytes.size} 字节，请求 ${server.requestCount.get()} 次",
+              "已发 ${server.served}/${bytes.size} 字节，请求 ${server.requests} 次",
           )
 
           val playThread = startPlayback(player, mapOf(AVMediaType.VIDEO to video))
-          val framesBeforeFreeze = awaitFirstFrame(sink, 10_000)
+          val framesBeforeStop = awaitFirstFrame(sink, 10_000)
           Diag.log(
-            "第一段：首帧出现，帧数=$framesBeforeFreeze，已发 ${server.served.get()}/${bytes.size} 字节",
+            "第一段：首帧出现，帧数=$framesBeforeStop，已发 ${server.served}/${bytes.size} 字节",
           )
           assertTrue(
-            framesBeforeFreeze > 0,
-            "冻结网络之前就该已经出过一帧（实际 0）—— 这说明用例没测到「播到一半」这个现场。" +
-              "服务端已发 ${server.served.get()}/${bytes.size} 字节，请求 ${server.requestCount.get()} 次",
+            framesBeforeStop > 0,
+            "断流之前就该已经出过一帧（实际 0）—— 这说明用例没测到「播到一半」这个现场。" +
+              "服务端已发 ${server.served}/${bytes.size} 字节，请求 ${server.requests} 次",
           )
 
-          // ---- 第二段：冻住网络。已经在途的那条响应停笔，之后的请求也只发头就停 ----
-          server.frozen = true
-          val servedAtFreeze = server.served.get()
-          val requestsAtFreeze = server.requestCount.get()
+          // ---- 第二段：等服务器发满断点（首帧出现时它可能还没到）----
+          // **等**而不是假设「首帧一出现就过了断点」：断点在开流值之上、且播放期累计量是渐涨的，
+          // 两者之间没有固定先后。等它自然越过后再进判据，断点取值就不必卡在某个窄缝里。
+          awaitServed(server, SERVED_LIMIT, 10_000)
+          val servedAtStop = server.served
+          val requestsAtStop = server.requests
           Diag.log(
-            "第二段：已冻结（冻结时已发 $servedAtFreeze/${bytes.size} 字节 / 请求 $requestsAtFreeze 次），" +
-              "开始等帧数停滞",
+            "第二段：服务器已停在 $servedAtStop/${bytes.size} 字节（断点 $SERVED_LIMIT）/" +
+              "请求 $requestsAtStop 次，开始等帧数停滞",
           )
-          // 「数据还没发完」是「播放中途」的前提：服务端已发 == 总长说明它早发完了，
-          // 冻结冻的是空气，播放会一路走到 EOF（判据全绿而什么都没测到）。
           assertTrue(
-            servedAtFreeze < bytes.size,
-            "冻结时服务端已经把 $servedAtFreeze/${bytes.size} 字节全发出去了 ⇒ 冻结冻的是空气，" +
-              "这个用例没测到「播放中途」。检查 [FreezableServer] 的节流是不是没生效。",
+            servedAtStop >= SERVED_LIMIT,
+            "等了 10s 服务端也只发到 $servedAtStop 字节，没够断点 $SERVED_LIMIT —— " +
+              "这个用例没测到「播到一半」",
           )
 
-          val (framesAfterFreeze, stalledFor) = awaitFrameStall(sink, flatMs = 1_500, timeoutMs = 8_000)
+          val (framesAfterStop, stalledFor) = awaitFrameStall(sink, flatMs = 1_500, timeoutMs = 8_000)
           Diag.log(
-            "第二段：等了 ${stalledFor}ms，帧数 $framesBeforeFreeze -> $framesAfterFreeze；" +
-              "服务端已发 ${server.served.get()}/$servedAtFreeze（总长 ${bytes.size}），" +
-              "请求数 ${server.requestCount.get()}/$requestsAtFreeze",
+            "第二段：等了 ${stalledFor}ms，帧数 $framesBeforeStop -> $framesAfterStop；" +
+              "服务端已发 ${server.served}/$servedAtStop（总长 ${bytes.size}），" +
+              "请求数 ${server.requests}/$requestsAtStop",
           )
           assertTrue(
-            server.served.get() - servedAtFreeze < bytes.size / 8,
-            "冻结之后服务端还在猛发字节 ⇒ 冻结没生效，这个用例没测到 stall",
+            server.served - servedAtStop < bytes.size / 8,
+            "断流之后服务端还在猛发字节（多了 ${server.served - servedAtStop}）⇒ " +
+              "servedLimit 没生效，这个用例没测到 stall",
           )
 
           // ---- 第三段：判据。pause() 会 join 播放轮次，轮次卡在 getPacket 上就 join 不回来 ----
@@ -592,6 +490,18 @@ class FFPlayerStallMidPlaybackTest {
     Diag.log("=== 跑完 ===")
   }
 
+  /** 等服务器累计发出到 [target] 字节（上限 [timeoutMs]）—— 断点生效的时点不确定，等它到。 */
+  private suspend fun awaitServed(
+    server: TestMediaServer,
+    target: Long,
+    timeoutMs: Long,
+  ) {
+    val deadline = System.currentTimeMillis() + timeoutMs
+    while (server.served < target && System.currentTimeMillis() < deadline) {
+      delay(20)
+    }
+  }
+
   /** 只等第一帧（上限 [timeoutMs]）：区分「压根没播起来」与「播到一半才卡」。 */
   private suspend fun awaitFirstFrame(
     sink: Sink,
@@ -604,131 +514,22 @@ class FFPlayerStallMidPlaybackTest {
     return sink.frameCount()
   }
 
-  /**
-   * 本用例专用的媒体：**`moov` 在头部**（faststart）、只截**前 3 秒**、体积仍远大于 avio 缓冲。
-   *
-   * 三条都是判据的前提，缺一个这个用例就测不准：
-   *
-   * 1. **必须 faststart**。仓库自带的 [`TestMedia.SILENT_BLACK_25S`] 只有 46 KB，而它的 `moov`
-   *    在**文件尾部**（box 扫描：ftyp@0 → mdat@40 → moov@17813）—— `avformat_find_stream_info`
-   *    要经 `HttpIO` 的 `seek` 发尾部的 range 请求才能拿到索引 ⇒ 用它时 **`getStreams()` 自己
-   *    就卡死**，冻结还没开始，测到的是「压根打不开流」而不是 stall。
-   * 2. **必须够大**。`HttpIO.getBufferSize()` 是 32 KB，而 `avformat_find_stream_info` 自己就要读
-   *    好几 MB（实测约 3.4 MB）。媒体比它还小的话，冻结之后**开流阶段就已经读完整条流**了，
-   *    播放时客户端手里根本没有「还没到的数据」，测不到 stall。
-   * 3. **必须短**。播放时长由墙钟决定（[FFPlayer.resumeImpl] 的主时钟走 `monoTimeMs`，视频帧要等
-   *    主时钟），**加速不了** ⇒ 媒体多长，这个用例就得等多久。3 秒是「够 stall 显形」与「跑得完」
-   *    之间的折中。
-   *
-   * 生成方式：拿 `.workbuddy/test.mp4`（本机素材，29.8 s / 1308×736 / h264+aac）`-c copy`
-   * 加 `-t 3` 截断加 `-movflags +faststart` 转封装。**不重新编码** —— 快，且帧序列与原素材逐帧相同。
-   *
-   * ffmpeg CLI 与那份素材都是**本机前提**。缺任一个时 [produce] 返回 null，用例**提前 return**
-   * 当作跳过 —— 不引 JUnit 的 `Assume`（`jvmTest` 只依赖 `kotlin.test`，见 `shared/build.gradle.kts`），
-   * 也不让它红成「代码坏了」。
-   */
-  private object FastStartMedia {
-    /** 前提不满足时返回 null 并记下原因。 */
-    fun produce(): ByteArray? {
-      val source = findSourceMedia()
-      if (source == null) {
-        Diag.log("跳过：仓库根下没有 .workbuddy/test.mp4（这个用例靠它生成 faststart 媒体）")
-        return null
-      }
-      val ffmpeg = System.getenv("FFMPEG") ?: findOnPath("ffmpeg")
-      if (ffmpeg == null) {
-        Diag.log("跳过：PATH 上没有 ffmpeg（可用 FFMPEG 环境变量指到可执行文件）")
-        return null
-      }
-      val out = Files.createTempFile("acg-stall-", ".mp4")
-      out.toFile().deleteOnExit()
-      val result =
-        runCatching {
-          val process =
-            ProcessBuilder(
-              ffmpeg,
-              "-y",
-              "-hide_banner",
-              "-loglevel",
-              "error",
-              "-i",
-              source,
-              "-t",
-              "3",
-              "-c",
-              "copy",
-              "-movflags",
-              "+faststart",
-              out.toAbsolutePath().toString(),
-            ).redirectErrorStream(true).start()
-          val log = process.inputStream.bufferedReader().readText()
-          check(process.waitFor() == 0) { "ffmpeg 转封装失败：\n$log" }
-        }
-      result.exceptionOrNull()?.let {
-        Diag.log("跳过：ffmpeg 转封装失败 —— ${it.message}")
-        return null
-      }
-      val bytes = Files.readAllBytes(out)
-      // 钉住「moov 在头部」这个前提：faststart 没生效的话，第一条就该是 mdat。
-      check(bytes.size > 1024 * 1024) { "faststart 媒体只有 ${bytes.size} 字节，不足以让 stall 显形" }
-      check(topLevelBoxTypes(bytes).firstOrNull { it != "ftyp" } == "moov") {
-        "faststart 没生效（前几个 box：${topLevelBoxTypes(bytes).take(4)}）"
-      }
-      Diag.log("媒体就绪：${bytes.size} 字节，顶层 box ${topLevelBoxTypes(bytes).take(4)}")
-      return bytes
-    }
-
+  private companion object {
     /**
-     * 从测试的工作目录（Gradle 给的是**模块目录** `shared/`，不是仓库根）向上找
-     * `.workbuddy/test.mp4`。找不到返回 null。
+     * 服务器累计发出多少字节就停笔（见 [TestMediaServer.servedLimit]）。
      *
-     * 别写成相对路径直接 `File(".workbuddy/test.mp4")`（会静默跳过、用例绿得毫无意义）；
-     * 判据是**一路走到含有 `settings.gradle.kts` 的那一层**。
+     * 下界**高于开流消耗**（否则连流都打不开，测到的是「压根打不开流」而不是 stall）：
+     * 这条 443 KB faststart 素材开流只吃前 ~32 KB（索引 `moov` 全在前 11,381 字节内），
+     * 实测 `getStreams()` 8 ms、发 196,608 字节。
+     *
+     * 上界**明显低于素材总长**（443,429 字节），断点才落在「数据流中途」—— 首帧必定出得来
+     * （开流已过），随后累计量越线即停笔。
+     *
+     * 取 300,000（= 总长的 66%，**还留 34% 没发**）：实测帧数在 t≈7 s 处骤停并上报
+     * [AvPlayback.Event.PACKET_READ_TIMEOUT]，而不限速的对照组同刻仍在推进、一路播到 300 帧。
+     *
+     * 改媒体就要重按「开流消耗 / 素材总长」重测这个数（见类 KDoc 的「两条前提」）。
      */
-    private fun findSourceMedia(): String? {
-      var dir: File? = File("").absoluteFile
-      while (dir != null) {
-        val candidate = File(dir, listOf(".workbuddy", "test.mp4").joinToString(File.separator))
-        if (candidate.isFile) return candidate.absolutePath
-        if (File(dir, "settings.gradle.kts").isFile) return null
-        dir = dir.parentFile
-      }
-      return null
-    }
-
-    /** 在 PATH 上找可执行文件（Windows 逐个 PATHEXT 后缀都试）。找不到返回 null。 */
-    private fun findOnPath(name: String): String? {
-      val paths = System.getenv("PATH").orEmpty()
-      val suffixes =
-        if (System.getProperty("os.name").startsWith("Windows")) {
-          val pathext = System.getenv("PATHEXT").orEmpty()
-          pathext.split(';').filter { it.isNotBlank() }.ifEmpty { listOf(".exe", ".bat", ".cmd") }
-        } else {
-          listOf("")
-        }
-      for (dir in paths.split(File.pathSeparatorChar).filter { it.isNotBlank() }) {
-        for (suffix in suffixes) {
-          val candidate = File(dir, name + suffix)
-          if (candidate.isFile) return candidate.absolutePath
-        }
-      }
-      return null
-    }
-
-    /** 只查一层，够用来确认 moov / mdat 的相对位置。 */
-    private fun topLevelBoxTypes(bytes: ByteArray): List<String> {
-      val out = ArrayList<String>()
-      val bb = java.nio.ByteBuffer.wrap(bytes)
-      bb.order(java.nio.ByteOrder.BIG_ENDIAN)
-      var off = 0
-      while (off + 8 <= bytes.size && out.size < 8) {
-        val size = bb.getInt(off)
-        val type = String(bytes, off + 4, 4, Charsets.US_ASCII)
-        out += type
-        if (size < 8) break
-        off += size
-      }
-      return out
-    }
+    const val SERVED_LIMIT = 300_000L
   }
 }

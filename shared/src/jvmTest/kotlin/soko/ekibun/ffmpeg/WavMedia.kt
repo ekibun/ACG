@@ -8,9 +8,11 @@ import java.nio.file.Path
 /**
  * 测试用的合成 WAV（16-bit PCM 单声道 8 kHz）。
  *
- * 仓库**不进**二进制测试媒体（`.workbuddy/` 整体 gitignore，B8 的老约束），
- * 所以 FFmpeg 真路径用例需要的素材在测试里现场合成 —— WAV 的头 44 字节 +
- * 裸 PCM，`avformat_open_input` 直接能解。
+ * 给**需要精确刻度**的用例现场合成：体积、read 次数都是算得出的（[AvReadErrorFoldTest] 靠
+ * 「10 秒 ≈ 160 KB、第 4 次 32 KB read 起返回 -1」把错误钉在指定阶段）—— 入库素材是固定体积的
+ * 成品，调不出这种刻度。头 44 字节 + 裸 PCM，`avformat_open_input` 直接能解。
+ *
+ * （通用素材走 `TestMedia.path(…)` 取入库的 `resources/media/` 下那几份；本对象只管「按需合成」。）
  */
 internal object WavMedia {
   const val SAMPLE_RATE = 8000

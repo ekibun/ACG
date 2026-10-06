@@ -64,6 +64,10 @@ kotlin {
     }
     jvmTest.dependencies {
       implementation(libs.kotlin.test)
+      // dev 控制条（DevStrip）的**编译期** Compose API：ComposePanel / material3 在 ui-desktop
+      // 与 desktop 变体里。运行时它经子 ClassLoader（parent-first）用的是**应用自己的**
+      // Compose 拷贝 —— 这份依赖只喂编译，不进任何生产打包。
+      implementation(compose.desktop.currentOs)
     }
     commonTest.dependencies {
       implementation(libs.kotlin.test)
@@ -108,3 +112,82 @@ tasks.named<Test>("jvmTest") {
 dependencies {
   androidRuntimeClasspath(libs.compose.uiTooling)
 }
+
+// —— dev 媒体服务器：Gradle 只负责「把 agent 挂上 hotRun 的应用进程」，其余都在 agent 里 —————
+// 服务器的 spawn / 端口自愈 / 随应用退出收场，全在 DevToolsAgent.premain：
+// Gradle 只传 -javaagent 与 -D，生命周期归 agent。服务器代码（DevServerKt /
+// TestMediaServer / DevStrip）就住在本模块的 jvmTest，与 HTTP 用例共用 TestMediaServer：
+// 同模块内部直接取 jvmTest 的运行时类路径即可，不需要对外暴露可消费配置。
+// 生产打包走 main 运行时类路径，不经过它。
+
+val jvmTestRuntimeClasspath =
+  kotlin.targets
+    .getByName("jvm")
+    .compilations
+    .getByName("test")
+    .runtimeDependencyFiles
+    ?: files()
+
+val devMediaServerPid = layout.buildDirectory.file("dev-media-server.pid")
+val devMediaServerLog = layout.buildDirectory.file("dev-media-server.log")
+
+// 控制条的 premain agent jar：从测试类路径里只挑 agent 本体，打上 Premain-Class 清单。
+// 面板本体（DevStrip）不打进来 —— 它经 `-Dacg.dev.classpath` 的子 ClassLoader 在应用进程里装载。
+val devToolsAgentJar =
+  tasks.register<Jar>("devToolsAgentJar") {
+    archiveFileName.set("dev-tools-agent.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("dev-tools"))
+    dependsOn("compileTestKotlinJvm")
+    // 配置期解析成固定文件（CC 安全：可解析配置直接挂任务，CC 落盘时会对
+    // `jvmTestRuntimeClasspath` 触发无锁解析而被拒 —— 实测）。
+    from(jvmTestRuntimeClasspath) { include("soko/ekibun/DevToolsAgent*") }
+    manifest { attributes("Premain-Class" to "soko.ekibun.DevToolsAgent") }
+  }
+
+// 手动常驻跑法（curl 调试用）：hotRun 不经过它 —— 那条路由 agent 托管（spawn / 随应用退出收场）。
+tasks.register<JavaExec>("devMediaServer") {
+  classpath(jvmTestRuntimeClasspath)
+  mainClass.set("soko.ekibun.DevServerKt")
+  // 命令在仓库根敲，--media 的相对路径也按仓库根解析（JavaExec 默认的工作目录是模块目录）。
+  workingDir = rootProject.projectDir
+  // 日志里全是中文：Windows 重定向 stdout 默认走系统码页（GBK），落文件再读就是乱码，钉成 UTF-8。
+  jvmArgs("-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8")
+  // 文件依赖不带 built-by：测试类要现编，改完 DevServer.kt 立即生效。
+  dependsOn("compileTestKotlinJvm")
+}
+
+// hotRun（:desktopApp 的任务）：把 agent 挂上应用进程，dev 服务器的 spawn 与收场都在 agent 里
+// —— 服务器与应用进程同生共死（关窗 / Ctrl-C 走 shutdown hook；硬杀的残留由下一次 spawn 前的
+// 端口自愈清掉）。
+//
+// 跨项目配置 `:desktopApp` 的 JavaExec 任务：hotRun 由 Compose Hot Reload 插件在**每个**
+// Kotlin JVM 模块注册，只有桌面端那一个才能真正起应用，所以注入点在 desktopApp。
+// 用 `evaluationDependsOn` 保证 `:desktopApp` 已求值（插件任务这时才存在），否则匹配为空集。
+evaluationDependsOn(":desktopApp")
+
+project(":desktopApp")
+  .tasks
+  .withType<JavaExec>()
+  .matching { it.name == "hotRun" || it.name == "hotRunAsync" }
+  .configureEach {
+    dependsOn(devToolsAgentJar)
+    jvmArgs(
+      "-javaagent:" +
+        devToolsAgentJar
+          .get()
+          .archiveFile
+          .get()
+          .asFile
+          .absolutePath,
+      "-Dacg.dev.server.port=" +
+        providers.gradleProperty("devPort").orElse("8099").get(),
+      "-Dacg.dev.classpath=" +
+        jvmTestRuntimeClasspath.joinToString(File.pathSeparator, transform = { it.absolutePath }),
+      "-Dacg.dev.pidfile=" + devMediaServerPid.get().asFile.absolutePath,
+      "-Dacg.dev.logfile=" + devMediaServerLog.get().asFile.absolutePath,
+      "-Dacg.dev.workdir=" + rootProject.projectDir.absolutePath,
+    )
+    providers.gradleProperty("devMedia").orNull?.let { media ->
+      jvmArgs("-Dacg.dev.media=$media")
+    }
+  }
