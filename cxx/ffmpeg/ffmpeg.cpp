@@ -63,20 +63,20 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* res) {
   return JNI_VERSION_1_4;
 }
 
-// initNative 的失败路径拿不到 s：ffmpeg 的 fail: 标签（demux.c:367-374）在
-// avformat_open_input 失败时已经 avformat_free_context 并把 *ps 置 NULL，而
-// CUSTOM_IO 的 pb 在那条路上**不关**（fail: 只关非
-// CUSTOM_IO，demux.c:370-371）。 所以 io_open 里建出来的 pb 得自己记账，opaque
-// 因此从裸 jobject 升级成这个
-// 所有者结构；成功关闭（destroyNative）与打开失败（initNative）都从这里找 pb。
+// io_open 建出来的 pb 得自己记账：CUSTOM_IO 下 ffmpeg 不替我们关（avformat.h 的
+// AVFMT_FLAG_CUSTOM_IO），而 pb 的释放点只有 io_close2 一条 —— 顶层 pb 被
+// avformat_close_input 置 NULL 跳过（demux.c:388-396），嵌套 pb 由 demuxer 自己
+// ff_format_io_close。**账本是集合、且要能被 io_close2 销账**：HLS 一次 open
+// 里会连续开 master / variant / segment 多个
+// pb，单槽记账会让失败路径二次关闭一个已经释放的 pb（崩因链与 hs_err 证据见
+// cxx/AGENTS.md 的 ffmpeg 一节）。
 struct FormatOpaque {
-  jobject thiz;               // AvFormat 实例的 GlobalRef
-  AVIOContext* pb = nullptr;  // io_open 建的 pb（CUSTOM_IO：ffmpeg 不替我们关）
+  jobject thiz;                   // AvFormat 实例的 GlobalRef
+  std::vector<AVIOContext*> pbs;  // io_open 建出来、还没关的 pb
 };
 
-// 还一个 io_open 建出来的 pb：Java 侧 close() → 还 ioCtx 的 GlobalRef →
-// 释放缓冲与上下文本体。两条关闭路（destroyNative / 打开失败）
-// 共用这一份，别让归还逻辑长出两个版本。
+// 还一个已经不在账上的 pb：Java 侧 close() → 还 ioCtx 的 GlobalRef → 释放缓冲与
+// 上下文本体。三个关闭点（io_close2 / destroyNative / 打开失败）共用这一份。
 static void closeIoContext(JNIEnv* env, AVIOContext* pb) {
   if (!pb) return;
   auto ioCtx = (jobject)pb->opaque;
@@ -104,11 +104,29 @@ static void closeIoContext(JNIEnv* env, AVIOContext* pb) {
   avio_context_free(&pb);
 }
 
+// 把 [pb] 从账上摘掉（在就摘，不在就什么都不做）。
+static void forgetPb(FormatOpaque* self, AVIOContext* pb) {
+  for (auto it = self->pbs.begin(); it != self->pbs.end(); ++it) {
+    if (*it == pb) {
+      self->pbs.erase(it);
+      return;
+    }
+  }
+}
+
+// 收干净账上剩下的全部 pb。**必须在 ffmpeg 那一侧不再持有它们之后调**：
+// io_close2 跑过就从账上摘掉了，剩下的要么是顶层 pb（avformat_close_input 对
+// CUSTOM_IO 置 NULL 跳过），要么是 demuxer 漏关的嵌套 pb。
+static void closeAllPbs(JNIEnv* env, FormatOpaque* self) {
+  for (auto pb : self->pbs) closeIoContext(env, pb);
+  self->pbs.clear();
+}
+
 extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
     JNIEnv* env, jobject thiz, jstring url) {
   auto ctx = avformat_alloc_context();
   if (!ctx) return 0;
-  auto self = new FormatOpaque{env->NewGlobalRef(thiz), nullptr};
+  auto self = new FormatOpaque{env->NewGlobalRef(thiz), {}};
   ctx->opaque = self;
   ctx->io_open = [](AVFormatContext* s, AVIOContext** pb, const char* url,
                     int flags, AVDictionary** options) {
@@ -160,13 +178,16 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
               env->GetMethodID(env->GetObjectClass(ioCtx), "seek", "(II)I");
           return env->CallIntMethod(ioCtx, method, offset, whence);
         });
-    // 记账给失败路径与 destroyNative（理由见 FormatOpaque 的注释）。
-    if (*pb) self->pb = *pb;
+    // 记进账本，交给 io_close2 销账或关闭路径兜底（理由见 FormatOpaque
+    // 的注释）。
+    if (*pb) self->pbs.push_back(*pb);
     return 0;
   };
   ctx->io_close2 = [](AVFormatContext* s, AVIOContext* pb) {
     JNIEnv* env;
     javaVm->GetEnv((void**)&env, JNI_VERSION_1_4);
+    // 先销账再关：销账之后失败路径与 destroyNative 就不会再碰这个 pb 了。
+    forgetPb((FormatOpaque*)s->opaque, pb);
     closeIoContext(env, pb);
     return 0;
   };
@@ -175,10 +196,12 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
   const int ret = avformat_open_input(&ctx, urlChars, nullptr, nullptr);
   env->ReleaseStringUTFChars(url, urlChars);
   if (ret < 0) {
-    // ctx 已经被 ffmpeg free 掉了（见 FormatOpaque 的注释），destroyNative
-    // 永远不会再被调 —— 这里的 GlobalRef（thiz 与 ioCtx）与 pb 要照
-    // destroyNative 的口径原地收干净，一个不留。
-    closeIoContext(env, self->pb);
+    // ctx 已经被 ffmpeg free 掉了（失败路径见 FormatOpaque
+    // 的注释），destroyNative 永远不会再被调 —— 账上剩下的 pb、thiz 的
+    // GlobalRef 都要在这里收干净，一个不留。**只收账上剩下的**：read_header
+    // 中途失败的 demuxer 可能已经自己关过几个嵌套 pb（io_close2
+    // 已销账），再关一遍就是 use-after-free。
+    closeAllPbs(env, self);
     env->DeleteGlobalRef(self->thiz);
     delete self;
     return 0;
@@ -239,16 +262,20 @@ Java_soko_ekibun_ffmpeg_AvFormat_destroyNative(JNIEnv* env, jobject thiz,
                                                jlong pctx) {
   auto ctx = (AVFormatContext*)pctx;
   auto self = (FormatOpaque*)ctx->opaque;
-  // ffmpeg 对 CUSTOM_IO 不替调用方关 pb：avformat_close_input 先把 pb 置成
-  // NULL 再走 ff_format_io_close（demux.c:388-396），io_close2 与 avio_close
-  // 都不会发生 —— pb 连同 io_open 里的 GlobalRef、av_malloc 缓冲、Java 侧
-  // 连接全靠这里收。
-  if (ctx->pb) closeIoContext(env, ctx->pb);
+  // **先 avformat_close_input、再收账**：read_close（如
+  // hls_close）会把它自己认得的 pb 经 ff_format_io_close 交回
+  // io_close2，那一步会销账并释放；先收账的话这些 pb 已经被我们还掉，ffmpeg
+  // 随后拿着悬垂指针再调一次 io_close2 —— 又回到二次关闭那条路。走完
+  // close_input，账上剩的才是真没人认领的：顶层 pb（avformat_close_input 对
+  // CUSTOM_IO 先置 NULL，跳过 ff_format_io_close，demux.c:388-396）与 demuxer
+  // 漏关的嵌套 pb。连同 io_open 里的 GlobalRef、av_malloc 缓冲、Java
+  // 侧连接一起在这里收干净。
+  avformat_close_input(&ctx);
   if (self) {
+    closeAllPbs(env, self);
     env->DeleteGlobalRef(self->thiz);
     delete self;
   }
-  avformat_close_input(&ctx);
 }
 
 extern "C" JNIEXPORT jint JNICALL Java_soko_ekibun_ffmpeg_AvFormat_seekToNative(

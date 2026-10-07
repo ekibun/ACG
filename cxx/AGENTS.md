@@ -159,5 +159,14 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
   pending 在 JNI 上没人接，下一个 JNI 调用直接 abort 整个 JVM（hs_err 的 Problematic frame
   在 `initNative`）。「打不开」要学 `FileIO`：返回句柄为 null 的 IO（read/seek 恒 -1），
   让 `avformat_open_input` 自己以 I/O 错误收场 —— 失败清理路径照常走完。
+- **`io_open` 建的 pb 要记进账本、`io_close2` 必须先把 pb 销账再关**：账本
+  `FormatOpaque::pbs` 是**活集合、不是单槽**，因为 HLS 一次 open 里会连续开
+  master / variant / segment 多个 pb，而 CUSTOM_IO 下 ffmpeg 不替调用方关 pb。
+  单槽记账、或 `io_close2` 不销账，都会让 `avformat_open_input` 的失败路径**二次关闭**
+  一个已被 `io_close2` 释放的 pb —— `pb->opaque` 读出垃圾当 jobject 交给
+  `GetObjectClass`，`EXCEPTION_ACCESS_VIOLATION` 崩在 `initNative`（症状只在
+  「read_header 中途开嵌套源又失败」时出现，mp4 与正常 HLS 都不崩）。
+  同理 `destroyNative` 要**先 `avformat_close_input` 再收账**：`read_close`（如
+  `hls_close`）会把 pb 交回 `io_close2`，先收账就是拿悬垂指针再关一遍。
 - 解码路径已经处理 `EAGAIN` 并带 drain（native `ffmpeg.cpp` + Kotlin `AvCodec.drain()`，
   `FFPlayer` 在 EOF 主动 drain）。**不要**再把它当成"未实现"去重写。
