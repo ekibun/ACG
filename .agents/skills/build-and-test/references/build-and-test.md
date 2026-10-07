@@ -84,8 +84,8 @@ hotRun 的宿主，它的 `hotRun` 由 `:shared` 侧经 `evaluationDependsOn(":d
 | `:shared:compileKotlinJvm` | `shared/src/jvmMain` + `commonMain` |
 | `:desktopApp:compileKotlin` | `desktopApp/src` 自己（不含 shared） |
 
-⚠️ `:shared:compile*` 会连带编 `:bindings`（`shared` 以 `api` 挂接它）—— 绑定层
-（jni / quickjs / ffmpeg）的编译错误由这两条顺带拦到，不需要单独的闸门任务。
+⚠️ `:shared:compile*` 会连带编 `:platform`（`shared` 以 `api` 挂接它）—— 平台层
+（jni / quickjs / ffmpeg / web）的编译错误由这两条顺带拦到，不需要单独的闸门任务。
 ⚠️ `:androidApp` 自身的编译暂未纳入这道闸门 —— 改了 `androidApp/` 下的代码不会被这三条拦到。
 ⚠️ `commonMain` 的 `expect` / `actual` 是否两端都成立，只有**前两条一起跑**才查得出来；
 只跑一条时，跨端签名错要等提交前才暴露。
@@ -95,7 +95,7 @@ hotRun 的宿主，它的 `hotRun` 由 `:shared` 侧经 `evaluationDependsOn(":d
 根 [`AGENTS.md`](../../../../AGENTS.md) §5 的规则：验收阶段**不跑**下面任何一条。
 
 ```bash
-./gradlew :shared:ktlintCheck :bindings:ktlintCheck --continue   # Kotlin（标准规则 + compose-rules 规则集）
+./gradlew :shared:ktlintCheck :platform:ktlintCheck --continue   # Kotlin（标准规则 + compose-rules 规则集）
 ./gradlew ktlintFormat --continue             # 同上，能自动修的它直接修掉
 clang-format -i cxx/webview/webview.cpp       # C++；改哪个点哪个，就那三个文件
 ```
@@ -156,23 +156,23 @@ git 对**没有执行位的 hook 是静默跳过**的。
 **默认只跑定点的**（根 [`AGENTS.md`](../../../../AGENTS.md) §5 的规则，理由见本节末尾）：
 
 ```bash
-./gradlew :shared:jvmTest --tests "soko.ekibun.web.NativeWebViewHostTest" --console=plain
-# 绑定层（jni / quickjs / ffmpeg）的用例在 :bindings:jvmTest，同样要 dll：
-./gradlew :bindings:jvmTest --tests "soko.ekibun.quickjs.QuickJSTest.objectWithVariousTagsRoundTrips" --console=plain
+./gradlew :platform:jvmTest --tests "soko.ekibun.web.NativeWebViewHostTest" --console=plain
+# 平台层（jni / quickjs / ffmpeg / web 宿主）的用例在 :platform:jvmTest，同样要 dll：
+./gradlew :platform:jvmTest --tests "soko.ekibun.quickjs.QuickJSTest.objectWithVariousTagsRoundTrips" --console=plain
 ```
 
 全量只在**用户确认提交时**跑一次（§6）：
 
 ```bash
-./gradlew :shared:jvmTest :bindings:jvmTest --console=plain --rerun
+./gradlew :shared:jvmTest :platform:jvmTest --console=plain --rerun
 #   结果读 XML，不看控制台：
-#   {shared,bindings}/build/test-results/jvmTest/TEST-*.xml  ->  tests= / skipped= / failures= / errors=
+#   {shared,platform}/build/test-results/jvmTest/TEST-*.xml  ->  tests= / skipped= / failures= / errors=
 ```
 
 - **要重复跑（偶发问题、改过 native 之后复查）必须加 `--rerun`**。不加的话第 2 轮起任务是
   `UP-TO-DATE`，XML 还是上一轮的残留 —— 写着"跑了 12 轮"，实际只跑了 1 轮。
   写验收循环时把"任务真的执行了"也做成一条判据（`grep 'Task :shared:jvmTest UP-TO-DATE'`）。
-- `jvmTestProcessResources`（`:shared` 与 `:bindings` 各一份）把 `cxx/build/bin` 里的 dll 拷进
+- `jvmTestProcessResources`（`:shared` 与 `:platform` 各一份）把 `cxx/build/bin` 里的 dll 拷进
   测试资源，且都已挂上 `buildJni` ——
   改了 `cxx/` 只跑测试也会先重编（全链条见 [`cxx/AGENTS.md`](../../../../cxx/AGENTS.md) 的「原生构建」）。
 - 偶发失败的处理见 skill `project-traps` 的

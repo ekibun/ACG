@@ -1,7 +1,7 @@
 package soko.ekibun.acg.player
 
 import soko.ekibun.TestMediaServer
-import soko.ekibun.acg.common.SOCKET_TIMEOUT_MS
+import soko.ekibun.common.SOCKET_TIMEOUT_MS
 import soko.ekibun.ffmpeg.AvIO
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test

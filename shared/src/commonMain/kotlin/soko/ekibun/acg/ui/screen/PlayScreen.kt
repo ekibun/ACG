@@ -22,12 +22,12 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
 import soko.ekibun.acg.player.HttpIO
-import soko.ekibun.acg.player.SurfaceContext
-import soko.ekibun.acg.ui.comp.VideoSurface
 import soko.ekibun.ffmpeg.AVMediaType
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvStream
 import soko.ekibun.ffmpeg.FFPlayer
+import soko.ekibun.ffmpeg.SurfaceContext
+import soko.ekibun.ffmpeg.VideoSurface
 
 // 同 App()：挂着 @Preview，但它是被 App() 调用的真实页签，不能是 private。
 @Suppress("ktlint:compose:preview-public-check")

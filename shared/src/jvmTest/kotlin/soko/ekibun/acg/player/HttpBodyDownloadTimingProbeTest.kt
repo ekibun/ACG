@@ -2,7 +2,7 @@ package soko.ekibun.acg.player
 
 import kotlinx.coroutines.runBlocking
 import soko.ekibun.TestMediaServer
-import soko.ekibun.acg.common.Http
+import soko.ekibun.common.Http
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue

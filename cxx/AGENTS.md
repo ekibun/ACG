@@ -20,8 +20,8 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
 - **重编与 dll 落位全自动，没有「手动同步」这一步**：所有消费链的任务图都挂着 `buildJni`
   （无 outputs 的 Exec，每次必跑，`cxx/` 一变就重编）—— `:desktopApp:run`（经 `prepareAppResources`）、
   `hotRun`（`hotSnapshotMain`）、IDE 直跑 MainKt（`processResources`）、打包（`syncNativeResources`）、
-  `:shared:jvmTest` 与 `:bindings:jvmTest`（各自 `jvmTestProcessResources` 显式 `dependsOn`）。落位五处：
-  `shared/build/processedResources/jvm/test/`、`bindings/build/processedResources/jvm/test/`、
+  `:shared:jvmTest` 与 `:platform:jvmTest`（各自 `jvmTestProcessResources` 显式 `dependsOn`）。落位五处：
+  `shared/build/processedResources/jvm/test/`、`platform/build/processedResources/jvm/test/`、
   `desktopApp/build/resources/main/`、
   `desktopApp/build/compose/tmp/prepareAppResources/`（run 与打包共用 `syncNativeResources` 喂料）、
   打包态 `<app-image>/app/resources/`。打包侧 `createDistributable` 已把 `nativeResources` 登记成显式
@@ -62,10 +62,12 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
 - 符号是**不带签名的名称导出**：`Java_soko_ekibun_web_NativeWebView_<name>`。
   改了 Kotlin 侧的方法签名却用着旧 dll，**不会报错**，只会参数错位 ——
   改签名后第一件事是确认 dll 真的刷新到了运行位置。
-- 绑定收在 `:bindings` 模块：`bindings/src/{commonMain,jvmMain,androidMain}/kotlin/soko/ekibun/jni.kt`
-  与 `soko.ekibun.{quickjs, ffmpeg}`。webview 的绑定与业务接口同在 `soko.ekibun.web`
+- 绑定收在 `:platform` 模块：`platform/src/{commonMain,jvmMain,androidMain}/kotlin/soko/ekibun/jni.kt`
+  与 `soko.ekibun.{quickjs, ffmpeg, web}`。webview 整层（JNI 面
+  `platform/src/jvmMain/kotlin/soko/ekibun/web/NativeWebView.jvm.kt` 与控制器
+  `WebView.jvm.kt` / `BackgroundWebView.jvm.kt`）都在这个模块。
   （2026-10-02 拍板把整个 web 文件夹移出 `acg`，JNI 符号随之从 `_acg_web_` 变 `_web_`）——
-  别再"顺手"单独挪它：那会又改 JNI 导出名，连带重编 dll。
+  包名别再动：那会又改 JNI 导出名，连带重编 dll。
 - **加载方式三个库统一**：都走 `jniLoadLibrary()`，它优先加载**应用资源目录 / classpath 资源目录
   里的真文件**（打包态与开发态都不解包），两条都不成立才退到 `System.loadLibrary`。
   ⇒ 「`WebView2Loader.dll` 必须与 `webview.dll` 同级」这条要求由资源布局直接满足 —— 两者在
@@ -88,7 +90,7 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
   - ⇒ 往这个包里加原生绑定：默认「companion + `@JvmStatic`」；**native 用到 `thiz` 就改放类体**。
 - **类的全限定名（含包名）也进 JNI 符号**：符号是 `Java_<包名下划线>_<类名>_<方法名>` ——
   把声明 `external fun` 的类挪到别的包 / 改类名，符号名就变，dll 不重编就 `UnsatisfiedLinkError`
-  （「不报错、只失效」那一类）。模块搬迁（如绑定层已进 `:bindings`）不必重编的前提是
+  （「不报错、只失效」那一类）。模块搬迁（如绑定层已进 `:platform`）不必重编的前提是
   **包名一字不动**；真要改包名，就走「原生构建」重编 + dll 落位。
 
 ## webview

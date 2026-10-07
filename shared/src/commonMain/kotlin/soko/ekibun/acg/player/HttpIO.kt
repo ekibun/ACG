@@ -5,8 +5,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import soko.ekibun.acg.common.Http
-import soko.ekibun.acg.common.SOCKET_TIMEOUT_MS
+import soko.ekibun.common.Http
+import soko.ekibun.common.SOCKET_TIMEOUT_MS
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvIO
 import kotlin.time.Duration.Companion.milliseconds

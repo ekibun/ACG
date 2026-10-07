@@ -32,7 +32,7 @@
   也就是说 `soko.ekibun.{quickjs,ffmpeg}` 事实上仍按 JVM-only 写。
 - **方向已定**（用户 2026-09-16 晚）：**不给这两个包开例外** —— 规则保持，把这些 Java 语义
   逐处提到外面（`expect` 一个最小原语、两端各 `actual`），`commonMain` 里最终不剩平台符号。
-- **落点已就位**（2026-10-07）：绑定层（`soko.ekibun.{jni,quickjs,ffmpeg}`）已抽成 `:bindings`
+- **落点已就位**（2026-10-07）：绑定层（`soko.ekibun.{jni,quickjs,ffmpeg,web}`）已抽成 `:platform`
   模块，上面那些 import 随代码搬了过去（搬移零语义变化）；摘除在新模块里做 —— 新模块的
   API 面就是"纯 common 原语 + 平台 source set 放 Java 细节"。
 - **为什么现在没做**：属于独立的一次重构，要和文档改动分开。
@@ -399,15 +399,6 @@
   `ktor-client-core` 挂着 `ktorClientOkhttp` 会误判升级口径。
 - **完成判据**：别名改名 `ktor`（`[versions]` 一处 + `[libraries]` 三处引用同步），
   提交前核对三条编译闸门。
-
-### B21. 测试配置了空源集
-
-- **现状**（2026-10-02 评估发现）：`shared/build.gradle.kts` 配了 `withHostTest`
-  （`isIncludeAndroidResources = true`）与 `withDeviceTestBuilder`，但 `androidMain`
-  **没有任何测试源**；`commonTest.dependencies` 声明了 `kotlin-test`，`commonTest`
-  **目录不存在**。空配置会误导（以为 Android 单测 / common 测试在跑）。
-- **完成判据**：配置与源集一致 —— 要么删掉空配置，要么真补源（`commonTest` 放与
-  JVM/native 无关的纯用例）。
 
 ### B22. 取包超时改成「继续重试」后，`pause()` 的最坏耗时变成一个取包超时（100 ms）
 

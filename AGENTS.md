@@ -112,9 +112,13 @@ animeko 2913 个 kt/kts、60866 行注释里含 emoji 的只有 30 行（0.05%�
 - `cxx/` 是**原生源码树，不是 Gradle 模块** —— 别去找它的 build 文件。
 - 依赖版本全部集中在 `gradle/libs.versions.toml`，**本文件不写任何版本号**。其中 `material3` 与
   `androidx-lifecycle` 是**刻意**钉在 alpha/beta 上的，不是笔误 —— 不要"顺手"降成稳定版。
-- native 绑定统一收在 `soko.ekibun.*`，住在 `:bindings` 模块里（`quickjs` / `ffmpeg` / `jni.kt`
-  已经在那儿），**新增绑定一律放这里**；`soko.ekibun.acg.*` 是业务层（`web` / `player` / `engine` /
-  `common` / `ui.screen` / `ui.comp`）。`ui.screen` 放**整页**、`ui.comp` 放**跨页复用的组件**。
+- 平台层收在 **`:platform` 模块**，住 `soko.ekibun.{jni,quickjs,ffmpeg,web,common}`：
+  各包的 JNI 面、webview 契约与两端实现、播放器视图（`ffmpeg` 包的 `SurfaceContext` /
+  `VideoSurface`）、IO 原语（`common` 包的 `File` / `Http` 与 ktor 引擎）——**新增绑定、
+  平台视图集成与平台原语一律放这里**；`:shared` 的生产源码只剩 **commonMain**，住
+  `soko.ekibun.acg.*`（`engine`、`player` 的 `FileIO`/`HttpIO`、`ui.screen`、`ui.comp`
+  其余组件）。`ui.screen` 放**整页**、`ui.comp` 放**跨页复用的组件**。包名即模块边界：
+  `soko.ekibun.*` 在 `:platform`，`soko.ekibun.acg.*` 在 `:shared`。
 - 注册 Gradle 任务用 `tasks.register<T>("name")`；`by tasks.registering(...)` 已弃用且**编译失败**。
 
 | 找什么 | 去哪 |
@@ -124,7 +128,7 @@ animeko 2913 个 kt/kts、60866 行注释里含 emoji 的只有 30 行（0.05%�
 | 共享 UI 入口 | `shared/src/commonMain/kotlin/soko/ekibun/acg/App.kt` |
 | JS 引导脚本与模块 | `shared/src/commonMain/composeResources/files/js/` |
 | 原生源码 | `cxx/{webview,quickjs,ffmpeg}/` |
-| JNI 绑定层（Kotlin 侧） | `bindings/src/**` |
+| 平台层（native 绑定 + web / player 视图 / IO 原语） | `platform/src/**` |
 
 `composeResources/files/js/` 下的 JS **会被自动打包进资源**，所以新增 JS 能力就放这里。
 
@@ -171,7 +175,7 @@ animeko 2913 个 kt/kts、60866 行注释里含 emoji 的只有 30 行（0.05%�
 **编译、测试、lint 三样默认都不跑**：这三样只在**用户确认提交时**跑一次（见 §6），或用户**明确要求**时跑；
 改代码的验收阶段只跑**定点测试**——跑得通就说明改动没影响到别处，编译一致性不靠它证明。
 
-- **测试跑定点的**：只跑**与本次改动直接相关**的测试（绑定层用例在 `:bindings:jvmTest`、
+- **测试跑定点的**：只跑**与本次改动直接相关**的测试（平台层用例在 `:platform:jvmTest`、
   其余在 `:shared:jvmTest`，`--tests "soko.ekibun.<包>.<类>"`，必要时再窄到方法）；
   **不跑全量 `:shared:jvmTest`**。
   理由是本工程的测试里有大量**超时兜底**（`@Test(timeout = …)` 加 `withTimeout` 护栏，见
@@ -193,10 +197,10 @@ animeko 2913 个 kt/kts、60866 行注释里含 emoji 的只有 30 行（0.05%�
 - **提交前把三样全核对一遍**：用户确认提交时，依次跑
   **三条编译闸门**（`./gradlew :shared:compileAndroidMain :shared:compileKotlinJvm :desktopApp:compileKotlin`，
   注意不是 `compileDebugKotlinAndroid`）、
-  **全量测试**（`./gradlew :shared:jvmTest :bindings:jvmTest --console=plain --rerun`，结果读
-  `shared/build/test-results/jvmTest/TEST-*.xml` 与 `bindings/build/test-results/jvmTest/TEST-*.xml`）、
+  **全量测试**（`./gradlew :shared:jvmTest :platform:jvmTest --console=plain --rerun`，结果读
+  `shared/build/test-results/jvmTest/TEST-*.xml` 与 `platform/build/test-results/jvmTest/TEST-*.xml`）、
   **lint**
-  （`./gradlew :shared:ktlintCheck :bindings:ktlintCheck --continue` 与 `clang-format --dry-run --Werror`）、
+  （`./gradlew :shared:ktlintCheck :platform:ktlintCheck --continue` 与 `clang-format --dry-run --Werror`）、
   把结论一并报出来再提交。超时兜底导致的失败按 skill `project-traps` 的
   [`silent-failures.md`](./.agents/skills/project-traps/references/silent-failures.md) 甄别，别靠重跑掩盖。
   （`.githooks/pre-commit` 当场就会拦一遍 lint，所以那两次通常是空跑。）

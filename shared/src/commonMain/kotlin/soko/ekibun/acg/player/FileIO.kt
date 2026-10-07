@@ -1,6 +1,6 @@
 package soko.ekibun.acg.player
 
-import soko.ekibun.acg.common.File
+import soko.ekibun.common.File
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvIO
 

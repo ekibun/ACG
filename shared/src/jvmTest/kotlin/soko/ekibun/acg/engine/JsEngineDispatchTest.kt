@@ -190,7 +190,7 @@ class JsEngineDispatchTest {
 
   /**
    * `Response.arrayBuffer` 是**独立的一条桥**（不走 `fetch` 内部），参数是
-   * `[_opaque]` —— 即 `fetch` 回的那个 [soko.ekibun.acg.common.Http.Response] 包装。
+   * `[_opaque]` —— 即 `fetch` 回的那个 [soko.ekibun.common.Http.Response] 包装。
    *
    * 锁两件事：
    * 1. **能真读到 body**（`arrayBuffer()` 必须 `await` 那个 `Deferred` ——
@@ -335,7 +335,7 @@ class JsEngineDispatchTest {
   /**
    * `FormData` 的形状 —— 它一次都不调 `_binding`，是纯 JS 类，但**跨语言**：
    * `__js_proto__` / `__items__` / 每项的 `name` / `value` / `type` / `filename`
-   * 是 `soko.ekibun.acg.common.Http` 构造 multipart 时读的**唯一**入口。
+   * 是 `soko.ekibun.common.Http` 构造 multipart 时读的**唯一**入口。
    *
    * 键名错一个字母的后果是**静默降级**：`filename` 写成 `fileName`，Kotlin 侧读到的
    * 就是 null，文件 part 照样发出去、只是没有文件名（HTTP 层面完全合法，

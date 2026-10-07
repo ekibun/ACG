@@ -27,26 +27,13 @@ kotlin {
     androidResources {
       enable = true
     }
-    withHostTest {
-      isIncludeAndroidResources = true
-    }
-    withDeviceTestBuilder {
-      sourceSetTreeName = "test"
-    }.configure {
-      instrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-    }
   }
 
   sourceSets {
-    androidMain.dependencies {
-      implementation(libs.compose.uiToolingPreview)
-      implementation(libs.compose.uiTooling)
-      implementation(libs.ktor.client.okhttp)
-    }
     commonMain.dependencies {
-      // JNI 绑定层（soko.ekibun.{jni,quickjs,ffmpeg}）抽在 :bindings，包名未变。
-      // api：业务层直接用它的类型，desktopApp / androidApp 也要看得见。
-      api(project(":bindings"))
+      // 平台层（native 绑定 + webview/播放器视图/IO 原语，soko.ekibun.*）在 :platform，
+      // 包名未变。api：业务层直接用它的类型，desktopApp / androidApp 也要看得见。
+      api(project(":platform"))
       implementation(libs.compose.runtime)
       implementation(libs.compose.foundation)
       implementation(libs.compose.material3)
@@ -55,15 +42,6 @@ kotlin {
       implementation(libs.compose.uiToolingPreview)
       implementation(libs.androidx.lifecycle.viewmodelCompose)
       implementation(libs.androidx.lifecycle.runtimeCompose)
-      implementation(libs.ktor.client.core)
-      // 跨端 WebView 两端都自己实现：Android 用 android.webkit.WebView，
-      // 桌面用自研的 cxx/webview（见 soko.ekibun.acg.web）。
-    }
-    jvmMain.dependencies {
-      implementation(libs.ktor.client.java)
-      implementation(libs.logback.classic)
-      // 桌面端可见 WebView 的宿主：整个 AWT 组件（SwingPanel 里的 Canvas）+ JAWT
-      // 取 HWND + SetParent，全在自己这边，不需要任何第三方窗口库。
     }
     jvmTest.dependencies {
       implementation(libs.kotlin.test)
@@ -71,9 +49,6 @@ kotlin {
       // 与 desktop 变体里。运行时它经子 ClassLoader（parent-first）用的是**应用自己的**
       // Compose 拷贝 —— 这份依赖只喂编译，不进任何生产打包。
       implementation(compose.desktop.currentOs)
-    }
-    commonTest.dependencies {
-      implementation(libs.kotlin.test)
     }
   }
 }
@@ -102,16 +77,6 @@ tasks.named<Test>("jvmTest") {
   // 而 Gradle 默认只汇总结果，崩了就只能从上一轮残留的 XML 去猜死在哪个用例。
   // 打印逐用例事件才能一眼定位，代价是每轮几十行输出 —— 留着当偶发崩的第一现场。
   testLogging { events("started", "passed", "skipped", "failed") }
-  environment("ACG_WEBVIEW_DEBUG", "1")
-  environment("ACG_WEBVIEW_LOG", "${rootProject.layout.projectDirectory.asFile}/build/acg-webview.log")
-  // 让 WebView2 把自己那份 Chromium 日志写到 user data folder 下的
-  // EBWebView/chrome_debug.log —— 引擎出的问题只有这份日志说得清。
-  // 想试别的浏览器参数（比如 --disable-gpu）就设 ACG_WEBVIEW2_ARGS，会追加在后面。
-  val extraArgs = providers.environmentVariable("ACG_WEBVIEW2_ARGS").orNull.orEmpty()
-  environment(
-    "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-    "--enable-logging --v=1" + if (extraArgs.isBlank()) "" else " $extraArgs",
-  )
 }
 
 dependencies {

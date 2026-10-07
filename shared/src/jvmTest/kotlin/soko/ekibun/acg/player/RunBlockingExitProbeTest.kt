@@ -2,18 +2,18 @@ package soko.ekibun.acg.player
 
 import kotlinx.coroutines.runBlocking
 import soko.ekibun.TestMediaServer
-import soko.ekibun.acg.common.Http
+import soko.ekibun.common.Http
 import kotlin.test.Test
 import kotlin.test.assertTrue
 
 /**
- * 探针：`runBlocking` 里拿到 [soko.ekibun.acg.common.Http.Response] 后，**不等 body 下完**能不能退出
+ * 探针：`runBlocking` 里拿到 [soko.ekibun.common.Http.Response] 后，**不等 body 下完**能不能退出
  * `runBlocking`，且退出后连接是否仍然可用（读得到后续数据）。
  *
  * 判据三条：
  * 1. `runBlocking` 在服务端只发完第一块时就返回（墙钟远小于「整包发完」）；
  * 2. 退出后逐段读仍能拿到**后面几块** —— 连接没被 `runBlocking` 收尾时顺手 cleanup；
- * 3. [soko.ekibun.acg.common.Http.Response.close] 才是结束会话的那一下（对照：不 close 会漏连接）。
+ * 3. [soko.ekibun.common.Http.Response.close] 才是结束会话的那一下（对照：不 close 会漏连接）。
  */
 class RunBlockingExitProbeTest {
   @Test(timeout = 60_000)

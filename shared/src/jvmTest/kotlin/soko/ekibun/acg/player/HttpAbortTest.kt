@@ -2,7 +2,7 @@ package soko.ekibun.acg.player
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
-import soko.ekibun.acg.common.SOCKET_TIMEOUT_MS
+import soko.ekibun.common.SOCKET_TIMEOUT_MS
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvIO
 import java.io.OutputStream

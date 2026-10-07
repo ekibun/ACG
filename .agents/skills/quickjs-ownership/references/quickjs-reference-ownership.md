@@ -364,7 +364,7 @@ val isClosed: Boolean get() = done.isCompleted
 
 ### 规则 5.1 —— `soko.ekibun.Pointer` 基类（2026-09-20 定稿）
 
-定义在 `bindings/src/commonMain/kotlin/soko/ekibun/jni.kt`（`:bindings` 模块）。**所有持有 native 指针的对象
+定义在 `platform/src/commonMain/kotlin/soko/ekibun/jni.kt`（`:platform` 模块）。**所有持有 native 指针的对象
 都继承它，或者内部持有它的一个子类**。它继承 `AutoCloseable`，只管三件事：
 
 | 职责 | 成员 |
