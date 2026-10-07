@@ -440,7 +440,7 @@ class PointerTest {
 
   /**
    * 句柄**没兑现过**的 [Pointer.initPtr] 型子类：不建、不还，但**必须**先标记 ——
-   * 否则关闭之后的新操作会白白建出一个没人释放的 native 上下文（`AvPlayback.postFrame`
+   * 否则关闭之后的新操作会白白建出一个没人释放的 native 上下文（`AvSurfaceContext.postFrame`
    * 就是靠 [Pointer.isClosed] 拦住这一手）。
    */
   @Test

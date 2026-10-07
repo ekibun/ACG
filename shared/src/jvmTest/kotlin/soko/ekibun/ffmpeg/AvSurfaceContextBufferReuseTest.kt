@@ -16,7 +16,7 @@ import kotlin.test.assertTrue
  * 送显/送声的缓冲**必须零拷贝、且复用同一块 native 内存**。
  *
  * 2026-10-01 实测的两笔账：
- * 1. `AvPlayback.getBuffer` 原先每帧 `NewByteArray` + `SetByteArrayRegion`，视频 1308×736 RGBA =
+ * 1. `AvSurfaceContext.getBuffer` 原先每帧 `NewByteArray` + `SetByteArrayRegion`，视频 1308×736 RGBA =
  *    **3.67 MB/帧**、约 60 帧/s ⇒ 20 s 里分配 **3250 MB**，Java 堆被顶在 `-Xmx` 上
  *    （探针实测堆在 13.8↔222 MB 之间锯齿；改成 direct buffer 后同一探针变成平稳的 27→52 MB）。
  * 2. 现在交出去的是 **direct ByteBuffer**，直接指向 native 那块输出缓冲 —— 所以「复用」这条
@@ -27,9 +27,9 @@ import kotlin.test.assertTrue
  * （不碰 SDL / 声卡；音频只用挂起模拟设备节拍）—— 不需要任何设备就能在 jvmTest 里跑。
  * 素材用随源码入库的 [TestMedia.BBB_640X360_12S_FASTSTART]，换台机器 / CI 也真跑。
  */
-class AvPlaybackBufferReuseTest {
+class AvSurfaceContextBufferReuseTest {
   /** 真上下文 + 空设备：只记下每帧拿到的缓冲地址。 */
-  private class Sink : AvPlayback({ _ -> }, { _ -> }) {
+  private class Sink : AvSurfaceContext() {
     override val sampleRate: Int = 48_000
     override val channels: Int = 2
     override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_S16
@@ -77,7 +77,7 @@ class AvPlaybackBufferReuseTest {
     val media = TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART)
     runBlocking {
       val sink = Sink()
-      val player = FFPlayer(media.toString(), FileIO.Handler(), sink)
+      val player = FFPlayer(media.toString(), FileIO.Handler(), sink) {}
       try {
         val video = player.getStreams().first { it.codecType == AVMediaType.VIDEO }
         val job = launch { player.play(mapOf(AVMediaType.VIDEO to video), 0) }

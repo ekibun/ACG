@@ -22,7 +22,7 @@
   grep import 与代码级符号）：**import 9 处、6 个文件** —— `soko/ekibun/jni.kt` ×2
   （`Executors` / `AtomicBoolean`）、`quickjs/QuickJS.kt` ×3（`Collections` /
   `IdentityHashMap` / `AtomicBoolean`）、`quickjs/JSRef.kt`（`AtomicInteger`）、
-  `ffmpeg/FFPlayer.kt`（`Executors`）、`ffmpeg/AvPlayback.kt`（`ByteBuffer`）、
+  `ffmpeg/FFPlayer.kt`（`Executors`）、`ffmpeg/AvSurfaceContext.kt`（`ByteBuffer`）、
   `acg/engine/JsEngine.kt`（`Charset`）；另有代码级内联：`acg/player/HttpIO.kt:47` 的
   `catch (_: java.io.IOException)`、`JsEngine.kt` 的 `::class.java`（:64）与
   `javaClass`（:117）。
@@ -383,9 +383,9 @@
 ### B19. Android 端 VideoSurface 生命周期收口（待真机实测）
 
 - **代码已补**（2026-10-02）：`VideoSurface.android.kt` 此前没有 onDispose —— common 契约
-  （`VideoSurface.kt:10-11`）写明的「界面销毁时以 null 回调 `onPlayback`」在 Android 侧从未发生，
-  `AndroidPlayback`（AudioTrack + Surface + SurfaceTexture）随页签切走而漏。现在用状态把 factory
-  回调里建的播放器接出来，onDispose 里回调 null + `close()`；`AndroidPlayback.close()` 顺带
+  写明的「界面销毁时以 null 回调 `onSurfaceContext`」在 Android 侧从未发生，
+  `AndroidSurfaceContext`（AudioTrack + Surface + SurfaceTexture）随页签切走而漏。现在用状态把 factory
+  回调里建的播放器接出来，onDispose 里回调 null + `close()`；`AndroidSurfaceContext.close()` 顺带
   release 自己包出来的 Surface（TextureView 那侧 `onSurfaceTextureDestroyed` 恒 false、不代放）。
 - **为什么还留着**：完成判据里的「真机实测」没做过 —— 本机没跑 Android 端。
 - **完成判据**：真机（或模拟器）实测：进播放页 → 播放 → 切到别的页签，AudioTrack 已 release
@@ -411,8 +411,8 @@
 
 ### B22. 取包超时改成「继续重试」后，`pause()` 的最坏耗时变成一个取包超时（100 ms）
 
-- **现状**（2026-10-04 改 `AvPlayback.isReadTimeOut` 时落下的）：`FFPlayer.resumeImpl` 的取包
-  超时分支从「置 `pts.playing = false` + `break`」改成了「上报 `PACKET_READ_TIMEOUT` +
+- **现状**（2026-10-04 改取包超时上报时落下）：`FFPlayer.resumeImpl` 的取包
+  超时分支从「置 `pts.playing = false` + `break`」改成了「上报 `FFPlayer.Event.ReadTimeout` +
   `continue`」—— 网络恢复后能接着取包，不必让上层重新 `play`。代价是
   **播放轮次不再因超时自己结束**，于是 [FFPlayer.pause] 的 `playingJob.join()` 要等当前那个
   `withTimeout` 到点才返回（不再是毫秒级）。
@@ -430,11 +430,12 @@
   100 ms 再被 `withTimeout` 取消 ⇒ **只有 10 Hz 的协程定时器开销，没有 native 往返，
   也不重建 `HttpIO` 会话检查**。原先「长时间停网时空转很贵、加限流」的顾虑不成立。
   剩下的是**响应**问题：网络恢复后最迟 100 ms 就醒过来看一眼，够不够快由产品定。
-- **完成判据**（2026-10-04 已做）：`isReadTimeOut` 的 KDoc 已把「轮次不结束、pause 要等当前
-  那个循环轮次走完」写死；`FFPlayerStallMidPlaybackTest` 也补了两条定点断言 ——
-  探测 `pause()` 之前先取一次 `isReadTimeOut` 快照、确认**那一刻确实处在取包超时进行中**
-  （少了它，「`pause()` 返回了」这条断言在**没有**超时时同样成立，量到的耗时证明不了任何事），
-  再对耗时钉一个量级上界（1 s 预算，实测跨度 7～108 ms）。
+- **完成判据**（2026-10-04 已做；原 `isReadTimeOut` 属性已随事件上报的重构撤掉，判据改由
+  事件口径承担）：超时经 [FFPlayer.Event.ReadTimeout] / [FFPlayer.Event.ReadTimeoutResume] 上报；
+  `FFPlayerStallMidPlaybackTest` 探测 `pause()` 之前先断言已收到 ReadTimeout、
+  确认**那一刻确实处在取包超时进行中**（少了它，「`pause()` 返回了」这条断言在**没有**超时时
+  同样成立，量到的耗时证明不了任何事），并断言此刻还没有 ReadTimeoutResume（量的是超时轮次、
+  不是等恢复），再对耗时钉一个量级上界（1 s 预算，实测跨度 7～108 ms）。
   ⚠️ 它管的是**量级**不是精确值：把 `delay(100)` 加回去会变成 200 ms 上下、仍在预算内 ⇒
   抓不到那种回归；要钉精确值得另写判据。
 
@@ -542,9 +543,9 @@
   - `FFPlayer` 类 KDoc / `takeOverPlayback` / `resume` 各压一轮 —— 这份文件的注释**基本都是
     真约束**（是「该留」的好样板），再压就要删判据了。
 - **复述是独立于长度的另一维**（2026-10-05 补，§四那条重话原先只在 `comments.md` 正文里，
-  `AGENTS.md` §1 竟没有）。压长度时**漏了 4 处**：`AvPlayback` 的「写播放倍速。」配
+  `AGENTS.md` §1 竟没有）。压长度时**漏了 4 处**：`AvSurfaceContext` 的「写播放倍速。」配
   `fun setSpeedRatio`、「读播放倍速。」的前半句；`VideoSurface` 的「平台相关的视频输出区域。」
-  配 `expect fun VideoSurface`；`Playback` 类 KDoc 后半句「音频/视频输出由各平台子类实现」
+  配 `expect fun VideoSurface`；`SurfaceContext` 类 KDoc 后半句「音频/视频输出由各平台子类实现」
   （`abstract class` + 同目录两个 `Playback.*.kt` 已经说明）。⇒ 判据改成**两步**：
   **先剔复述**（删掉这行注释，理解有没有变化？没变化就删），**再问约束还是机制**。
   写进 `comments.md` 第六节与 `AGENTS.md` §1。

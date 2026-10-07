@@ -26,8 +26,24 @@ import kotlin.time.Duration.Companion.milliseconds
 class FFPlayer(
   url: String,
   io: AvIO.Handler,
-  val playback: AvPlayback? = null,
+  val surfaceContext: AvSurfaceContext? = null,
+  val onEvent: (Event) -> Unit,
 ) : AvFormat(url, io) {
+  /**
+   * 播放侧状态上报：[Frame] 每送显一帧回调它的 PTS（**播放结束以 `pts = null` 回调**）；
+   * [ReadTimeout] / [ReadTimeoutResume] 是取包超时的开始与恢复 —— 网络停住与「播完了」
+   * 靠这对事件才分得开（见 [resumeImpl] 的取包循环）。
+   */
+  sealed interface Event {
+    data class Frame(
+      val pts: Long?,
+    ) : Event
+
+    data object ReadTimeout : Event
+
+    data object ReadTimeoutResume : Event
+  }
+
   /**
    * 播放基准点。
    *
@@ -105,7 +121,7 @@ class FFPlayer(
     seek: Long? = null,
   ) = withContext(playerDispatcher) {
     if (!takeOverPlayback()) return@withContext
-    val p = seek ?: pts?.now(playback?.speedRatio() ?: 1f) ?: 0
+    val p = seek ?: pts?.now(surfaceContext?.speedRatio ?: 1f) ?: 0
     pts = PTS(streams).also { it.playing = true }
     seekImpl(p, resumeAfter = true)
   }
@@ -113,7 +129,7 @@ class FFPlayer(
   suspend fun pause() =
     withContext(playerDispatcher) {
       pts?.playing = false
-      playback?.pause()
+      surfaceContext?.pause()
       playingJob?.join()
     }
 
@@ -156,7 +172,7 @@ class FFPlayer(
       it.value.flush()
     }
     if (pts != newPts) return@withContext
-    playback?.stop()
+    surfaceContext?.stop()
     // seek：即使传了 stream，mp4/mov 也只会落关键帧（见类注释）。
     // 落点靠下面的丢帧收敛补齐。
     if (pts != newPts) return@withContext
@@ -293,7 +309,7 @@ class FFPlayer(
                 // 顺序反了就是**上一帧显示成本帧的像素**（实测：204 帧里 180 帧不符，见 silent-failures.md）。
                 lastUpdate?.join()
                 if (!isPlaying()) return@updateJob
-                if (!muted) playback?.postFrame(codecType, frame)
+                if (!muted) surfaceContext?.postFrame(codecType, frame)
                 // seek 后的丢帧收敛（ffplay frame_drops_early）：`diff = dpts - master_clock`，主时钟 ==
                 // resyncTo，`|diff| < AV_NOSYNC_THRESHOLD && diff < 0` ⇒ 解码后立刻丢。**必须排在送显之前、
                 // 且音频也要丢**（落点是容器级的）—— 两条约束与实测见 `silent-failures.md`。
@@ -308,7 +324,7 @@ class FFPlayer(
                   return@updateJob
                 }
                 if (codecType == AVMediaType.VIDEO && onNextFrame?.isActive != true) {
-                  while (frame.timeStamp > pts.now(playback?.speedRatio() ?: 1f)) {
+                  while (frame.timeStamp > pts.now(surfaceContext?.speedRatio ?: 1f)) {
                     delay(1.milliseconds)
                     if (!isPlaying()) return@updateJob
                   }
@@ -317,7 +333,7 @@ class FFPlayer(
                   consumed = true
                   return@updateJob
                 }
-                val timeStamp = playback?.flushFrame(codecType, frame) ?: -1
+                val timeStamp = surfaceContext?.flushFrame(codecType, frame) ?: -1
                 consumed = true
                 if (!isPlaying()) return@updateJob
                 if (timeStamp >= 0) pts.update(timeStamp)
@@ -338,7 +354,7 @@ class FFPlayer(
                     onNextFrame.resumeWith(Result.success(true))
                   }
                 }
-                playback?.onFrame?.invoke(pts.now(playback.speedRatio()))
+                onEvent(Event.Frame(frame.timeStamp))
               }.also { job ->
                 job.invokeOnCompletion {
                   // 轮次在「已经取到帧、还没显示」时停住是常态（单帧步进的每一轮都是）：这种帧**不能出队**，
@@ -362,8 +378,9 @@ class FFPlayer(
       // 步进轮不碰音频设备：真实实现里 `resume()` 就是 `line.start()`，而 `pause()` 的
       // `line.stop()` **不丢弃**已排队的 PCM —— 每步 start 一次，就把上一次播放留在
       // 缓冲里的那一段声音原样放出来（实测每步各一次 resume）。
-      if (!stepMode) playback?.resume()
+      if (!stepMode) surfaceContext?.resume()
       var sendingPacket = 0
+      var isReadTimeout = false
       while (isPlaying()) {
         if (sendingPacket > 3 || (frames.map { it.value.size }.minOrNull() ?: 0) > 3) {
           delay(1.milliseconds)
@@ -373,14 +390,17 @@ class FFPlayer(
           try {
             withTimeout(100.milliseconds) { getPacket(pts.streams.values) }
           } catch (e: TimeoutCancellationException) {
-            playback?.isReadTimeOut = true
+            if (!isReadTimeout) onEvent(Event.ReadTimeout)
+            isReadTimeout = true
             // 不额外退避：上面那个 `withTimeout` 本身就是节拍（100 ms 一轮）。超时**不会**重进
             // native —— 通道还活着时 [AvFormat.getPacket] 走 `packetChannel` 的非空分支，那条读
             // 作业始终是同一条、park 在 `getPacketNative` 里，一轮的代价只是消费侧
             // `for (v in channel)` 空等到超时。
             continue
           }
-        playback?.isReadTimeOut = false
+        if (isReadTimeout) onEvent(Event.ReadTimeoutResume)
+        isReadTimeout = false
+
         if (packet == null) {
           if (frames.map { it.value.size }.sum() == 0) {
             break
@@ -458,7 +478,7 @@ class FFPlayer(
     } finally {
       if (onNextFrame?.isActive == true) onNextFrame.resumeWith(Result.success(false))
       pts.playing = false
-      if (pts == this@FFPlayer.pts) playback?.onFrame?.invoke(null)
+      if (pts == this@FFPlayer.pts) onEvent(Event.Frame(null))
     }
     playJobs.joinAll()
   }

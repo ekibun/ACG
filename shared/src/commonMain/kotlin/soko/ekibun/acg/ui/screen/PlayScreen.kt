@@ -22,7 +22,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
 import soko.ekibun.acg.player.HttpIO
-import soko.ekibun.acg.player.Playback
+import soko.ekibun.acg.player.SurfaceContext
 import soko.ekibun.acg.ui.comp.VideoSurface
 import soko.ekibun.ffmpeg.AVMediaType
 import soko.ekibun.ffmpeg.AvFormat
@@ -34,7 +34,7 @@ import soko.ekibun.ffmpeg.FFPlayer
 @Preview(showBackground = true)
 @Composable
 fun PlayScreen() {
-  val playback = remember { mutableStateOf<Playback?>(null) }
+  val surfaceContext = remember { mutableStateOf<SurfaceContext?>(null) }
   val url =
     remember { mutableStateOf("http://127.0.0.1:8099/media") }
   val player = remember { mutableStateOf<FFPlayer?>(null) }
@@ -58,7 +58,7 @@ fun PlayScreen() {
         maxLines = 1,
         trailingIcon = {
           TextButton(
-            enabled = playback.value != null,
+            enabled = surfaceContext.value != null,
             onClick = {
               MainScope().launch {
                 player.value?.closeAsync()
@@ -66,7 +66,17 @@ fun PlayScreen() {
                   FFPlayer(
                     url.value,
                     HttpIO.Handler(),
-                    playback.value,
+                    surfaceContext.value,
+                    onEvent = {
+                      when (it) {
+                        is FFPlayer.Event.Frame -> {
+                          val p = it.pts
+                          playing.value = p != null
+                          if (p != null && !seeking.value) pts.floatValue = p.toFloat()
+                        }
+                        FFPlayer.Event.ReadTimeout, FFPlayer.Event.ReadTimeoutResume -> println(it)
+                      }
+                    },
                   )
                 player.value = newPlayer
                 val streams = newPlayer.getStreams()
@@ -95,15 +105,8 @@ fun PlayScreen() {
         verticalAlignment = Alignment.CenterVertically,
       ) {
         VideoSurface(
-          modifier = Modifier.aspectRatio(playback.value?.aspectRatio ?: 1f),
-          onPlayback = { playback.value = it },
-          onFrame = { p ->
-            playing.value = p != null
-            if (p != null && !seeking.value) pts.floatValue = p.toFloat()
-          },
-          onEvent = { e ->
-            println(e)
-          },
+          modifier = Modifier.aspectRatio(surfaceContext.value?.aspectRatio ?: 1f),
+          onSurfaceContext = { surfaceContext.value = it },
         )
       }
       Row(
@@ -149,11 +152,11 @@ fun PlayScreen() {
           enabled = player.value != null,
           onClick = {
             MainScope().launch {
-              playback.value?.isMuteVoice = !(playback.value?.isMuteVoice ?: false)
+              surfaceContext.value?.isMuteVoice = !(surfaceContext.value?.isMuteVoice ?: false)
             }
           },
         ) {
-          Text(if (playback.value?.isMuteVoice == true) "mute" else "orig")
+          Text(if (surfaceContext.value?.isMuteVoice == true) "mute" else "orig")
         }
         Slider(
           value = pts.floatValue,

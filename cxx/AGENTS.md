@@ -108,7 +108,7 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
 - **视频转码目标固定为 `AV_PIX_FMT_RGBA`**，写死在 `ffmpeg.cpp` 的 `postFrameVideo`
   （`av_image_get_buffer_size` / `av_image_fill_arrays` / `sws_getContext` 三处必须用同一个
   格式常量，否则 `sws_scale` 写进来的布局与缓冲区对不上）。Kotlin 侧已无像素格式常量，
-  也没有 `AvPlayback.videoFormat` —— 平台实现只负责把 RGBA 字节贴到自己的渲染面。
+  也没有 `AvSurfaceContext.videoFormat` —— 平台实现只负责把 RGBA 字节贴到自己的渲染面。
 - **桌面端已开 x86 asm，Android 仍关着**（2026-09-22）：`ffmpeg.cmake` 只在 `ANDROID` 分支传
   `--disable-asm`。桌面端构建 `HAVE_X86ASM=1`，`libavcodec/x86` / `libswscale/x86` / `libavutil/x86`
   的 `X86ASM-OBJS` 全部编入（构建机需装 `nasm`，本机用 MSYS2 的 `mingw-w64-x86_64-nasm`）。
@@ -123,7 +123,7 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
   是 `sws_init_context` 路径里的 `ff_yuv2rgb_get_func_ptr` 打出来的，**它的条数就等于 sws
   上下文被重建的次数** —— 日志里刷出几千条时先查上下文缓存，别去查颜色空间
   （2026-09-22：这条线索把 `_srcVideoFormat` 漏回写钉了出来）。
-- 音频不一样：`AvPlayback.audioFormat` 仍是平台**要求** native 输出什么采样格式，
+- 音频不一样：`AvSurfaceContext.audioFormat` 仍是平台**要求** native 输出什么采样格式，
   语义见 [../AGENTS.md](../AGENTS.md) §4。
 - 自定义 AVIO 下的 seek 能力由 `HttpIO.seek` 的模拟质量决定（`aviobuf.c` 会因 seek 回调非空
   判为 `AVIO_SEEKABLE_NORMAL`）；语义有专属用例 `HttpSeekSemanticsTest` /

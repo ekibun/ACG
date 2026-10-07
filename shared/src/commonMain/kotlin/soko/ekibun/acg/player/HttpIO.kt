@@ -241,7 +241,7 @@ class HttpIO(
           // 闲置超时：这条会话多半死了 ⇒ 丢掉、按同样间隔换一条，**不限次数**（抛上去会被 aviobuf
           // 毒化成 EOF、播放静默「正常结束」，见 `http-streaming.md`）。间隔同样取
           // [SOCKET_TIMEOUT_MS]：刚踩完一个超时窗口就重连，换来的仍是死连接。
-          // 上层另有时间闸（FFPlayer 的取包超时 → `AvPlayback.onEvent`），这里**只管一直读**。
+          // 上层另有时间闸（FFPlayer 的取包超时 → `FFPlayer.Event.ReadTimeout`），这里**只管一直读**。
           delay(SOCKET_TIMEOUT_MS.milliseconds)
           rsp.close()
           if (cachedRsp === rsp) cachedRsp = null

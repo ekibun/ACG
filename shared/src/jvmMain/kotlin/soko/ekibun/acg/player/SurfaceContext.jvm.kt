@@ -20,15 +20,12 @@ import javax.sound.sampled.SourceDataLine
  * 桌面端播放实现：音频走 javax.sound.sampled；视频写进**复用的 skiko 位图**（[frame]），
  * 由 `VideoSurface.jvm.kt` 取 skiaCanvas 直接画 —— 不每帧新建对象，理由见 [nextFrameBitmap]。
  *
- * [soko.ekibun.ffmpeg.AvPlayback] 的 native 侧会按构造时传入的 audioFormat 用 swr_convert
+ * [soko.ekibun.ffmpeg.AvSurfaceContext] 的 native 侧会按构造时传入的 audioFormat 用 swr_convert
  * 转码输出，因此这里的 audioFormat = AV_SAMPLE_FMT_FLT 意味着拿到的是 float32。
  * 桌面声卡用 16bit PCM，故在这里转换成 16bit：转换后每帧 4 字节，正好等于 48kHz 立体声
  * 16bit 的消耗速率，播放速度与真实时间一致。
  */
-class DesktopPlayback(
-  onFrame: (Long?) -> Unit,
-  onEvent: (Event) -> Unit,
-) : Playback(onFrame, onEvent) {
+class DesktopSurfaceContext : SurfaceContext() {
   private val playbackDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
 
   private companion object {
@@ -90,15 +87,10 @@ class DesktopPlayback(
   private fun toPcm16(value: Float): Short = (value.coerceIn(-1f, 1f) * 32767f).toInt().toShort()
 
   /**
-   * 送显位图池 —— **复用**，不再每帧新建 skiko 对象。
-   *
-   * 为什么非池化不可：skiko 的 `Image`/`Bitmap` 是 native 内存、靠 `Cleaner` 回收，而 Cleaner 要等
-   * 一次 GC 才会被触发；本进程 Java 堆只有几十 MB、上限却是 GB 级 ⇒ GC 十秒才来一次，于是每帧
-   * 3.67 MB 的位图会攒到 **1.3~2.2 GB**（实测 RSS 锯齿；而且回收后 free 空间留在 native 堆里，
-   * RSS 也不还）。池化之后每帧只有一次 memcpy，**零分配**。
-   *
-   * 池里轮换 [FRAME_POOL] 块：写入的那块必然不是刚发布出去的那块（Compose 那边可能还在画它，
-   * 撕裂窗口 = 池深 × 帧间隔），同时池一直强引用着它们 ⇒ 不进 Cleaner、RSS 有上界。
+   * 送显位图池 —— **复用**：skiko 位图是 native 内存、靠 `Cleaner` 回收，而本进程 GC 十秒才来
+   * 一次，每帧 3.67 MB 的位图会攒到 GB 级、RSS 不还（实测见 `silent-failures.md`
+   * 「skiko 对象泄漏」条）。池一直强引用 ⇒ 不进 Cleaner、RSS 有上界；池深 [FRAME_POOL] 即撕裂
+   * 窗口（写入块与「刚发布出去的那块」至少隔 [FRAME_POOL] 帧 = 池深 × 帧间隔）。
    */
   private val framePool = ArrayList<Bitmap>()
   private var framePoolWidth = 0
@@ -169,9 +161,8 @@ class DesktopPlayback(
       val out = line
       out.stop()
       out.flush()
-      // 注意：Android 的 AudioTrack.flush() 会把播放头归零，但 DataLine 的帧计数
-      // 是「自 open 以来」累计的，flush 不会重置。这里重新取基准，否则 flushFrame
-      // 算出的 offset 会变成负数（返回 -1），seek 之后 PTS 校正就失效了。
+      // DataLine 的帧计数「自 open 以来」累计，flush 不重置（AudioTrack 的会归零，别照搬）：
+      // 这里重取基准，否则 flushFrame 算出的 offset 变负、seek 后 PTS 校正失效。
       frameWrite = out.longFramePosition
     }
 

@@ -396,9 +396,10 @@ struct SWContext {
   // 视频
   int64_t width = 0;
   int64_t height = 0;
-  // 转码目标格式固定为 AV_PIX_FMT_RGBA（见 postFrameVideo）：平台侧渲染
-  // （Playback.jvm.kt 的 Skia、Playback.android.kt 的 Bitmap）一直就是按它消费
-  // 帧的，没有别的选项，所以不把它做成构造参数。
+  // 转码目标格式固定为 AV_PIX_FMT_RGBA（见
+  // postFrameVideo）：平台侧渲染（SurfaceContext.jvm.kt 的
+  // Skia、SurfaceContext.android.kt 的
+  // Bitmap）一直就是按它消费帧的，没有别的选项，所以不把它做成构造参数。
   uint8_t* videoBuffer = nullptr;
   int64_t videoBufferSize = 0;
   // opaque：以下都是内部状态
@@ -500,9 +501,10 @@ int64_t postFrameVideo(SWContext* ctx, AVFrame* frame) {
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_soko_ekibun_ffmpeg_AvPlayback_initNative(JNIEnv* env, jobject thiz,
-                                              jint sample_rate, jint channels,
-                                              jint audio_format) {
+Java_soko_ekibun_ffmpeg_AvSurfaceContext_initNative(JNIEnv* env, jobject thiz,
+                                                    jint sample_rate,
+                                                    jint channels,
+                                                    jint audio_format) {
   auto ret = new SWContext();
   ret->speedRatio = 1;
   ret->sampleRate = sample_rate;
@@ -511,9 +513,8 @@ Java_soko_ekibun_ffmpeg_AvPlayback_initNative(JNIEnv* env, jobject thiz,
   return (jlong)ret;
 }
 extern "C" JNIEXPORT jint JNICALL
-Java_soko_ekibun_ffmpeg_AvPlayback_postFrameNative(JNIEnv* env, jobject thiz,
-                                                   jlong ctx, jint codec_type,
-                                                   jlong frame) {
+Java_soko_ekibun_ffmpeg_AvSurfaceContext_postFrameNative(
+    JNIEnv* env, jobject thiz, jlong ctx, jint codec_type, jlong frame) {
   switch (codec_type) {
     case AVMEDIA_TYPE_AUDIO:
       return postFrameAudio((SWContext*)ctx, (AVFrame*)frame);
@@ -533,8 +534,9 @@ Java_soko_ekibun_ffmpeg_AvPlayback_postFrameNative(JNIEnv* env, jobject thiz,
 // ⚠️ 调用方必须同步消费这块内存、不能留存引用：
 // 下一帧 sws_scale / swr_convert 会就地覆写。
 extern "C" JNIEXPORT jobject JNICALL
-Java_soko_ekibun_ffmpeg_AvPlayback_getBuffer(JNIEnv* env, jobject thiz,
-                                             jlong pctx, jint codec_type) {
+Java_soko_ekibun_ffmpeg_AvSurfaceContext_getBuffer(JNIEnv* env, jobject thiz,
+                                                   jlong pctx,
+                                                   jint codec_type) {
   auto ctx = (SWContext*)pctx;
   switch (codec_type) {
     case AVMEDIA_TYPE_AUDIO:
@@ -548,15 +550,17 @@ Java_soko_ekibun_ffmpeg_AvPlayback_getBuffer(JNIEnv* env, jobject thiz,
   }
 }
 extern "C" JNIEXPORT jlong JNICALL
-Java_soko_ekibun_ffmpeg_AvPlayback_bufferAddress(JNIEnv* env, jobject thiz,
-                                                 jobject buffer) {
+Java_soko_ekibun_ffmpeg_AvSurfaceContext_bufferAddress(JNIEnv* env,
+                                                       jobject thiz,
+                                                       jobject buffer) {
   // 只对 direct buffer 有意义（我们自己的就是）。
   return (jlong)(intptr_t)env->GetDirectBufferAddress(buffer);
 }
 extern "C" JNIEXPORT void JNICALL
-Java_soko_ekibun_ffmpeg_AvPlayback_copyPixelsNative(JNIEnv* env, jobject thiz,
-                                                    jlong src, jlong dst,
-                                                    jint bytes) {
+Java_soko_ekibun_ffmpeg_AvSurfaceContext_copyPixelsNative(JNIEnv* env,
+                                                          jobject thiz,
+                                                          jlong src, jlong dst,
+                                                          jint bytes) {
   // 纯 memcpy：桌面端把 native 那块 RGBA 直接写进
   // 复用的位图，避免每帧新建 skiko 对象。
   // 目标由调用方保证够大（同宽高 allocPixels 出来的）。
@@ -565,16 +569,15 @@ Java_soko_ekibun_ffmpeg_AvPlayback_copyPixelsNative(JNIEnv* env, jobject thiz,
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_soko_ekibun_ffmpeg_AvPlayback_closeNative(JNIEnv* env, jobject thiz,
-                                               jlong pctx) {
+Java_soko_ekibun_ffmpeg_AvSurfaceContext_closeNative(JNIEnv* env, jobject thiz,
+                                                     jlong pctx) {
   auto ctx = (SWContext*)pctx;
   if (!ctx) return;
   if (ctx->_swsCtx) sws_freeContext(ctx->_swsCtx);
   if (ctx->_swrCtx) swr_free(&ctx->_swrCtx);
-  // 两个输出缓冲是 av_fast_malloc 出来的，原来没还 ⇒
-  // 每个 AvPlayback 实例漏一份（视频那支最大）。
-  // 音频有**两块**在 audioBuffer 与 _audioBuffer1 之间
-  // 来回换（见 postFrameAudio 末尾），两块都得还。
+  // 两个输出缓冲（av_fast_malloc）必须还，否则每个 AvSurfaceContext
+  // 实例漏一份（视频那支最大）；音频有**两块**在 audioBuffer 与 _audioBuffer1
+  // 之间来回换（见 postFrameAudio 末尾），都得还。
   av_free(ctx->audioBuffer);
   av_free(ctx->_audioBuffer1);
   av_free(ctx->videoBuffer);
@@ -582,9 +585,10 @@ Java_soko_ekibun_ffmpeg_AvPlayback_closeNative(JNIEnv* env, jobject thiz,
 }
 
 extern "C" JNIEXPORT jfloat JNICALL
-Java_soko_ekibun_ffmpeg_AvPlayback_speedRatioNative(JNIEnv* env, jobject thiz,
-                                                    jlong pctx,
-                                                    jfloat new_value) {
+Java_soko_ekibun_ffmpeg_AvSurfaceContext_speedRatioNative(JNIEnv* env,
+                                                          jobject thiz,
+                                                          jlong pctx,
+                                                          jfloat new_value) {
   auto ctx = (SWContext*)pctx;
   if (!ctx) return 1;
   if (new_value > 0) ctx->speedRatio = new_value;

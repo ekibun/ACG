@@ -18,11 +18,9 @@ import soko.ekibun.ffmpeg.AvFormat
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 
-class AndroidPlayback(
+class AndroidSurfaceContext(
   var surfaceTexture: SurfaceTexture,
-  onFrame: (Long?) -> Unit,
-  onEvent: (Event) -> Unit,
-) : Playback(onFrame, onEvent) {
+) : SurfaceContext() {
   private val playbackDispatcher by lazy {
     Executors.newSingleThreadExecutor().asCoroutineDispatcher()
   }
@@ -32,13 +30,10 @@ class AndroidPlayback(
     const val DEFAULT_CHANNEL = AudioFormat.CHANNEL_OUT_STEREO
 
     /**
-     * AudioTrack 的编码格式。native 会按它转码，所以改这个值就能整体切换音频位宽，
-     * 无需动 Kotlin 侧任何转换代码。
-     *
-     * 注意 ENCODING_PCM_8BIT 只是"不保证所有设备支持"，并非不可用：AudioTrack 会把
-     * 它接受为合法的 linear PCM（AudioFormat.isEncodingLinearPcm 返回 true），
-     * 且 byte[] 写入路径不经过 short[] 那条 `> ENCODING_LEGACY_SHORT_ARRAY_THRESHOLD`
-     * 的限制分支。
+     * AudioTrack 的编码格式。native 按它转码，改这个值就能整体切音频位宽，不用动转换代码。
+     * `ENCODING_PCM_8BIT` 并非不可用：AudioTrack 接受为合法 linear PCM，且 byte[] 写入路径
+     * 不经过 short[] 那条 `> ENCODING_LEGACY_SHORT_ARRAY_THRESHOLD` 的限制分支
+     * （只是「不保证所有设备支持」）。
      */
     const val DEFAULT_FORMAT = AudioFormat.ENCODING_PCM_8BIT
   }
@@ -47,14 +42,10 @@ class AndroidPlayback(
   override val channels: Int by lazy { audio.channelCount }
 
   /**
-   * 交给 native 的输出采样格式（AVSampleFormat）。
-   *
-   * 必须由 AudioTrack 的编码格式反推，不能写常量：native 侧 postFrameAudio 用
-   * swr_alloc_set_opts2 把解码结果转成这个格式后才交给 AudioTrack，两者不一致时
-   * AudioTrack 会把字节按错误的位宽解释（8bit 轨收到 float32 就是 4 倍速的噪声）。
-   *
-   * 用 lazy 而不是直接初始化，是为了在属性声明顺序上避开 [audio]（它声明在后面）。
-   * 取值只发生在首次 postFrame 之前，那时 AudioTrack 早已构造完成。
+   * 交给 native 的输出采样格式（AVSampleFormat）。必须由 [audio] 的编码反推、不能写常量：
+   * 两者不一致时 AudioTrack 会把字节按错误的位宽解释（8bit 轨收到 float32 就是 4 倍速的噪声）。
+   * lazy 是为了避开属性声明顺序（[audio] 声明在后面）；取值只发生在首次 postFrame 之前，
+   * 那时 AudioTrack 早已构造完成。
    */
   override val audioFormat: Int by lazy {
     when (audio.audioFormat) {

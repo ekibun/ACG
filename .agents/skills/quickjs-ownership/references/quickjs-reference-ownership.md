@@ -412,7 +412,7 @@ val isClosed: Boolean get() = done.isCompleted
      才拦得住，而「不拥有」本来就该是**类型**上的事实。
   ⚠️ 还有一条曾经存在、**2026-09-20 已撤掉**的路：**「句柄要晚点才有」→ 不继承本类、改成内部
   持有一个子类**（`AvFormat.ctx` / `AvCodec.ctx` / `AvPlayback.Handle` / `AvPacket.handle`）。
-  撤掉的理由是它们都在冒充「句柄还不知道在哪」：现在 `AvFormat` / `AvCodec` / `AvPlayback`
+  撤掉的理由是它们都在冒充「句柄还不知道在哪」：现在 `AvFormat` / `AvCodec` / `AvSurfaceContext`
   / `AvPacket` **直接继承 `Pointer`**、各自覆写 `initPtr()` 现算，少一层转发和一层
   「实例是惰性的」的绕。
   ⚠️ 「句柄什么时候到手」这一处 2026-09-20 走过**两版，前一版错**，别再回去：
@@ -532,7 +532,7 @@ val isClosed: Boolean get() = done.isCompleted
   **跑在归属 dispatcher 上**（`dispatcher == null` 时跑在调用线程上）。
   分两档：
   - **能归还**（绝大多数）：`override suspend fun releaseImpl(ptr: Long)` —— `AvFrame` /
-    `AvPacket` / `AvFormat` / `AvCodec` / `AvPlayback` / `QuickJS`。基类把归还投递到归属
+    `AvPacket` / `AvFormat` / `AvCodec` / `AvSurfaceContext` / `QuickJS`。基类把归还投递到归属
     dispatcher 上，所以**「释放必须回那条线程」不再是特例**：`AvFormat` / `AvCodec` 从前
     得把 `close()` 覆写成抛异常、另立 `closeAsync()`，现在直接继承、`close()` 就是正常路径
     （`PlayScreen` / `FFPlayer` 的调用点也随之改回 `close()`）。
@@ -549,7 +549,7 @@ val isClosed: Boolean get() = done.isCompleted
   与 `explicitZeroHandleIsNotTreatedAsMissing`（构造参数型拿着 `0` 也照样归还一次）。
 - ⚠️ **`close()` 一定先 `markClosed()`**（哪怕这一轮不还）：`closeDeferred()` 的两条短路
   分支都在标记**之后**。否则「关过了但句柄没建」的对象会放过之后的新操作，让新操作建出一个
-  没人释放的上下文（`AvPlayback.postFrame` 就靠 `isClosed` 拦这一手，2026-09-20 起不再自备
+  没人释放的上下文（`AvSurfaceContext.postFrame` 就靠 `isClosed` 拦这一手，2026-09-20 起不再自备
   `AtomicBoolean`）。
 - ⚠️ 要**等归还落地**的地方得 `await()` 它：`close()` 只投递。`FFPlayer.closeAsync()` 里
   `super.close()` / `codec.close()` 这种「以为写的是 `closeAsync`」的位置，2026-09-20 起

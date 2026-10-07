@@ -5,10 +5,10 @@
 
 本项目最危险的一类问题**不报错、只失效**，排查时最容易误判成"代码没写对"。动到下面任一条之前先读它：
 
-- **改过 native 却用着旧 dll** → 不报错，只是参数错位。改 Kotlin 侧签名后，第一件事是确认 dll
-  已刷新到运行位置（落位见 skill `build-and-test` 的
-  [`dll-sync.md`](../../build-and-test/references/dll-sync.md)）。
-- **漏拷 dll** → 症状是"改动没生效、连日志都没有"。dll 要落到三个位置，见同一份 `dll-sync.md`。
+- **用着旧 dll** → 不报错，只是参数错位，症状是"改动没生效、连日志都没有"。重编与落位已全自动
+  （所有消费链的任务图都挂着 `buildJni`，见 [`cxx/AGENTS.md`](../../../../cxx/AGENTS.md) 的「原生构建」），
+  剩余的来路只有 **Hot Reload 换不了 native 库**（改完 `cxx/` 必须整进程重启）与改了 Kotlin 侧
+  JNI 签名却没意识到 dll 也得跟着重编。
 - **改 `soko.ekibun.acg.engine` 下的类名** → `JsEngine` 按名字反射实例化它们、JS 侧按名字调用，
   改名/移动**不会报错**，只会让脚本静默失效。
 - **在 `init.js` 里用 `import()` / `require()`** → 本桥的模块加载路径会把进程 `abort()`。
@@ -243,7 +243,7 @@
   `GC.class_histogram` 里 `org.jetbrains.skia.impl.CleanableImpl` / `Managed$CleanerThunk` 有几百个
   （wrapper 已经没了、native 还没还）。**改前 900MB↔2.2GB 锯齿，改成复用位图池后稳定 280 MB**。
    对策：**别在每帧路径上分配 skiko 对象** —— 复用 `Bitmap`（池化）+ `peekPixels()?.addr` +
-   `memcpy` 写入 + 让 Compose 从复用位图读（本地做法：`DesktopPlayback.framePool` 与
+   `memcpy` 写入 + 让 Compose 从复用位图读（本地做法：`DesktopSurfaceContext.framePool` 与
    `VideoSurface.jvm.kt` 的 `nativeCanvas.drawImageRect`）。
 - **`HttpClient.request(...)` 会把整个响应体先读进内存 ⇒ 远程播放「不报错地」先整包下载**（2026-10-03 实测）。
   症状形状：远程源迟迟不出画面（要等整包下完），内存随文件大小走，而**没有任何报错**。
@@ -364,8 +364,8 @@
   现状见 `AvFormat.resetChannel` 的三步固定顺序（第 2 步）。
 
 - **两轮播放同时在飞会串帧（Kotlin / FFmpeg）**。硬约束在 native 侧：**每种流只有一块输出
-  缓冲**（`SWContext::videoBuffer`）—— `AvPlayback.postFrame` 整体改写它、后一步
-  `AvPlayback.flushFrame` 才把像素抄给平台。两轮同时走到这对调用中间，上一轮的送显就会读到
+  缓冲**（`SWContext::videoBuffer`）—— `AvSurfaceContext.postFrame` 整体改写它、后一步
+  `AvSurfaceContext.flushFrame` 才把像素抄给平台。两轮同时走到这对调用中间，上一轮的送显就会读到
   这一轮写进去的像素。⇒ 同一时刻只允许一轮在飞（`FFPlayer.takeOverPlayback`）。
   ⚠️ 别拿 `Mutex` 解：**它是排队**，后到的调用等前一轮跑完再上 ⇒ 上一次跳转的结果照样先
   落地一次、再被下一次覆盖（「都做一遍」，不是「后来者顶掉先到者」）；而且它只盖得住被包住的

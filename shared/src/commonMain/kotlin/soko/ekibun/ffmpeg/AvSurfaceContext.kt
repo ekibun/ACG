@@ -4,15 +4,12 @@ import soko.ekibun.Pointer
 import soko.ekibun.jniLoadLibrary
 import java.nio.ByteBuffer
 
-abstract class AvPlayback(
-  val onFrame: (Long?) -> Unit,
-  val onEvent: (Event) -> Unit,
-) : Pointer() {
-  enum class Event {
-    PACKET_READ_TIMEOUT,
-    PACKET_READ_TIMEOUT_RESOLVED,
-  }
-
+/**
+ * native 输出端（ffmpeg.cpp 的 `SWContext`，Context 即指它）的门面：[postFrame] 把解码帧喂进
+ * sws_scale / swr_convert，[flushFrame] 把转出来的缓冲交给平台 —— 视频固定 RGBA、音频按
+ * [audioFormat]；送显 / 送声卡由平台子类实现（`acg.player` 的两个 `SurfaceContext` 子类）。
+ */
+abstract class AvSurfaceContext : Pointer() {
   abstract val sampleRate: Int
   abstract val channels: Int
   abstract val audioFormat: Int
@@ -60,7 +57,7 @@ abstract class AvPlayback(
     /** [bufferAddress] 的包装：桌面端拿它取 native 缓冲的地址。 */
     internal fun addressOf(buffer: ByteBuffer): Long = bufferAddress(buffer)
 
-    /** native→native 原样拷贝（给桌面端把 RGBA 写进复用位图，见 `DesktopPlayback`）。 */
+    /** native→native 原样拷贝（给桌面端把 RGBA 写进复用位图，见 `DesktopSurfaceContext`）。 */
     @JvmStatic
     private external fun copyPixelsNative(
       src: Long,
@@ -78,42 +75,18 @@ abstract class AvPlayback(
     private external fun closeNative(ctx: Long)
   }
 
-  /**
-   * 「这一轮取包超时了」——**网络停住**，与「播完了」是两件事，上层要靠它提示用户。
-   *
-   * 由 [FFPlayer.resumeImpl] 的取包循环独家写：取包超时置 `true`、下一次
-   * 成功取到包置回 `false`。**写侧只在 `playerDispatcher` 上**，所以没有并发写。
-   *
-   * **setter 会发事件**（每次值真的翻转才经 [onEvent] 发一条 [Event]；同值重复赋值不发，否则
-   * 播放轮次会以取包超时为节拍把上层刷爆）。**读这个字段当不了「当前状态」的可靠来源** ——
-   * 它只保证写侧单线程，没给读侧任何跨线程同步（非 `@Volatile`、非快照）；要跟 UI 对齐就用 [Event]。
-   *
-   * 它**不等于**「播放结束了」：取包超时后轮次是 `continue` 不是 `break`，网络恢复能接着取包，
-   * 所以期间画面**定格**而不是消失（真播完走 [onFrame] 的 `null`）。代价见 `debugging.md`
-   * 「`pause()` 返回慢不等于挂死」一节。
-   */
-  var isReadTimeOut = false
-    set(value) {
-      if (field != value) {
-        onEvent(if (value) Event.PACKET_READ_TIMEOUT else Event.PACKET_READ_TIMEOUT_RESOLVED)
-      }
-      field = value
-    }
-
-  /** 挂起：句柄要经 [Pointer.withPtr] 取，属性形态表达不了。 */
-  suspend fun speedRatio(): Float = withPtr { ptr -> speedRatioNative(ptr, 0f) }
+  var speedRatio = 1f
+    private set
 
   suspend fun setSpeedRatio(value: Float) =
     withPtr { ptr ->
-      speedRatioNative(ptr, value)
+      speedRatio = speedRatioNative(ptr, value)
     }
 
   /**
-   * native 上下文句柄 —— 覆写基类的句柄来源。
-   *
-   * 句柄要读 [sampleRate] 这些 **abstract** 成员，而构造期它们还没有值，所以只能等
-   * **首次读句柄**时才建（这是基类 [Pointer.initPtr] 的时机约定，见那边的类文档）；
-   * 一次都没用过就 `close()` 也没关系：[Pointer.closeDeferred] 不会为了「还」去现建一个。
+   * native 上下文句柄。句柄要读 [sampleRate] 这些 **abstract** 成员，构造期还没有值，
+   * 所以等**首次读句柄**才建（[Pointer.initPtr] 的时机约定）；一次没用过就 `close()` 也不会
+   * 现建一个（[Pointer.closeDeferred] 不为「还」而建）。
    *
    * 视频输出格式不在参数里：native 侧固定按 `AV_PIX_FMT_RGBA` 转码。
    */
@@ -128,15 +101,12 @@ abstract class AvPlayback(
   }
 
   /**
-   * 把一帧交给平台消费（音频写声卡 / 视频送显）。
+   * 把一帧交给平台消费（音频写声卡 / 视频送显）。返回值只对**音频**有意义：折算掉重采样前导
+   * 静音后「真正上屏的时间戳」；视频恒 `-1`，丢帧收敛要用 [FFPlayer] 那边的 `AvFrame.timeStamp`
+   * （单位同样是 `AV_TIME_BASE` 微秒）。
    *
-   * 返回值只对**音频**有意义：它是折算掉重采样前导静音后「真正上屏的时间戳」。视频恒返回 `-1`
-   * （送显只是它的副作用）⇒ 调用方**不能**用它判断视频帧的时间戳，丢帧收敛要用 [FFPlayer] 那边的
-   * `AvFrame.timeStamp`（单位同样是 `AV_TIME_BASE` 微秒）。
-   *
-   * 交给平台的 `ByteBuffer` 是 **native 内存上的 direct buffer**（零拷贝）：实现必须
-   * **在同一调用里同步消费**，不能留存、不能跨帧使用 —— 下一帧 `sws_scale` / `swr_convert`
-   * 会就地覆写这块内存。要留住像素，自己拷一份。
+   * 交给平台的 `ByteBuffer` 是 **direct buffer**（零拷贝），必须**同一调用里同步消费** ——
+   * 下一帧 `sws_scale` / `swr_convert` 会就地覆写（同 [getBuffer] 的约束）；要留住像素自己拷一份。
    */
   suspend fun flushFrame(
     codecType: Int,
@@ -173,11 +143,8 @@ abstract class AvPlayback(
   abstract suspend fun stop()
 
   /**
-   * 释放 native 上下文。幂等 —— 两个平台的 `Playback` 子类都会在 `super.close()`
-   * 之后再关自己的资源，重复调用不能变成第二次 `closeNative`。
-   *
-   * 句柄的「只释放一次」由基类 [Pointer.markClosed] 保证；这一层只管把 native 上下文
-   * 还回去。
+   * 释放 native 上下文，幂等：两个平台的 `SurfaceContext` 子类都在 `super.close()` 之后再关
+   * 自己的资源，重复调用不能变成第二次 `closeNative`（「只释放一次」由 [Pointer.markClosed] 保证）。
    */
   override suspend fun releaseImpl(ptr: Long) = closeNative(ptr)
 }

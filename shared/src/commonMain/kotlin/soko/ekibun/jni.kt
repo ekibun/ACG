@@ -8,7 +8,6 @@ import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.invoke
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -152,7 +151,7 @@ open class ThreadDispatcher(
  * 1. **构造参数里就有句柄**（[soko.ekibun.ffmpeg.AvFrame]、[soko.ekibun.ffmpeg.AvPacket]、
  *    [soko.ekibun.ffmpeg.AvStream]、[soko.ekibun.quickjs.JSRef]，以及
  *    [soko.ekibun.ffmpeg.AvCodec] / [soko.ekibun.ffmpeg.AvFormat] /
- *    [soko.ekibun.ffmpeg.AvPlayback] 各自的内部子类…）—— **最常见、也最省事的一条**：
+ *    [soko.ekibun.ffmpeg.AvSurfaceContext] 各自的内部子类…）—— **最常见、也最省事的一条**：
  *    把句柄当**基类构造参数的第一个实参**传进来（`Pointer(nativePtr, dispatcher)`），
  *    一个成员都不用覆写；
  * 2. **句柄要拿 `this` 去 native 换**（[soko.ekibun.quickjs.QuickJS]）—— 第一个实参留

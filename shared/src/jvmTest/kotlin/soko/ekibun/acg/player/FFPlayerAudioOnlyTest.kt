@@ -7,13 +7,14 @@ import kotlinx.coroutines.withTimeout
 import soko.ekibun.TestMedia
 import soko.ekibun.ffmpeg.AVMediaType
 import soko.ekibun.ffmpeg.AvFormat
-import soko.ekibun.ffmpeg.AvPlayback
+import soko.ekibun.ffmpeg.AvSurfaceContext
 import soko.ekibun.ffmpeg.FFPlayer
 import java.nio.ByteBuffer
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * **只喂音频流**时的 `play()` 真路径回归 —— 「纯音频文件」的等价形态。
@@ -27,16 +28,11 @@ import kotlin.test.assertTrue
  * 所以视频包根本不会流进来。
  *
  * 素材用随源码入库的 [TestMedia.BBB_640X360_12S_FASTSTART]（含音轨，AAC 44.1kHz 立体声）。
- * 假声卡 [FakePlayback] 只数「音频帧到达平台侧」的次数，不排真声卡 —— 音频路径没有实时节流
+ * 假声卡 [FakeSurfaceContext] 只数「音频帧到达平台侧」的次数，不排真声卡 —— 音频路径没有实时节流
  * （等时钟的 `delay` 只在视频分支），整轮会以解码速度跑完。
  */
 class FFPlayerAudioOnlyTest {
-  // `events` 收**普通参数**（不带 val）：super 实参位置的 lambda 若引用构造
-  // 属性会隐式捕获还没初始化的 `this`（Pointer 类文档记过的坑）；测试侧持有
-  // 同一份列表，照样读得到。
-  private class FakePlayback(
-    events: MutableList<Long?>,
-  ) : AvPlayback({ events.add(it) }, { _ -> }) {
+  private class FakeSurfaceContext : AvSurfaceContext() {
     val flushes = AtomicInteger(0)
 
     // 声明给 native 的重采样目标，取素材自己的规格（BBB = AAC 44.1kHz 立体声）——
@@ -47,7 +43,7 @@ class FFPlayerAudioOnlyTest {
 
     override suspend fun flushAudioBuffer(buf: ByteBuffer): Int {
       flushes.incrementAndGet()
-      // 返回 0 = 没有重采样前导偏移，时间戳原样上屏（见 AvPlayback.flushFrame）。
+      // 返回 0 = 没有重采样前导偏移，时间戳原样上屏（见 AvSurfaceContext.flushFrame）。
       return 0
     }
 
@@ -67,21 +63,26 @@ class FFPlayerAudioOnlyTest {
   @Test(timeout = 120_000)
   fun audioOnlyPlayRunsToEof() {
     val events: MutableList<Long?> = Collections.synchronizedList(mutableListOf<Long?>())
-    val playback = FakePlayback(events)
+    val playback = FakeSurfaceContext()
     val media = TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART)
     runBlocking {
-      val player = FFPlayer(media.toString(), FileIO.Handler(), playback)
+      val player =
+        FFPlayer(media.toString(), FileIO.Handler(), playback) {
+          if (it is FFPlayer.Event.Frame) {
+            events.add(it.pts)
+          }
+        }
       try {
         val audio = player.getStreams().first { it.codecType == AVMediaType.AUDIO }
         // 只把音频流传进去 —— 这就是「纯音频文件」的等价输入。
         // play() 要 fire-and-forget：withContext 只等到 seek/resume 排程完，
         // 整轮挂在 playingJob 上 —— UI 里也是这么调的。
         launch { player.play(mapOf(AVMediaType.AUDIO to audio), 0) }
-        withTimeout(30_000) {
-          while (events.isEmpty() || events.last() != null) delay(10)
+        withTimeout(30_000.milliseconds) {
+          while (events.isEmpty() || events.last() != null) delay(10.milliseconds)
         }
         assertTrue(playback.flushes.get() > 0, "audio frames must reach the platform side")
-        assertTrue(events.contains(null), "EOF must be signaled via onFrame(null)")
+        assertTrue(events.contains(null), "EOF must be signaled via Event.Frame(null)")
       } finally {
         player.closeAsync()
       }

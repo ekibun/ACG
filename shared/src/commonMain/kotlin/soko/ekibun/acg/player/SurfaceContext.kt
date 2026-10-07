@@ -4,13 +4,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import soko.ekibun.ffmpeg.AvPlayback
+import soko.ekibun.ffmpeg.AvSurfaceContext
 
 /** 只放两端共用、且需要被 Compose 观察的状态。 */
-abstract class Playback(
-  onFrame: (Long?) -> Unit,
-  onEvent: (Event) -> Unit,
-) : AvPlayback(onFrame, onEvent) {
+abstract class SurfaceContext : AvSurfaceContext() {
   private val aspectRatioState = mutableFloatStateOf(1f)
 
   /** 视频宽高比，首帧到达后会自动触发重组 */

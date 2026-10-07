@@ -6,8 +6,8 @@ import soko.ekibun.TestMedia
 import soko.ekibun.TestMediaServer
 import soko.ekibun.ffmpeg.AVMediaType
 import soko.ekibun.ffmpeg.AvFormat
-import soko.ekibun.ffmpeg.AvPlayback
 import soko.ekibun.ffmpeg.AvStream
+import soko.ekibun.ffmpeg.AvSurfaceContext
 import soko.ekibun.ffmpeg.FFPlayer
 import java.io.File
 import java.nio.ByteBuffer
@@ -36,8 +36,7 @@ import kotlin.test.assertTrue
  *    把消费侧堵住；
  * 4. 于是 `FFPlayer` 那个取包 `withTimeout` **第一次就生效**（实测：冻结后约 0.1 s 准时触发，
  *    随后**不加退避**地重试 —— 一轮就是 `withTimeout` 本身），
- *    并经 [AvPlayback.onEvent] 上报
- *    [AvPlayback.Event.PACKET_READ_TIMEOUT]。
+ *    并经 [FFPlayer.onEvent] 上报 [FFPlayer.Event.ReadTimeout]。
  *    **轮次不因此结束** —— `resumeImpl` 那里是 `continue` 而不是 `break`，网络恢复后能接着取包。
  *    `pause()` 仍能返回，但要等当前那个循环轮次走完（实测 7～108 ms，不是毫秒级）。
  *
@@ -59,12 +58,12 @@ import kotlin.test.assertTrue
  * 2. **`closeAsync()` 能不能在有限时间内返回** —— 它比 `pause()` 多一步：既要结束读作业
  *    （`resetChannel()` → `io.abort()`），又要等 `releaseImpl` 在 `formatDispatcher` 上真的落地。
  *    少了这条断言，上面那个自锁就没人盯着（`pause()` 压根不碰 avformat，它绿着而 `closeAsync` 挂着）。
- * 3. **取包超时有没有经 [AvPlayback.onEvent] 上报** —— 不出声就等于「网络停了」与「播完了」
- *    分不开，上层没机会提示。这条判据盯的是 [AvPlayback.Event.PACKET_READ_TIMEOUT]。
+ * 3. **取包超时有没有经 [FFPlayer.onEvent] 上报** —— 不出声就等于「网络停了」与「播完了」
+ *    分不开，上层没机会提示。这条判据盯的是 [FFPlayer.Event.ReadTimeout]。
  * 4. **那条「返回了」是不是真的量在超时上** —— 第 1 条只钉「5 s 内返回」，而 `pause()` 在
  *    **没有**超时进行时同样是毫秒级返回 ⇒ 光有第 1 条的话，测速的那段根本没被触发也照样绿。
- *    所以探测前额外取一次 [AvPlayback.isReadTimeOut] 的**快照**确认前提，再对耗时钉一个量级上界
- *    （1 s 预算，实测 7～108 ms；机制上界是「一个循环轮次走完」）。
+ *    所以探测前先断言 [FFPlayer.Event.ReadTimeout] 已经到过（超时进行中的证据），
+ *    再对耗时钉一个量级上界（1 s 预算，实测 7～108 ms；机制上界是「一个循环轮次走完」）。
  *
  * **第 1、2 条的探针顺序不能倒**：`closeAsync()` 内部第一件事就是 `pause()`，它返回时 player
  * 已经关掉了 ⇒ 之后再探 `pause()` 只是对已关的 player 置个 flag，**毫秒级返回是必然的、测不到
@@ -148,30 +147,10 @@ class FFPlayerStallMidPlaybackTest {
   }
 
   /**
-   * 空播放设备：只记帧数与事件上报，不送显不送声（`flushVideoBuffer` 不碰像素，`flushAudioBuffer`
+   * 空播放设备：只记帧数，不送显不送声（`flushVideoBuffer` 不碰像素，`flushAudioBuffer`
    * 按采样数 `delay` 当声卡节拍，让播放按真实时长推进）。不碰 SDL / 声卡 ⇒ jvmTest 里能跑。
-   *
-   * `events` 必须当**构造参数**传：super 实参位置上的 lambda 引用类体属性，捕获的是还没初始化的
-   * `this`（`Pointer` KDoc 记过的坑），只能引用构造参数。
    */
-  private class Sink(
-    /** 收到的事件（[AvPlayback.onEvent] 的实参）。播放线程写、测试协程并发读 ⇒ 同步读。 */
-    val events: MutableList<AvPlayback.Event> =
-      Collections.synchronizedList(ArrayList<AvPlayback.Event>()),
-  ) : AvPlayback({ _ -> }, { events.add(it) }) {
-    /**
-     * 探测那一刻的 [AvPlayback.isReadTimeOut] 快照 —— 用来证明「pause() 是在取包超时进行中返回的」。
-     * 由测试在探测前调 [readTimeoutNow] 存进来，不是自己探的。
-     *
-     * 存**快照**而不是每次现读是有意的：[AvPlayback.isReadTimeOut] **没有**跨线程同步（见它的
-     * KDoc），而这里读的是 playerDispatcher 的写侧与测试协程的读侧。当持续性状态来源不行，
-     * 当**一次性断言前提**够用 —— 读到非 false 就说明「那一刻超时分支已经跑过了」。
-     */
-    var readTimedOut: Boolean = false
-      private set
-
-    fun readTimeoutNow(): Boolean = isReadTimeOut.also { readTimedOut = it }
-
+  private class Sink : AvSurfaceContext() {
     override val sampleRate: Int = 48_000
     override val channels: Int = 2
     override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_S16
@@ -349,7 +328,13 @@ class FFPlayerStallMidPlaybackTest {
     // 断点由**服务器**定，不靠媒体够大（见类 KDoc）：累计写出 [SERVED_LIMIT] 字节后停笔。
     TestMediaServer(bytes, chunkSize = 16 * 1024, servedLimit = SERVED_LIMIT).use { server ->
       val sink = Sink()
-      val player = FFPlayer(server.url, HttpIO.Handler(), sink)
+      // 只收取包超时事件（帧事件每帧都来，与判据无关）。
+      val timeoutEvents: MutableList<FFPlayer.Event> =
+        Collections.synchronizedList(ArrayList<FFPlayer.Event>())
+      val player =
+        FFPlayer(server.url, HttpIO.Handler(), sink) { event ->
+          if (event !is FFPlayer.Event.Frame) timeoutEvents.add(event)
+        }
       try {
         runBlocking {
           // ---- 第一段：先确认播得起来，否则「后面没反应」分不清是 stall 造成的 ----
@@ -407,17 +392,15 @@ class FFPlayerStallMidPlaybackTest {
 
           // 探测前先钉住前提：**此刻确实处在取包超时进行中**。少了它，下面那条耗时断言
           // 就是空的 —— 不在超时中时 pause() 本来就毫秒级返回，那种返回证明不了任何事。
-          // 为什么此刻读得到：帧数已停 >= 1.5 s（awaitFrameStall 的 flatMs），取包
-          // withTimeout 早到点、setter 早把 isReadTimeOut 置 true ⇒ 快照必然非 false。
-          val timedOutNow = sink.readTimeoutNow()
-          Diag.log("第三段：探测 pause() 前置快照 isReadTimeOut=$timedOutNow")
+          // 为什么此刻必然已到：帧数已停 >= 1.5 s（awaitFrameStall 的 flatMs），取包
+          // withTimeout 至多 0.1 s 就到点并发出事件（实测冻结后准时触发）。
           assertTrue(
-            timedOutNow,
-            "探测 pause() 的那一刻并不处在取包超时进行中（[AvPlayback.isReadTimeOut] 为 " +
-              "false）—— 那样 pause() 本来就毫秒级返回，下面那条耗时断言量到的不是" +
-              "「等一个 withTimeout 到点」，这条用例就白测了。冻结后帧数停了 >= 1.5 s，" +
-              "取包超时早该到点；为 false 说明 [FFPlayer.resumeImpl] 的超时分支没在跑。",
+            FFPlayer.Event.ReadTimeout in timeoutEvents,
+            "帧数停滞 1.5 s 后还没收到 [FFPlayer.Event.ReadTimeout] —— 取包超时分支没在跑。" +
+              "那样 pause() 本来就毫秒级返回，下面那条耗时断言量到的不是「等一个 withTimeout 到点」，" +
+              "这条用例就白测了。",
           )
+          Diag.log("第三段：探测 pause() 前已收到取包超时事件")
           Diag.log("第三段：探测 pause()（网络仍冻着，5s 上限）")
           // 计时在**探针外面**量：probeBounded 自己只返回布尔（两个调用点共用），
           // 改它的签名会牵动 closeAsync 那两处 ⇒ 这里包一层计时，不动它。
@@ -446,14 +429,13 @@ class FFPlayerStallMidPlaybackTest {
               "及时收回来。实测是个跨度（7～108 ms），不是定值。",
           )
 
-          // 取包超时必须经 [AvPlayback.onEvent] 报上来 —— 这条判据是它的钉子。它成立靠的是
-          // **事件本就发生在探测之前**（冻结后还剩几包可出帧，`withTimeout` 随后至多 0.1 s 触发，
-          // 而 `awaitFrameStall` 要等满 1.5 s）⇒ 那个 `flatMs` 别调到 1.5 s 以下，会变成偶尔红。
+          // 取包超时经 [FFPlayer.onEvent] 报上来这件事，上面的前提断言已钉过；这里钉另一半：
+          // pause() 返回时**网络仍未恢复**（没有 [FFPlayer.Event.ReadTimeoutResume]）⇒
+          // 那条耗时断言量的是「等一个超时轮次走完」，不是「等到网络恢复」。
           assertTrue(
-            sink.events.contains(AvPlayback.Event.PACKET_READ_TIMEOUT),
-            "取包超时后没有收到 [AvPlayback.onEvent] 的 PACKET_READ_TIMEOUT（实际收到 " +
-              "${sink.events.toList()}）—— 网络停住与播放结束分不开，" +
-              "上层没机会提示「网络停了」。",
+            FFPlayer.Event.ReadTimeoutResume !in timeoutEvents,
+            "pause() 返回之前网络已恢复（收到了 [FFPlayer.Event.ReadTimeoutResume]）⇒ " +
+              "耗时断言量到的不是「等一个超时轮次走完」。断点应由服务器一直冻到收场。",
           )
 
           // closeAsync 要在**掀服务端之前**探：排到 `server.close()` 之后，挂着的响应体被掀、读作业
@@ -526,7 +508,7 @@ class FFPlayerStallMidPlaybackTest {
      * （开流已过），随后累计量越线即停笔。
      *
      * 取 300,000（= 总长的 66%，**还留 34% 没发**）：实测帧数在 t≈7 s 处骤停并上报
-     * [AvPlayback.Event.PACKET_READ_TIMEOUT]，而不限速的对照组同刻仍在推进、一路播到 300 帧。
+     * [FFPlayer.Event.ReadTimeout]，而不限速的对照组同刻仍在推进、一路播到 300 帧。
      *
      * 改媒体就要重按「开流消耗 / 素材总长」重测这个数（见类 KDoc 的「两条前提」）。
      */
