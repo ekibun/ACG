@@ -86,8 +86,12 @@ fun PlayScreen() {
                     ptsStreams[type] = it
                   }
                 }
-                duration.floatValue =
-                  ptsStreams.values.maxOf { it.duration }.toFloat()
+                // 总时长优先走格式层（HLS 只把总时长记在格式层，流上恒未知），
+                // 拿不到再退回流时长的最大值。
+                val totalDurationUs =
+                  newPlayer.getDurationUs().takeIf { it > 0 }
+                    ?: ptsStreams.values.maxOf { it.duration }
+                duration.floatValue = totalDurationUs.toFloat()
                 newPlayer.play(ptsStreams, 0)
               }
             },

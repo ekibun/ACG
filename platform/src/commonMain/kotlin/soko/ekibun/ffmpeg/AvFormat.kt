@@ -63,6 +63,9 @@ open class AvFormat(
     private external fun getStreamsNative(pctx: Long): Array<AvStream>
 
     @JvmStatic
+    private external fun getDurationNative(pctx: Long): Long
+
+    @JvmStatic
     private external fun seekToNative(
       pctx: Long,
       ts: Long,
@@ -102,6 +105,16 @@ open class AvFormat(
       }
       streams!!
     }
+
+  /**
+   * 容器总时长（微秒）；容器没给（直播流等）返回 0。
+   *
+   * **在 [getStreams]（`avformat_find_stream_info`）之后调**：HLS 在 `read_header` 里就把
+   * 分片 EXTINF 求和写进 `AVFormatContext.duration`，而 WAV / MP4 这类把时长记在流上的
+   * 容器要等 find_stream_info 估算完格式层才有。总时长一律优先走这里；[AvStream.duration]
+   * 只是这些容器的兜底。
+   */
+  suspend fun getDurationUs(): Long = withPtr { ptr -> getDurationNative(ptr) }
 
   /**
    * 容器级 seek。`ts` / `minTs` / `maxTs` 的单位取决于 `stream`：`stream == null`

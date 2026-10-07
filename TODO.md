@@ -459,6 +459,31 @@
   chunk 多字节 UTF-8："a中" 的字节拆两片写，`text()` == "a中"；既有 `fetchBranchIsReachable`
   （走 `json()`）不改断言保持绿。
 
+### B24. AES-128 加密的 HLS 不可播（`crypto+` 前缀 + key/iv 在 io_open 的 options dict 里被丢弃）
+
+- **现状**（2026-10-07 核实）：AES-128 加密的 HLS 源起不来——m3u8 本身能解析，分片打开必失败。
+  机制（出处都在本仓 submodule）：ffmpeg 的 hls demuxer 把 AES-128 分片的 URL 改写成
+  `crypto+<url>`（分片 URL 无 `://` 时 `crypto:`，`libavformat/hls.c:1443-1445`），key/iv
+  （各 16 字节，`ff_data_to_hex` 转 32 个 hex 字符）以 `key` / `iv` 两项放进传给 `io_open` 的
+  options dict（`hls.c:1449-1450`）；标准路径由 crypto 协议消费——剥前缀（`crypto.c:116-117`）、
+  hex 字符串按 `AV_OPT_TYPE_BINARY` 选项转回二进制（`crypto.c:66-67`）、拉密文本地 AES-128-CBC
+  解密。本项目 `ffmpeg.cpp` 的 `io_open` 拦截一切嵌套打开且**忽略 options 参数** ⇒
+  `crypto+https://…` 原样进 Kotlin `AvIO.open`，`HttpIO` 不认识该 scheme，按契约（打不开不许抛
+  异常）返回恒失败的 IO。
+- **缺省 IV 不缺**：播放列表没写 IV 属性时 `hls.c:1035-1036` 已按 RFC 8216 用 media sequence
+  填满（8 字节 0 + 64 位大端 sequence）——dict 里的 iv 恒为 16 字节，接手方不用再推缺省。
+- **key 文件今天就能拉**：key URL 经 `hls.c:1386`（read_key）走同一个 `io_open`，是普通 URL，
+  HttpIO 原样可用；缺的只是「把 key/iv 从 dict 接出来」与「解密」。
+- **方向**：`ffmpeg.cpp` 的 io_open 里 `av_dict_get(*options, "key"/"iv")` 读出 hex 串（到
+  io_open 这一层 dict 里仍是 hex 字符串，二进制转换发生在 avio_open2 应用 dict 时）、识别并剥掉
+  `crypto+` / `crypto:` 前缀，把（真实 URL、key、iv）传给 Kotlin —— 扩 `Handler.open` 签名，
+  **`ffmpeg.cpp` 的 `GetMethodID` 签名字符串必须同步**（改漏即「静默要不到方法」，与
+  `AvIO.getBufferSize` KDoc 警告同款）；Kotlin 侧拉密文 + AES-128-CBC 解密。
+- **SAMPLE-AES 不在此列**：不走 `crypto+` URL，是 hls 取包后自己用 `av_aes_ctx` 解密
+  （`hls.c:2657` 附近），本项目没有接口，暂不支持。
+- **测试材料**：在线 AES-128 流与本地生成法见 skill `build-and-test` 的「在线测试流」一节。
+- **完成判据**：AES-128 测试流可播（open / 读 / seek 不再在分片打开处失败）。
+
 ## C. 事实未实测，文档里暂无据
 
 ### C1. Android APK 产物路径

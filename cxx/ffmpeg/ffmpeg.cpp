@@ -199,18 +199,39 @@ Java_soko_ekibun_ffmpeg_AvFormat_getStreamsNative(JNIEnv* env, jobject thiz,
   for (int i = 0; i < ctx->nb_streams; ++i) {
     AVStream* stream = ctx->streams[i];
     auto metadata = av_dict_to_map(env, stream->metadata);
+    // 流上没有时长（HLS 只把总时长记在格式层）时 NOPTS 乘出来是垃圾值 —— 记 0
+    // 表示未知，总时长走 getDurationNative。
+    const jlong durationUs =
+        stream->duration == AV_NOPTS_VALUE
+            ? 0
+            : (jlong)(stream->duration * av_q2d(stream->time_base) *
+                      AV_TIME_BASE);
     jobject streamObj = env->NewObject(
         streamClass, constructor, (jlong)stream, i,
         (jint)stream->codecpar->codec_type, (jint)stream->codecpar->sample_rate,
         (jint)stream->codecpar->ch_layout.nb_channels,
         (jint)stream->codecpar->width, (jint)stream->codecpar->height,
-        (jlong)(stream->duration * av_q2d(stream->time_base) * AV_TIME_BASE),
-        metadata);
+        durationUs, metadata);
     env->DeleteLocalRef(metadata);
     env->SetObjectArrayElement(streams, i, streamObj);
     env->DeleteLocalRef(streamObj);
   }
   return streams;
+}
+
+/**
+ * 容器总时长（AV_TIME_BASE 微秒）；容器没给（直播流等）返回 0。
+ *
+ * 总时长必须走格式层取：HLS 只把分片 EXTINF 求和写进 `AVFormatContext.duration`
+ * （libavformat/hls.c），每条流上恒为 NOPTS —— 流上的时长（AvStream.duration）
+ * 只对 MP4 那类把时长记在流上的容器有值。
+ */
+extern "C" JNIEXPORT jlong JNICALL
+Java_soko_ekibun_ffmpeg_AvFormat_getDurationNative(JNIEnv*, jobject,
+                                                   jlong pctx) {
+  auto ctx = (AVFormatContext*)pctx;
+  if (ctx->duration == AV_NOPTS_VALUE) return 0;
+  return (jlong)ctx->duration;
 }
 
 extern "C" JNIEXPORT void JNICALL

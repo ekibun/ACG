@@ -18,6 +18,7 @@ data class AvStream(
   val channels: Int,
   val width: Int,
   val height: Int,
+  /** 流时长（微秒）；0 = 流上没有 —— HLS 的总时长只在格式层，取总时长见 [AvFormat.getDurationUs]。 */
   val duration: Long,
   val metadata: Map<String, String>,
 )

@@ -61,6 +61,30 @@ hotRun 的宿主，它的 `hotRun` 由 `:shared` 侧经 `evaluationDependsOn(":d
   计数器隔离）—— 常驻实例会让请求计数与冻结状态跨用例串味。细节见
   `shared/src/jvmTest/kotlin/soko/ekibun/DevServer.kt` 的 KDoc。
 
+### 在线测试流（公开、免鉴权；2026-10-07 实测可用）
+
+按能力点各备一条，改播放链路（avio / io_open / hls）后可当快速回归：
+
+| 测什么 | URL |
+|---|---|
+| TS 多码率 VOD | `https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8` |
+| fMP4 多码率（杜比视界 / Atmos / 字幕组） | `https://devstreaming-cdn.apple.com/videos/streaming/examples/adv_dv_atmos/main.m3u8` |
+| TS + 多音轨 + WebVTT 字幕（`EXT-X-MEDIA` 分组） | `https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_16x9/bipbop_16x9_variant.m3u8` |
+| AES-128 加密（`EXT-X-KEY:METHOD=AES-128`，key URL 公开可拉） | `https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel-aes.ism/.m3u8` |
+| 直播（轮播） | `https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8` |
+
+- **AES-128 那条现在是「预期失败」**（TODO B24：`crypto+` 前缀 + key/iv 在 io_open 的 dict
+  里被丢弃），也是接上解密后的验收用例。
+- 都不设 Referer / UA / cookie，**测不出 header 场景**——要校验请求头，用
+  `TestMediaServer` 自己数，或本地生成后配抓包。
+- **BYTERANGE 没有现成公开流**（bipbop 的字幕轨也是独立 `.webvtt` 文件）。要测就本地生成
+  ——注意**本仓 native 构建不出 ffmpeg CLI**（`ffmpeg.cmake` 带 `--disable-programs`），
+  生成用独立安装的 ffmpeg：
+  - AES-128：`ffmpeg -hls_key_info_file keyinfo …`。keyinfo 三行 = key 的 URL（进播放列表）/
+    key 本地文件路径（ffmpeg 拿它加密）/ IV hex（留空随机）；分片与 key 一起用任意静态
+    服务器伺服（`TestMediaServer` 的 `--media` 是整文件伺服，喂不了 HLS 目录）。
+  - BYTERANGE：`-hls_flags single_file`（分片并进单文件，播放列表改用 `EXT-X-BYTERANGE`）。
+
 **结果落盘再读**，别靠终端实时输出下判断：Windows 上 JVM 按控制台代码页编解码，与 UTF-8 的日志
 对不上就是乱码。加 `--console=plain` 让输出变成可线性读的纯文本。
 
