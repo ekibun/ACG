@@ -92,7 +92,7 @@ animeko 2913 个 kt/kts、60866 行注释里含 emoji 的只有 30 行（0.05%�
 处置全在 [`silent-failures.md`](./.agents/skills/project-traps/references/silent-failures.md)，
 **动到下列任一区域之前先读它**：
 
-- 改过 native 却用着旧 dll / 漏拷 dll（落位见 skill `build-and-test`）
+- 改过 native 却用着旧 dll（重编与落位已全自动，见 [`cxx/AGENTS.md`](./cxx/AGENTS.md)「原生构建」）
 - 改 `soko.ekibun.acg.engine` 下的类名
 - 在 `init.js` 里用 `import()` / `require()`
 - 动了 submodule（规则见 §4）
@@ -221,7 +221,7 @@ animeko 2913 个 kt/kts、60866 行注释里含 emoji 的只有 30 行（0.05%�
 |---|---|---|
 | 未完成的工作、已知缺口 | 想动手修东西之前 | [TODO.md](./TODO.md) |
 | 跑构建 / 打包 / 测试、判断"做完没有" | 改完代码要验收、或要跑起来时 | skill `build-and-test` → [`.agents/skills/build-and-test/SKILL.md`](./.agents/skills/build-and-test/SKILL.md) |
-| native 重编、dll 同步到运行位置 | 改过 `cxx/` 之后 | skill `build-and-test` → [`.agents/skills/build-and-test/references/dll-sync.md`](./.agents/skills/build-and-test/references/dll-sync.md) |
+| native 重编与 dll 落位 | 改过 `cxx/` 之后 | [`cxx/AGENTS.md`](./cxx/AGENTS.md) 的「原生构建」 |
 | Kotlin / Compose / C++ / Gradle 的写法 | 新增或改动上述代码时 | skill `coding-style` → [`.agents/skills/coding-style/SKILL.md`](./.agents/skills/coding-style/SKILL.md) |
 | 原生构建细节、JNI 约定、各库硬约束 | 改 `cxx/` 或 native 绑定、native 行为不对时 | [cxx/AGENTS.md](./cxx/AGENTS.md) |
 | WebView2 / Win32 窗口 / 键盘焦点 / 白屏与 GPU 崩溃循环 | 桌面端渲染、焦点、崩溃 | skill `webview2-windows` → [`.agents/skills/webview2-windows/SKILL.md`](./.agents/skills/webview2-windows/SKILL.md) |

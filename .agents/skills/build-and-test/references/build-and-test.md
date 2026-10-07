@@ -21,8 +21,8 @@ JAVA_HOME=<任意一份 JDK> ./gradlew :desktopApp:buildJni                     
 JAVA_HOME=<任意一份 JDK> ./gradlew :androidApp:assembleDebug                 # Android debug 包
 ```
 
-另外两件本机前提：**MSYS2**（只有编 native 用得到，见 [`dll-sync.md`](./dll-sync.md) 和
-[`cxx/AGENTS.md`](../../../../cxx/AGENTS.md)）、**Android SDK**（`local.properties` 里的 `sdk.dir`，
+另外两件本机前提：**MSYS2**（只有编 native 用得到，见
+[`cxx/AGENTS.md`](../../../../cxx/AGENTS.md) 的「原生构建」）、**Android SDK**（`local.properties` 里的 `sdk.dir`，
 本机私有、已忽略）。
 
 ### 调试播放：本地媒体服务器（test 与桌面端共用）
@@ -169,8 +169,8 @@ git 对**没有执行位的 hook 是静默跳过**的。
 - **要重复跑（偶发问题、改过 native 之后复查）必须加 `--rerun`**。不加的话第 2 轮起任务是
   `UP-TO-DATE`，XML 还是上一轮的残留 —— 写着"跑了 12 轮"，实际只跑了 1 轮。
   写验收循环时把"任务真的执行了"也做成一条判据（`grep 'Task :shared:jvmTest UP-TO-DATE'`）。
-- `jvmTestProcessResources` 会把 `cxx/build/bin` 里的 dll 拷进测试资源 →
-  **跑 jvmTest 前 native 必须是编好的**（见 [`dll-sync.md`](./dll-sync.md)）。
+- `jvmTestProcessResources` 把 `cxx/build/bin` 里的 dll 拷进测试资源，且已挂上 `buildJni` ——
+  改了 `cxx/` 只跑测试也会先重编（全链条见 [`cxx/AGENTS.md`](../../../../cxx/AGENTS.md) 的「原生构建」）。
 - 偶发失败的处理见 skill `project-traps` 的
   [`silent-failures.md`](../../project-traps/references/silent-failures.md)：
   不要靠重跑掩盖，也不要改产品代码去迁就。

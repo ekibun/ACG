@@ -14,6 +14,9 @@ set(FFMPEG_CONFIGURE_COMMAND
         --disable-doc
         --disable-filters
         --disable-avfilter
+        # configure 默认带 -g,~90MB 的 DWARF 调试信息会随静态库进最终的 ffmpeg 动态库;
+        # 需要单步跟 ffmpeg C 源码时临时去掉这行重编。
+        --disable-debug
         )
 if (${CMAKE_HOST_SYSTEM_NAME} MATCHES "Windows")
     set(BASH_EXEC ${CMAKE_CURRENT_LIST_DIR}/../exec)

@@ -1,6 +1,6 @@
 # cxx/AGENTS.md
 
-只讲 `cxx/` 下的原生构建、JNI 桥与各库的硬约束。项目整体约定见 [../AGENTS.md](../AGENTS.md)；构建 / 测试 / dll 同步见 skill `build-and-test`；
+只讲 `cxx/` 下的原生构建、JNI 桥与各库的硬约束。项目整体约定见 [../AGENTS.md](../AGENTS.md)；构建 / 测试见 skill `build-and-test`；
 WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills/) 下对应的技能里；通用做法（最小实现、外科手术式改动）见
 根 [../AGENTS.md](../AGENTS.md) §1。
 
@@ -17,15 +17,25 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
   `-DLIBRARY_OUTPUT_PATH=bin` 给。文件名就是 `webview.dll` / `quickjs.dll` / `ffmpeg.dll`。
 - `cxx/ffmpeg/ffmpeg/`、`cxx/quickjs/quickjs/` 是 **git submodule**（完整上游源码树）。
   找参考实现（如 `fftools/ffplay.c`）**直接读本地文件，不要联网下载**；也不要修改它们。
-- **改完 native 必须把 dll 同步到运行位置**。三处落位、哪几处自动、哪处要手动拷，见
-  [`../.agents/skills/build-and-test/references/dll-sync.md`](../.agents/skills/build-and-test/references/dll-sync.md) —— 漏掉第 3 处的症状是"改动没生效、连日志都没有"，
-  最容易被误判成代码问题。**别在这里另抄一份清单。**
+- **重编与 dll 落位全自动，没有「手动同步」这一步**：所有消费链的任务图都挂着 `buildJni`
+  （无 outputs 的 Exec，每次必跑，`cxx/` 一变就重编）—— `:desktopApp:run`（经 `prepareAppResources`）、
+  `hotRun`（`hotSnapshotMain`）、IDE 直跑 MainKt（`processResources`）、打包（`syncNativeResources`）、
+  `:shared:jvmTest`（`jvmTestProcessResources` 显式 `dependsOn`）。落位四处：
+  `shared/build/processedResources/jvm/test/`、`desktopApp/build/resources/main/`、
+  `desktopApp/build/compose/tmp/prepareAppResources/`（run 与打包共用 `syncNativeResources` 喂料）、
+  打包态 `<app-image>/app/resources/`。打包侧 `createDistributable` 已把 `nativeResources` 登记成显式
+  输入（插件的 `appResourcesDir` 是 @Internal、不进 up-to-date 判据），打出旧包时用 `--rerun` 复查。
+  加载侧按什么顺序找库，正本在 `jni.jvm.kt` 的 `jniLoadLibrary` KDoc；运行态反复走到兜底解包，
+  就是资源布局回归。
+- **Hot Reload 换不了 native 库**：`System.load` 是进程启动时做的，热重载只换 Kotlin 类 ——
+  改完 `cxx/` 必须整进程重启，否则你以为在测新代码，其实跑的是旧 dll（症状：修复「没生效」）。
 
 ## 原生构建
 
 入口只有一个：`./gradlew :desktopApp:buildJni`（或在 Android Studio 里点桌面端运行，它会触发它）。
 `buildJni` 自己进 MSYS2 的 bash，并把 toolchain 的 JDK 传给 `cxx/build.jni.sh` 去 configure / cmake ——
-**不用你准备任何 JDK**。
+**不用你准备任何 JDK**。唯一还要的本机私有值是环境变量 **`MSYS2_BIN`**
+（`cxx/exec.cmd` 靠它进 MSYS2 的 bash；没设的话 exec.cmd 直接退出 1）。
 
 - cmake 在 **configure 期**读这份 JDK 的 `$JAVA_HOME/include` 与 `include/win32`（jni.h）。
   Gradle 给的那份是**带 `include/` 的完整 JDK**（`gradle/gradle-daemon-jvm.properties` 钉的那份，

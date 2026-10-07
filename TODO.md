@@ -640,20 +640,6 @@
 - **完成判据**：提交前核对：三条编译闸门 + 全量 `:shared:jvmTest` + lint 全绿；`shared` 的源集里不再有
   `soko.ekibun.{quickjs,ffmpeg}` 源文件。
 
-### E7. cxx 构建接进 Gradle（把「dll 手工同步」变成机器闸门）
-
-- **现状**：`shared/build.gradle.kts` 的 `jvmTestProcessResources` 从 `cxx/build/bin` 抓 dll，
-  运行位落位靠 skill `dll-sync` 的人肉清单；[project-traps](./.agents/skills/project-traps/SKILL.md)
-  把「改过 native 却用着旧 dll」列为头号静默失效。animeko 把 native 做成了 Gradle 模块
-  （anitorrent），我们不需要走到那一步。
-- **分两档**：
-  - **档一（先做，数小时）**：`verifyDll`（比对 `cxx/build/bin` 与各落位的 hash/mtime，
-    过期即 fail）+ `syncDll` 两个 task；skill `build-and-test` / `dll-sync` 改为引用 task。
-  - **档二（可选，1-2 天）**：gradle task 驱动 cmake 编 Windows 目标，产物直接喂
-    jvmTest 资源与 desktopApp 打包 —— 从此「忘记先编 cxx」在构建期就暴露。
-- ⚠️ **不要绑 Android NDK** —— 那是 [E3](#e3-android-侧-native-没有构建入口) 的独立决策，别搭车。
-- **完成判据**：改了 `cxx/` 不重编时，闸门/测试给出**明确的失败**，而不是静默用旧 dll。
-
 ### E8. 领域架构落地（数据结构 + WebView 前后台）
 
 - **现状**：设计定稿于 [docs/architecture.md](./docs/architecture.md)

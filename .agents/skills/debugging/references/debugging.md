@@ -86,7 +86,7 @@ close2 -> null          ← 隔了 5s ⇒ 这次超时了，问题在第二条
 - `ACG_WEBVIEW_DEBUG=1` 走 stderr
 - `ACG_WEBVIEW_LOG=<路径>` 追加到文件
 
-（`MSYS2_BIN` 是**构建期** `buildJni`→`exec.cmd` 桥要的环境变量，不是日志开关，见 skill `build-and-test` 的 `references/dll-sync.md`。）
+（`MSYS2_BIN` 是**构建期** `buildJni`→`exec.cmd` 桥要的环境变量，不是日志开关，见 [`cxx/AGENTS.md`](../../../../cxx/AGENTS.md) 的「原生构建」。）
 
 ## Chromium 日志
 

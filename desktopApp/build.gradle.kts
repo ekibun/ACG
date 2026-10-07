@@ -40,7 +40,7 @@ tasks.named<ProcessResources>("processResources") {
   from(rootDir.resolve("cxx/build/bin"))
 }
 
-// dll 不进 jar：它们以「应用资源 / classpath 目录里的真文件」形态存在，打进 jar 只是白占 ~117 MB
+// dll 不进 jar：它们以「应用资源 / classpath 目录里的真文件」形态存在，打进 jar 只是白占 ~29 MB
 // （运行时也用不到 —— jniLoadLibrary 从 app/resources 或 build/resources/main 直接 System.load 真文件）。
 // 保留 processResources 把 dll 写进 build/resources/main，是为了 IDE / 直接跑 MainKt 时 step 2
 // （file: URL）仍能命中；打包后则由 appResourcesRootDir 提供（step 1）。
@@ -48,19 +48,16 @@ tasks.named<Jar>("jar") {
   exclude("**/*.dll")
 }
 
-// 打包态的原生库：**不放进 jar**，而是作为「应用资源」随安装包落成一堆散文件。
+// 打包态的原生库：**不放进 jar**，而是作为「应用资源」随安装包落成散文件 —— Compose 插件把
+// appResourcesRootDir 下 `<os>-<arch>/` 的内容摊平进 `<app-image>/app/resources/`，运行时经
+// system property `compose.application.resources.dir` 拿到绝对路径，`jniLoadLibrary` 直接
+// System.load 真文件、一次解包都不需要。不这么做的话，每次加载都要把 ffmpeg.dll 解到 %TEMP%，
+// 而 Windows 上那个副本**删不掉**（JDK-4171239），一天就能攒出 GB 级。
 //
-// Compose 插件会把 appResourcesRootDir 下 `<os>-<arch>/` 里的一切放进安装目录（实测落点
-// `<app-image>/app/resources/`），运行时用 system property `compose.application.resources.dir`
-// 拿到它的绝对路径 —— `jniLoadLibrary` 于是直接 System.load 那个真文件，一次解包都不需要。
-// 不这么做的话，每次加载都要把 118 MB 的 ffmpeg.dll 解到 %TEMP%，而 Windows 上那个副本
-// **删不掉**（JDK-4171239），一天就能攒出 12 GB。
-//
-// ⚠️ 目录形状是插件写死的（`configureJvmApplication.kt` 的 `prepareAppResources`）：它只读
-// `appResourcesRootDir/common`、`/<os>`、`/<os>-<arch>` 三个子目录，并把三者的内容**摊平**到
-// 同一个目标里。所以库必须落在 `<os>-<arch>/` 这一层 —— 直接扔在 root 下不会有任何提示，
-// 任务会静默变成 NO-SOURCE，打出一个空的 `app/resources/`。桌面端只按 Windows x86_64 考虑，
-// 固定 `windows-x64/`。
+// ⚠️ 目录形状是插件写死的（`configureJvmApplication.kt` 的 `prepareAppResources`）：只读
+// `appResourcesRootDir/common`、`/<os>`、`/<os>-<arch>` 三个子目录并**摊平**到同一目标 ——
+// 库必须落在 `<os>-<arch>/` 这一层，扔在 root 下**不报错**、任务静默变 NO-SOURCE，
+// 打出一个空的 `app/resources/`（桌面端只按 Windows x86_64 考虑，固定 `windows-x64/`）。
 //
 // 用 Sync 而不是 Copy：目标目录是 `cxx/build/bin` 的**镜像**，native 侧删掉的库要跟着消失。
 val nativeResourcesDir = layout.buildDirectory.dir("nativeResources")
@@ -75,6 +72,13 @@ val syncNativeResources =
     }
     into(nativeResourcesDir)
   }
+
+// createDistributable 读的 appResourcesDir 在插件里是 @Internal、不进 up-to-date 判据：
+// 不补这条输入的话，nativeResources 变了它照样 UP-TO-DATE，打出带旧 dll 的包（2026-10-02 实测）。
+// 把源目录显式登记成输入，内容一变就重打。插件是懒注册，tasks.named 会在配置期扑空，用 matching 挂。
+tasks.matching { it.name == "createDistributable" }.configureEach {
+  inputs.dir(nativeResourcesDir)
+}
 
 // 把原生日志的两个开关透传给跑起来的 App。
 //

@@ -75,8 +75,10 @@ kotlin {
   }
 }
 
-// jniLoadLibrary() 从 classpath 资源里取 native 库，测试时需要能拿到 cxx 的构建产物
+// jniLoadLibrary() 从 classpath 资源里取 native 库，测试时需要能拿到 cxx 的构建产物。
+// buildJni 挂进任务图：改了 cxx/ 只跑测试也会先重编 native，杜绝「测试静默用旧 dll」。
 tasks.named<ProcessResources>("jvmTestProcessResources") {
+  dependsOn(":desktopApp:buildJni")
   val binDir = rootProject.layout.projectDirectory.dir("cxx/build/bin")
   from(binDir) {
     include("*.dll", "*.so", "*.dylib")
