@@ -2,7 +2,6 @@ package soko.ekibun.ffmpeg
 
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import soko.ekibun.acg.player.FileIO
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import kotlin.test.Test
@@ -26,11 +25,12 @@ class AvReadErrorFoldTest {
   /** 包一层「第 [failAfter] 次成功 read 之后就开始返回 -1」的 Handler。 */
   private class FailingAfterHandler(
     private val failAfter: Int,
+    private val inner: AvIO.Handler,
   ) : AvIO.Handler {
     var reads = 0
 
     override fun open(url: String): AvIO {
-      val delegate = FileIO.Handler().open(url)
+      val delegate = inner.open(url)
       return object : AvIO by delegate {
         override fun read(buf: ByteArray): Int {
           if (++reads > failAfter) return -1
@@ -44,14 +44,14 @@ class AvReadErrorFoldTest {
   fun ioErrorFoldsToEofButIsLogged() {
     // 10 秒 ≈ 160 KB，要 5 次 32 KB 的 read 才读完；第 4 次起返回 -1，
     // 错误必然落在 getPacket 阶段（前 3 次足够 find_stream_info 用）。
-    val wav = WavMedia.write(durationSec = 10)
+    val wav = WavMedia.bytes(durationSec = 10)
     val err = ByteArrayOutputStream()
     val originalErr = System.err
     System.setErr(PrintStream(err, true, Charsets.UTF_8))
     try {
       runBlocking {
         withTimeout(30_000) {
-          AvFormat(wav.toString(), FailingAfterHandler(failAfter = 3)).use { player ->
+          AvFormat("memory:test.wav", FailingAfterHandler(failAfter = 3, inner = TestIo(wav))).use { player ->
             player.getStreams()
             while (true) {
               // downloader 模式（streams 为空收所有包）：包拿到就还，
@@ -75,7 +75,25 @@ class AvReadErrorFoldTest {
   fun openFailureFailsCleanly() {
     assertFailsWith<IllegalStateException> {
       runBlocking {
-        AvFormat("Z:/definitely/not/here/nope.mp4", FileIO.Handler()).getStreams()
+        AvFormat(
+          "Z:/definitely/not/here/nope.mp4",
+          object : AvIO.Handler {
+            // open 不许抛（契约见 AvIO.Handler.open 的 KDoc，抛了会 pending 在 JNI 上炸 JVM）：
+            // 打不开就返回恒失败的 IO，让 avformat_open_input 自己失败 ——
+            // FileIO 对不存在的路径正是这个行为。
+            override fun open(url: String): AvIO =
+              object : AvIO {
+                override fun read(buf: ByteArray): Int = -1
+
+                override fun seek(
+                  offset: Int,
+                  whence: Int,
+                ): Int = -1
+
+                override fun close() {}
+              }
+          },
+        ).getStreams()
       }
     }
   }

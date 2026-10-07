@@ -2,24 +2,21 @@ package soko.ekibun.ffmpeg
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.file.Files
-import java.nio.file.Path
 
 /**
  * 测试用的合成 WAV（16-bit PCM 单声道 8 kHz）。
  *
  * 给**需要精确刻度**的用例现场合成：体积、read 次数都是算得出的（[AvReadErrorFoldTest] 靠
- * 「10 秒 ≈ 160 KB、第 4 次 32 KB read 起返回 -1」把错误钉在指定阶段）—— 入库素材是固定体积的
- * 成品，调不出这种刻度。头 44 字节 + 裸 PCM，`avformat_open_input` 直接能解。
- *
- * （通用素材走 `TestMedia.path(…)` 取入库的 `resources/media/` 下那几份；本对象只管「按需合成」。）
+ * 「10 秒 ≈ 160 KB、第 4 次 32 KB read 起返回 -1」把错误钉在指定阶段；[AvSurfaceContextBufferReuseTest]
+ * 用它走一遍 pcm 解码 + 重采样）—— 成品素材体积固定，调不出这种刻度。头 44 字节 + 裸 PCM，
+ * `avformat_open_input` 直接能解。
  */
 internal object WavMedia {
   const val SAMPLE_RATE = 8000
   const val CHANNELS = 1
 
-  /** 生成 [durationSec] 秒的 WAV 到临时目录；内容是线性锯齿波（帧间可区分）。 */
-  fun write(durationSec: Int): Path {
+  /** 生成 [durationSec] 秒的 WAV 字节（内存形态，喂假 IO）；内容是线性锯齿波（帧间可区分）。 */
+  fun bytes(durationSec: Int): ByteArray {
     val frames = SAMPLE_RATE * durationSec
     val data = ByteBuffer.allocate(frames * 2).order(ByteOrder.LITTLE_ENDIAN)
     for (i in 0 until frames) {
@@ -41,6 +38,6 @@ internal object WavMedia {
     bytes.put("data".toByteArray(Charsets.US_ASCII))
     bytes.putInt(data.capacity())
     bytes.put(data.array())
-    return Files.write(Files.createTempFile("acg-test-", ".wav"), bytes.array())
+    return bytes.array()
   }
 }

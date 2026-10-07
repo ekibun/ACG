@@ -1,8 +1,5 @@
 package soko.ekibun.quickjs
 
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
 import soko.ekibun.jniLoadLibrary
 
 object Highlight {
@@ -137,17 +134,25 @@ object Highlight {
     }
   }
 
-  fun highlight(input: String): AnnotatedString {
-    val builder = AnnotatedString.Builder()
-    builder.append(input)
+  /**
+   * 一段高亮区间：[token] 类别，对应 `input[start until end]`。
+   */
+  data class Span(
+    val token: Token,
+    val start: Int,
+    val end: Int,
+  )
+
+  /**
+   * 把 `input` 切成高亮区间 —— 纯数据出口，颜色映射交给 UI 侧（`soko.ekibun.acg.ui.comp.highlight`）。
+   * 两个 `external fun` 的 JNI 符号挂在 `soko.ekibun.quickjs.Highlight` 这个 FQN 上，
+   * 别改包名 / 类名（改了 `quickjs.dll` 不重编即失效，见 cxx/AGENTS.md 的 JNI 一节）。
+   */
+  fun tokenize(input: String): List<Span> {
+    val spans = mutableListOf<Span>()
     parseCurry(TokenParser(input), false) { tok, st, ed ->
-      when (tok) {
-        Token.STRING -> SpanStyle(color = Color.Magenta)
-        Token.COMMENT -> SpanStyle(color = Color.Green)
-        Token.REGEXP -> SpanStyle(color = Color.Red)
-        Token.IDENT -> SpanStyle(color = Color.Blue)
-      }.let { builder.addStyle(it, st, ed) }
+      spans.add(Span(tok, st, ed))
     }
-    return builder.toAnnotatedString()
+    return spans
   }
 }

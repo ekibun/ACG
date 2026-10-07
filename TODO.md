@@ -32,9 +32,9 @@
   也就是说 `soko.ekibun.{quickjs,ffmpeg}` 事实上仍按 JVM-only 写。
 - **方向已定**（用户 2026-09-16 晚）：**不给这两个包开例外** —— 规则保持，把这些 Java 语义
   逐处提到外面（`expect` 一个最小原语、两端各 `actual`），`commonMain` 里最终不剩平台符号。
-- **建议路径**（2026-10-02 评估）：先按 [E6](#e6-把-jni-绑定层抽成-bindings-模块b4-的前置重构)
-  把绑定层抽成 `:bindings` 模块（搬移本身零语义变化、也不合法化这些 import），摘除在
-  新模块里做 —— 新模块的 API 面就是"纯 common 原语 + 平台 source set 放 Java 细节"。
+- **落点已就位**（2026-10-07）：绑定层（`soko.ekibun.{jni,quickjs,ffmpeg}`）已抽成 `:bindings`
+  模块，上面那些 import 随代码搬了过去（搬移零语义变化）；摘除在新模块里做 —— 新模块的
+  API 面就是"纯 common 原语 + 平台 source set 放 Java 细节"。
 - **为什么现在没做**：属于独立的一次重构，要和文档改动分开。
 - **完成判据**：上述各处全部去掉；`commonMain` 里搜 `java\.` / `android\.` 结果均为 0。
 - **完成后必须做的收尾**：删掉 `AGENTS.md` §4 里那句"现状…仍有直接引用…见 `TODO.md` B4"
@@ -618,27 +618,6 @@
   / `collectAsState`。它会误导 agent 以为"项目选了 MVVM"。2026-10-02 复核仍零使用，且同处引入的
   `lifecycle-runtimeCompose` 同样零使用（全仓无 `collectAsState*` / `Lifecycle*` 调用），删依赖时一并评估。
 - **完成判据**：确认确实不需要就删掉依赖；需要就先用起来再留。
-
-### E6. 把 JNI 绑定层抽成 `:bindings` 模块（B4 的前置重构）
-
-- **方案**（2026-10-02 评估定案）：新建**单个**模块 `:bindings`（目标 `jvm()` + `android {}`，
-  依赖仅 coroutines，**不引 compose**），搬入 `soko/ekibun/jni.kt` +
-  `soko/ekibun/quickjs/`（6 文件）+ `soko/ekibun/ffmpeg/`（10 文件）；`shared` 以
-  `api(project(":bindings"))` 挂接，**包名不变** ⇒ 业务调用点零改动。
-- **边界修正**（与最初设想不同处，评估已定）：
-  ① `soko.ekibun.web` **不搬** —— commonMain `WebView.kt` 是 Compose 契约，native 桥
-  （`NativeWebView.jvm.kt`）在 jvmMain 本已合法；
-  ② `quickjs/Highlight.kt` **先迁出**到 UI 侧（它 import `androidx.compose.ui.*`，是 CodeScreen
-  的语法高亮器；对 quickjs.dll 的 native tokenize 依赖经 `api` 传递照常可用）；
-  ③ **CInterop 排除** —— JVM 目标没有 CInterop（Kotlin/Native 专属），两端都是 JVM 族，
-  JNI 是唯一公共分母（animeko 的 anitorrent 同为手写 JNI）。
-- **与 B4 的关系**：搬移本身**不**合法化 java.* import（9 处跟着代码走）；先机械搬移
-  （零语义变化），B4 的 expect/actual 摘除在新模块里做。
-- **随迁**：jvmTest 的 dll 注入（`shared/build.gradle.kts` 的 `ProcessResources`）与
-  `soko.ekibun.{quickjs,ffmpeg}` 的测试文件搬到新模块；`desktopApp` 打包的 dll 落位引用同步改。
-- **为什么现在没做**：一次性重构，与业务改动分开。
-- **完成判据**：提交前核对：三条编译闸门 + 全量 `:shared:jvmTest` + lint 全绿；`shared` 的源集里不再有
-  `soko.ekibun.{quickjs,ffmpeg}` 源文件。
 
 ### E8. 领域架构落地（数据结构 + WebView 前后台）
 

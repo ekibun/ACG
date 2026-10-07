@@ -22,7 +22,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
 import soko.ekibun.acg.engine.JsEngine
-import soko.ekibun.quickjs.Highlight
+import soko.ekibun.acg.ui.comp.highlight
 import soko.ekibun.quickjs.JSError
 
 // 同 App()：挂着 @Preview，但它是被 App() 调用的真实页签，不能是 private。
@@ -37,7 +37,7 @@ fun CodeScreen() {
     TextField(
       value = text,
       onValueChange = {
-        text = TextFieldValue(Highlight.highlight(it.text), it.selection, it.composition)
+        text = TextFieldValue(highlight(it.text), it.selection, it.composition)
       },
       modifier =
         Modifier

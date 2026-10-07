@@ -19,6 +19,12 @@ interface AvIO {
   fun getBufferSize(): Long = 32768L
 
   interface Handler {
+    /**
+     * 打开一个源。「打不开」**不许抛异常**：本函数跑在 native 的 `io_open` 回调里，Kotlin
+     * 异常会 pending 在 JNI 上没人接，下一次 JNI 调用直接 abort 整个 JVM —— 返回一个
+     * read/seek 恒失败的 [AvIO]（`FileIO` 对不存在的路径正是这个做法），让
+     * `avformat_open_input` 以 I/O 错误干净收场。
+     */
     fun open(url: String): AvIO
 
     /**

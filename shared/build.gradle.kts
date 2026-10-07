@@ -44,6 +44,9 @@ kotlin {
       implementation(libs.ktor.client.okhttp)
     }
     commonMain.dependencies {
+      // JNI 绑定层（soko.ekibun.{jni,quickjs,ffmpeg}）抽在 :bindings，包名未变。
+      // api：业务层直接用它的类型，desktopApp / androidApp 也要看得见。
+      api(project(":bindings"))
       implementation(libs.compose.runtime)
       implementation(libs.compose.foundation)
       implementation(libs.compose.material3)

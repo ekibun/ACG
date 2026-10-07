@@ -20,8 +20,9 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
 - **重编与 dll 落位全自动，没有「手动同步」这一步**：所有消费链的任务图都挂着 `buildJni`
   （无 outputs 的 Exec，每次必跑，`cxx/` 一变就重编）—— `:desktopApp:run`（经 `prepareAppResources`）、
   `hotRun`（`hotSnapshotMain`）、IDE 直跑 MainKt（`processResources`）、打包（`syncNativeResources`）、
-  `:shared:jvmTest`（`jvmTestProcessResources` 显式 `dependsOn`）。落位四处：
-  `shared/build/processedResources/jvm/test/`、`desktopApp/build/resources/main/`、
+  `:shared:jvmTest` 与 `:bindings:jvmTest`（各自 `jvmTestProcessResources` 显式 `dependsOn`）。落位五处：
+  `shared/build/processedResources/jvm/test/`、`bindings/build/processedResources/jvm/test/`、
+  `desktopApp/build/resources/main/`、
   `desktopApp/build/compose/tmp/prepareAppResources/`（run 与打包共用 `syncNativeResources` 喂料）、
   打包态 `<app-image>/app/resources/`。打包侧 `createDistributable` 已把 `nativeResources` 登记成显式
   输入（插件的 `appResourcesDir` 是 @Internal、不进 up-to-date 判据），打出旧包时用 `--rerun` 复查。
@@ -61,7 +62,7 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
 - 符号是**不带签名的名称导出**：`Java_soko_ekibun_web_NativeWebView_<name>`。
   改了 Kotlin 侧的方法签名却用着旧 dll，**不会报错**，只会参数错位 ——
   改签名后第一件事是确认 dll 真的刷新到了运行位置。
-- 绑定分别在 `shared/src/{commonMain,jvmMain,androidMain}/kotlin/soko/ekibun/jni.kt`
+- 绑定收在 `:bindings` 模块：`bindings/src/{commonMain,jvmMain,androidMain}/kotlin/soko/ekibun/jni.kt`
   与 `soko.ekibun.{quickjs, ffmpeg}`。webview 的绑定与业务接口同在 `soko.ekibun.web`
   （2026-10-02 拍板把整个 web 文件夹移出 `acg`，JNI 符号随之从 `_acg_web_` 变 `_web_`）——
   别再"顺手"单独挪它：那会又改 JNI 导出名，连带重编 dll。
@@ -85,6 +86,10 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
     接着 JVM 直接 `EXCEPTION_ACCESS_VIOLATION`（2026-09-21 实测）。所以它**留在类体里**
     当实例成员 —— 名字同样是外层类名，两全。
   - ⇒ 往这个包里加原生绑定：默认「companion + `@JvmStatic`」；**native 用到 `thiz` 就改放类体**。
+- **类的全限定名（含包名）也进 JNI 符号**：符号是 `Java_<包名下划线>_<类名>_<方法名>` ——
+  把声明 `external fun` 的类挪到别的包 / 改类名，符号名就变，dll 不重编就 `UnsatisfiedLinkError`
+  （「不报错、只失效」那一类）。模块搬迁（如绑定层已进 `:bindings`）不必重编的前提是
+  **包名一字不动**；真要改包名，就走「原生构建」重编 + dll 落位。
 
 ## webview
 
@@ -148,5 +153,9 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
   ⇒ 改它要连带三个地方：两个 IO 实现（它们共用这一个，`HttpIO.skipThreshold` 取的就是它）
   与上面那条 seek 判据。⚠️ native 侧 `ffmpeg.cpp` **反射调用这个方法**取 `avio_alloc_context`
   的实参 —— 改签名会静默要不到方法、连带整个播放起不来。
+- **`AvIO.Handler.open` 不许抛异常**：它跑在 native 的 `io_open` 回调里，Kotlin 异常会
+  pending 在 JNI 上没人接，下一个 JNI 调用直接 abort 整个 JVM（hs_err 的 Problematic frame
+  在 `initNative`）。「打不开」要学 `FileIO`：返回句柄为 null 的 IO（read/seek 恒 -1），
+  让 `avformat_open_input` 自己以 I/O 错误收场 —— 失败清理路径照常走完。
 - 解码路径已经处理 `EAGAIN` 并带 drain（native `ffmpeg.cpp` + Kotlin `AvCodec.drain()`，
   `FFPlayer` 在 EOF 主动 drain）。**不要**再把它当成"未实现"去重写。

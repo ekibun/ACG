@@ -54,8 +54,12 @@ abstract class AvSurfaceContext : Pointer() {
     @JvmStatic
     private external fun bufferAddress(buffer: ByteBuffer): Long
 
-    /** [bufferAddress] 的包装：桌面端拿它取 native 缓冲的地址。 */
-    internal fun addressOf(buffer: ByteBuffer): Long = bufferAddress(buffer)
+    /**
+     * [bufferAddress] 的包装：桌面端拿它取 native 缓冲的地址。public 是给跨模块的调用点
+     * （`:shared` 的 `SurfaceContext` 桌面子类与 `AvSurfaceContextBufferReuseTest`）——
+     * `internal` 出了本模块就看不见。
+     */
+    fun addressOf(buffer: ByteBuffer): Long = bufferAddress(buffer)
 
     /** native→native 原样拷贝（给桌面端把 RGBA 写进复用位图，见 `DesktopSurfaceContext`）。 */
     @JvmStatic
@@ -65,7 +69,8 @@ abstract class AvSurfaceContext : Pointer() {
       bytes: Int,
     )
 
-    internal fun copyPixels(
+    /** public 的由来同 [addressOf]：调用点在 `:shared`，跨模块 `internal` 不可见。 */
+    fun copyPixels(
       src: Long,
       dst: Long,
       bytes: Int,
