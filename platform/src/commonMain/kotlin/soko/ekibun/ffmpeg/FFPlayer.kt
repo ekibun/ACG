@@ -118,8 +118,8 @@ class FFPlayer(
 
   /**
    * 最近一次真的看到「连续两帧」时量到的**帧间隔**（微秒）。[stepBack] 空探那一跳靠它定步长，
-   * 只在拿得准的时候更新（见 [resumeImpl]）。还不知道时空探只能退回 1µs —— 老行为，会被粗时基的
-   * 半格吞掉（见 [stepBack]）。
+   * 只在拿得准的时候更新（见 [resumeImpl]）。冷启动还没量到时改走 [seekEpsilonUs] —— 那条路
+   * 只要时基就够，不必先看过两帧。
    */
   private var frameIntervalUs: Long? = null
 
@@ -253,15 +253,38 @@ class FFPlayer(
       if (!takeOverPlayback()) return@withContext false
       if (prevFrameTs == null) {
         // 文件开头取 max：探不出结果，下面统一返回 false。
-        // 步长取**帧间隔的 3/4**（[frameIntervalUs]）：半格 ≤ 间隔/2 < 3/4 间隔 < 间隔，天然落在这段
-        // 区间里，用不着知道流的 time_base。不知道帧间隔时只能退回 1µs（老行为），那种容器上照样探不出来。
-        val eps = frameIntervalUs?.let { it * 3 / 4 } ?: 1
+        // 步长要同时满足两条：**大于容器时基的半格**（否则 seek 把偏移量折回原格，等于没挪），
+        // **小于一个帧间隔**（否则收敛会越过前一帧，一下退两帧）。两条怎么同时满足见 [seekEpsilonUs]。
+        val eps = frameIntervalUs?.let { it * 3 / 4 } ?: seekEpsilonUs() ?: 1
         seekImpl(maxOf(current - eps, 0), resumeAfter = false)
       }
       val target = prevFrameTs ?: return@withContext false
       seekImpl(target, resumeAfter = false)
       true
     }
+
+  /**
+   * 冷启动（还没量到 [frameIntervalUs]）时 [stepBack] 空探那一跳的步长（微秒）。
+   *
+   * 落点要夹在两条边界之间：
+   * - **下界：大于容器时基的半格**。`avformat_seek_file` 传 `stream_index = -1`（[stepBack] 就是）
+   *   时会把微秒折回**默认流**的 time_base —— `seek_frame_internal` 里那句 `av_rescale`，mov 没实现
+   *   `read_seek2` 所以 mp4 走的正是它 —— 折回是**四舍五入**，偏移量不足半格就落回原格，一帧都不丢
+   *   ⇒ 前一帧照样探不出来。默认流在有视频轨时就是视频轨（`av_find_default_stream_index` 给视频
+   *   75 分、音频 50 分），所以这里按 [AVMediaType.VIDEO] 的时基算；视频轨连宽高都没有时它会挑音频，
+   *   这条假设就不成立了 —— 步长可能偏小、退化成老行为（不恶化，只是没修好）。
+   * - **上界：小于一个帧间隔**。收敛丢掉的是「时间戳 < 落点」的帧，落点越过前一帧就会一下退两帧。
+   *
+   * 取 **3/4 个 tick**：半格 < 3/4 tick < 1 tick ≤ 帧间隔（相邻帧的刻度值必然不同 ⇒ 间隔至少一整格），
+   * 天然落在那段区间里，不必先知道帧间隔。`null` = 时基拿不到（没有视频轨 / 分母为 0）。
+   */
+  private fun seekEpsilonUs(): Long? {
+    val stream = pts?.streams?.get(AVMediaType.VIDEO) ?: return null
+    if (stream.timeBaseNum <= 0 || stream.timeBaseDen <= 0) return null
+    // 3/4 tick = 3·num·1e6 / (4·den) 微秒。整数除法向下取整，+1 才是「严格大于半格」；
+    // maxOf(1, …) 兜住细时基（tick < 1µs，除法直接给 0）。
+    return maxOf(1L, 3L * stream.timeBaseNum * 1_000_000L / (4L * stream.timeBaseDen) + 1)
+  }
 
   private val codecs = HashMap<Int, AvCodec>()
   private val frames = HashMap<Int, ArrayList<AvFrame>>()
@@ -331,9 +354,20 @@ class FFPlayer(
                   return@updateJob
                 }
                 if (codecType == AVMediaType.VIDEO && onNextFrame?.isActive != true) {
+                  // 等到本帧到达播放时刻；中途停播就退出本轮。
                   while (frame.timeStamp > pts.now(surfaceContext?.speedRatio ?: 1f)) {
                     delay(1.milliseconds)
                     if (!isPlaying()) return@updateJob
+                  }
+                  // 队列里已有更晚、且仍落在当前播放窗口内的帧 —— 本帧已过期，直接丢。
+                  val stale =
+                    frames[stream.index]?.any { f ->
+                      f.timeStamp > frame.timeStamp &&
+                        f.timeStamp < pts.now(surfaceContext?.speedRatio ?: 1f)
+                    } == true
+                  if (stale) {
+                    consumed = true
+                    return@updateJob
                   }
                 }
                 if (muted) {

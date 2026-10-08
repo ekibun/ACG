@@ -215,8 +215,12 @@ Java_soko_ekibun_ffmpeg_AvFormat_getStreamsNative(JNIEnv* env, jobject thiz,
   auto ctx = (AVFormatContext*)pctx;
   if (avformat_find_stream_info(ctx, nullptr) != 0) return nullptr;
   jclass streamClass = env->FindClass("soko/ekibun/ffmpeg/AvStream");
+  // 时基一并递上去：`stream->time_base` 是这条流时间戳的**最小刻度**。
+  // 容器级 seek 把微秒折回刻度时，会吃掉半格以内的偏移
+  // （libavformat/seek.c 的 seek_frame_internal，mov 没实现 read_seek2
+  // 就走这条路）—— 上层要算「比半格大」的步长，非知道它不可。
   jmethodID constructor =
-      env->GetMethodID(streamClass, "<init>", "(JIIIIIIJLjava/util/Map;)V");
+      env->GetMethodID(streamClass, "<init>", "(JIIIIIIIIJLjava/util/Map;)V");
   jobjectArray streams =
       env->NewObjectArray(ctx->nb_streams, streamClass, nullptr);
   for (int i = 0; i < ctx->nb_streams; ++i) {
@@ -234,7 +238,8 @@ Java_soko_ekibun_ffmpeg_AvFormat_getStreamsNative(JNIEnv* env, jobject thiz,
         (jint)stream->codecpar->codec_type, (jint)stream->codecpar->sample_rate,
         (jint)stream->codecpar->ch_layout.nb_channels,
         (jint)stream->codecpar->width, (jint)stream->codecpar->height,
-        durationUs, metadata);
+        (jint)stream->time_base.num, (jint)stream->time_base.den, durationUs,
+        metadata);
     env->DeleteLocalRef(metadata);
     env->SetObjectArrayElement(streams, i, streamObj);
     env->DeleteLocalRef(streamObj);

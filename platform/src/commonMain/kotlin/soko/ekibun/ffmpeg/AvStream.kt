@@ -18,6 +18,15 @@ data class AvStream(
   val channels: Int,
   val width: Int,
   val height: Int,
+  /**
+   * 流时基（`AVStream::time_base`）的分子，分母见 [timeBaseDen]；一个 tick = num/den 秒。
+   *
+   * 它就是这条流时间戳的**最小刻度**。容器级 seek 折微秒时会吃掉半格以内的偏移
+   * （见 [AvFormat.seekTo]），上层要算「比半格大、又不足一个帧间隔」的步长就只能靠它 ——
+   * 这是把它一并递上来的唯一理由。**原样**递，不折成微秒：1/12800 的 tick 是 78.125µs，取整就没了。
+   */
+  val timeBaseNum: Int,
+  val timeBaseDen: Int,
   /** 流时长（微秒）；0 = 流上没有 —— HLS 的总时长只在格式层，取总时长见 [AvFormat.getDurationUs]。 */
   val duration: Long,
   val metadata: Map<String, String>,

@@ -158,7 +158,7 @@ class PointerTest {
   }
 
   /** 借用型的指针：`AVStream*` 归 `AvFormat` 的上下文所有，本类不拥有它。 */
-  private fun borrowedStream() = AvStream(0L, 0, 0, 0, 0, 0, 0, 0L, emptyMap())
+  private fun borrowedStream() = AvStream(0L, 0, 0, 0, 0, 0, 0, 1, 1, 0L, emptyMap())
 
   /**
    * 关掉之后再投递 —— **当场抛 [IllegalStateException]**，不是 kotlinx 的兜底。
