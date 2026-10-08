@@ -31,7 +31,7 @@ private const val APP_RESOURCES_DIR = "compose.application.resources.dir"
  * 前两步是**加法**：属性没设、文件不在就继续往下走。
  */
 @Suppress("UnsafeDynamicallyLoadedCode")
-actual fun jniLoadLibrary(name: String) {
+actual fun loadLibrary(name: String) {
   val osName = System.getProperty("os.name").lowercase()
   val extension =
     when {

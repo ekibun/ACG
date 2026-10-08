@@ -14,7 +14,7 @@ import kotlin.test.assertTrue
  * - **读出错必须出声**：`AvIO.read` 返回负数（AvIO 契约里的「出错」，EOF 是 0）
  *   最终会被 avio 毒化成 EOF 状态（aviobuf.c:551-558 把任何负返回值置
  *   `eof_reached`），`getPacket` 在 API 层分不开两者 —— 但不能静默：这里断言
- *   `getPacket` 仍以 null 收场（不挂死、不抛），且 stderr 上有那条 error 日志
+ *   `getPacket` 仍以 null 收场（不挂死、不抛），且标准输出上有那条 error 日志
  *   （native 侧另有两条 av_log，JVM 测试抓的是 Kotlin 这条）。
  * - **打不开的源要干净地失败**：`avformat_open_input` 失败走 initNative 的失败
  *   清理路径（GlobalRef / pb / URL 字符串都在那边收），返回 0、Kotlin 侧以
@@ -45,9 +45,9 @@ class AvReadErrorFoldTest {
     // 10 秒 ≈ 160 KB，要 5 次 32 KB 的 read 才读完；第 4 次起返回 -1，
     // 错误必然落在 getPacket 阶段（前 3 次足够 find_stream_info 用）。
     val wav = WavMedia.bytes(durationSec = 10)
-    val err = ByteArrayOutputStream()
-    val originalErr = System.err
-    System.setErr(PrintStream(err, true, Charsets.UTF_8))
+    val out = ByteArrayOutputStream()
+    val originalOut = System.out
+    System.setOut(PrintStream(out, true, Charsets.UTF_8))
     try {
       runBlocking {
         withTimeout(30_000) {
@@ -63,11 +63,11 @@ class AvReadErrorFoldTest {
         }
       }
     } finally {
-      System.setErr(originalErr)
+      System.setOut(originalOut)
     }
     assertTrue(
-      err.toString(Charsets.UTF_8).contains("[AvFormat] av_read_frame error"),
-      "IO error must be logged instead of folding silently; stderr was: $err",
+      out.toString(Charsets.UTF_8).contains("[AvFormat] av_read_frame error"),
+      "IO error must be logged instead of folding silently; stdout was: $out",
     )
   }
 

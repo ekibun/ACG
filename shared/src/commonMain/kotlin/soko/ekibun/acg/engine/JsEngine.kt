@@ -4,12 +4,16 @@ import acg.shared.generated.resources.Res
 import io.ktor.client.statement.request
 import io.ktor.http.isSuccess
 import io.ktor.util.toMap
-import io.ktor.utils.io.toByteArray
+import io.ktor.utils.io.charsets.Charsets
+import io.ktor.utils.io.charsets.encodeToByteArray
+import io.ktor.utils.io.charsets.forName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.io.bytestring.ByteString
+import kotlinx.io.bytestring.decodeToString
 import soko.ekibun.common.Http
 import soko.ekibun.quickjs.JSError
 import soko.ekibun.quickjs.JSFunction
@@ -22,7 +26,6 @@ import soko.ekibun.web.WebViewRequest
 import soko.ekibun.web.WebViewTask
 import soko.ekibun.web.WebViewTaskResult
 import soko.ekibun.web.loadBackgroundWebView
-import java.nio.charset.Charset
 
 class JsEngine {
   companion object {
@@ -150,15 +153,37 @@ class JsEngine {
     println("$type\n$data")
   }
 
+  /**
+   * [input] 按 [to] 编码成字节 —— `TextEncoder` 那侧的实现。
+   *
+   * [to] 是 JS 侧 `new TextEncoder(label)` 的 `label`，**原样交给 charset 表**：大小写、
+   * 别名（`utf8` / `UTF-8`）、非 UTF 编码都认，**不认识就抛**（`UnsupportedCharsetException`
+   * / `IllegalCharsetNameException`），JS 侧 `catch` 接得住。
+   * **别兜底成 UTF-8**：静默换编码会让请求体以另一种编码发出去，而对端按声明的编码解，
+   * 服务端收到的是乱码却不报错。
+   *
+   * 走 ktor 的 [io.ktor.utils.io.charsets]：它那套是 **commonMain** 声明（`forName` 是
+   * `expect`，JVM 上直接转发 `java.nio.charset.Charset.forName`），所以 `commonMain` 里
+   * 不出现平台符号。
+   */
   private fun encode(
     input: String,
     to: String?,
-  ): ByteArray = input.toByteArray(Charset.forName(to ?: "utf-8"))
+  ): ByteArray = Charsets.forName(to ?: "utf-8").newEncoder().encodeToByteArray(input)
 
+  /**
+   * [input] 按 [from] 解码成字符串 —— `TextDecoder` 那侧的实现。
+   *
+   * [from] 的来由与判据与 [encode] 完全一致（同一个 `label` 参数、同一种「不认识就抛」）。
+   * 非法字节按 charset 的默认策略**替换**（U+FFFD），不抛。
+   *
+   * 经 [ByteString] 而不是 decoder：ktor 的 `decode` 收的是 `Source`，而 `ByteString` 是
+   * `Source` 的一种 —— ktor 自己在 JVM 上实现那条时走的也是 `ByteString.decodeToString`。
+   */
   private fun decode(
     input: ByteArray,
     from: String?,
-  ): String = String(input, Charset.forName(from ?: "utf-8"))
+  ): String = ByteString(input).decodeToString(Charsets.forName(from ?: "utf-8"))
 
   /**
    * 起一个 [Deferred]，并在它收场时（成功 / 失败 / 取消）归还接手的 JS 实参。

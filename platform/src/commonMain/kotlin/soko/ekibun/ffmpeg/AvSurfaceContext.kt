@@ -1,7 +1,7 @@
 package soko.ekibun.ffmpeg
 
 import soko.ekibun.Pointer
-import soko.ekibun.jniLoadLibrary
+import soko.ekibun.loadLibrary
 import java.nio.ByteBuffer
 
 /**
@@ -16,7 +16,7 @@ abstract class AvSurfaceContext : Pointer() {
 
   companion object {
     init {
-      jniLoadLibrary("ffmpeg")
+      loadLibrary("ffmpeg")
     }
 
     @JvmStatic

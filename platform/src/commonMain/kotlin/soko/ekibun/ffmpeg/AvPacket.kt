@@ -1,7 +1,7 @@
 package soko.ekibun.ffmpeg
 
 import soko.ekibun.Pointer
-import soko.ekibun.jniLoadLibrary
+import soko.ekibun.loadLibrary
 
 class AvPacket : Pointer() {
   /**
@@ -17,7 +17,7 @@ class AvPacket : Pointer() {
 
   companion object {
     init {
-      jniLoadLibrary("ffmpeg")
+      loadLibrary("ffmpeg")
     }
 
     @JvmStatic

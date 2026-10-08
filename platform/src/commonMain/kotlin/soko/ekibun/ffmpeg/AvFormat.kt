@@ -4,7 +4,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import soko.ekibun.Pointer
 import soko.ekibun.ThreadDispatcher
-import soko.ekibun.jniLoadLibrary
+import soko.ekibun.loadLibrary
 
 open class AvFormat(
   val url: String,
@@ -56,7 +56,7 @@ open class AvFormat(
     const val PREFETCH_PACKETS = 100
 
     init {
-      jniLoadLibrary("ffmpeg")
+      loadLibrary("ffmpeg")
     }
 
     @JvmStatic
@@ -162,7 +162,7 @@ open class AvFormat(
    *
    * [packetChannel] / [readerJob] 跨线程读写但**刻意不加 `@Volatile`**（没有数据竞争，可见性靠
    * `FFPlayer.pause` 那个 join 与 `withPtr` 的恢复边）。那条不变量**不局部**，拆它得换
-   * `AtomicReference` —— 访问点表与理由见 `silent-failures.md`。
+   * `kotlin.concurrent.atomics.AtomicReference` —— 访问点表与理由见 `silent-failures.md`。
    */
   suspend fun resetChannel() {
     io.abort()
@@ -180,7 +180,7 @@ open class AvFormat(
    * 由 [seekTo] 里的 [resetChannel] 保证（FFPlayer 每轮传 `pts.streams.values`，而换位置一定先 seek）。
    *
    * 返回 `null` 表示 **EOF**（粘住的，不挂起也不抛）。读**出错**同样折叠成 null —— aviobuf 把 IO 错误
-   * 毒化成 EOF、API 层分不开，但错误会出声（native 两条 av_log + 这里的 stderr），不是静默的「播完了」。
+   * 毒化成 EOF、API 层分不开，但错误会出声（native 两条 av_log + 这里那条诊断行），不是静默的「播完了」。
    */
   suspend fun getPacket(streams: Collection<AvStream>): AvPacket? {
     val channel =
@@ -206,7 +206,7 @@ open class AvFormat(
                       packet.close()
                       inFlight = null
                       if (ret != AVERROR_EOF && ret != AVERROR_EXIT) {
-                        System.err.println("[AvFormat] av_read_frame error ret=$ret, folded to EOF")
+                        println("[AvFormat] av_read_frame error ret=$ret, folded to EOF")
                       }
                       return@withPtr
                     }

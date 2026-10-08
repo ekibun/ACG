@@ -30,6 +30,22 @@ kotlin {
   }
 
   sourceSets {
+    // 「JVM 族」中间层：Android 与桌面 JVM 共用的那批**平台实现**。换绑定技术（cinterop /
+    // 别的 FFI）时要换掉的是这一层，不是 commonMain 的编排逻辑。
+    //
+    // 只收**实现**，不收 `external fun` 声明 —— 那些是契约，签名全用 common 类型，
+    // 留在 commonMain 已合规。搬声明会改 61 个 JNI 导出符号（类名进符号），换不来任何东西。
+    //
+    // 判据是「两端逐字相同、且不含平台专有符号」。留在原处的是**真有差异**的那些：
+    // loadLibrary（桌面按序找 dll / Android 直接 loadLibrary）、Http（ktor 引擎
+    // Java vs OkHttp）、以及 web / SurfaceContext / VideoSurface（Android 专有）。
+    val jvmShared =
+      create("jvmShared") {
+        dependsOn(commonMain.get())
+      }
+    getByName("jvmMain").dependsOn(jvmShared)
+    getByName("androidMain").dependsOn(jvmShared)
+
     commonMain.dependencies {
       // coroutines 用 api：Pointer.closeDeferred() 的返回类型 Job 与 ThreadDispatcher
       // 本身都是协程类型，消费方（:shared）要看得见。

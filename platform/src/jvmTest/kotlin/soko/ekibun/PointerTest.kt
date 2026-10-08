@@ -1,15 +1,18 @@
 package soko.ekibun
 
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import soko.ekibun.ffmpeg.AvCodec
 import soko.ekibun.ffmpeg.AvStream
+import java.util.concurrent.Executors
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
@@ -52,9 +55,16 @@ class PointerTest {
   /**
    * 可数派发次数的归属 dispatcher —— **继承 [ThreadDispatcher]**（而不是自己实现一个
    * `CoroutineDispatcher` 再包一层）正是因为归属线程由它记：[Pointer.withPtrSync] 判断
-   * 「要不要投递」靠的就是 [ThreadDispatcher.thread]，包一层就拿不到了。
+   * 「要不要投递」问的就是 `isOnCurrentThread`，包一层就答不出来。
+   *
+   * 注意它**自己传执行器**（而不是走 [createThreadDispatcher]）：这样这条线程的名字与
+   * 底座那套（`Thread(runnable, name)`）完全一致，用例断言「归属线程是谁」时才对得上。
    */
-  private class CountingDispatcher : ThreadDispatcher("counting-owner") {
+  private class CountingDispatcher :
+    ThreadDispatcherImpl(
+      "counting-owner",
+      Executors.newSingleThreadExecutor().asCoroutineDispatcher(),
+    ) {
     var dispatches: Int = 0
       private set
 
@@ -79,6 +89,42 @@ class PointerTest {
     } finally {
       counting.close()
     }
+  }
+
+  /**
+   * 归属线程还在不在、退出没有 —— **只在 jvmTest 里要**。
+   *
+   * 「线程还在不在」是平台特有的（Kotlin/Native 的 worker 没有「活着没」这个概念），
+   * 所以它**不进** `ThreadDispatcher` 的抽象面：生产代码没有任何调用点要它，
+   * 而「`close()` 真的把线程收掉了」这条性质**必须在测试期可验**。于是测试自己强转。
+   *
+   * 底下那条线程由 `ThreadDispatcherImpl` 在构造期快照成 [Thread]，强转安全。
+   */
+  private fun ThreadDispatcher.ownerThread(): Thread = (this as ThreadDispatcherImpl).thread
+
+  private fun ThreadDispatcher.isOwnerAlive(): Boolean = ownerThread().isAlive
+
+  /** 等归属线程退出，上界 [timeoutMs] 毫秒；返回是否在期限内退出了。 */
+  private fun ThreadDispatcher.joinOwner(timeoutMs: Long): Boolean =
+    run {
+      ownerThread().join(timeoutMs)
+      !ownerThread().isAlive
+    }
+
+  /**
+   * [ThreadDispatcher.close] 真的把那条线程收掉 —— 它转发的就是底层执行器的关闭：
+   * **不等待**在途任务，空闲 worker 被打断、线程随后退出（`join` 拿不到就是没关掉）。
+   *
+   * 断言的是**线程真的没了**，不是旗标位 —— `isClosed` 只说明「本类决定不再接活」，
+   * 底层若没关线程（换实现、换平台）它照样为 true 而线程还在。这条钉的就是那半边。
+   */
+  @Test
+  fun closeShutsDownOwnerThread() {
+    val owner = ThreadDispatcher("closing-owner")
+    assertTrue(owner.isOwnerAlive(), "the constructor-time dispatch must have started the thread")
+    owner.close()
+    owner.joinOwner(5_000)
+    assertFalse(owner.isOwnerAlive(), "the owner thread should exit after close()")
   }
 
   /**
@@ -115,19 +161,6 @@ class PointerTest {
   private fun borrowedStream() = AvStream(0L, 0, 0, 0, 0, 0, 0, 0L, emptyMap())
 
   /**
-   * [ThreadDispatcher.close] 真的把那条线程收掉 —— 它转发的就是 `ExecutorService.shutdown()`：
-   * **不等待**在途任务，空闲 worker 被打断、线程随后退出（`join` 拿不到就是没关掉）。
-   */
-  @Test
-  fun closeShutsDownOwnerThread() {
-    val owner = ThreadDispatcher("closing-owner")
-    assertTrue(owner.thread.isAlive, "the constructor-time dispatch must have started the thread")
-    owner.close()
-    owner.thread.join(5_000)
-    assertFalse(owner.thread.isAlive, "the owner thread should exit after close()")
-  }
-
-  /**
    * 关掉之后再投递 —— **当场抛 [IllegalStateException]**，不是 kotlinx 的兜底。
    *
    * [ThreadDispatcher] 在 `dispatch` 上自己拦了一手，理由是 kotlinx 的兜底会把「归属线程
@@ -146,7 +179,7 @@ class PointerTest {
 
     // 1) 挂起门：走的是 withContext(d)
     val viaSuspend = assertFailsWith<IllegalStateException> { runBlocking { probe.withPtr { it } } }
-    assertTrue(viaSuspend.message!!.contains(owner.thread.name), viaSuspend.message)
+    assertTrue(viaSuspend.message!!.contains(owner.threadName), viaSuspend.message)
 
     // 2) 同步门：走的是 runBlocking(d)，JNI 回调链那条
     assertFailsWith<IllegalStateException> { probe.withPtrSync { it } }
@@ -192,10 +225,10 @@ class PointerTest {
       object : Pointer(0x77L, owner, closeDispatcherOnClose = true) {
         override suspend fun releaseImpl(ptr: Long) = Unit
       }
-    assertTrue(owner.thread.isAlive, "not closed yet, the thread should be alive")
+    assertTrue(owner.isOwnerAlive(), "not closed yet, the thread should be alive")
     runBlocking { probe.closeDeferred().join() }
-    owner.thread.join(5_000)
-    assertFalse(owner.thread.isAlive, "with closeDispatcherOnClose the thread must be collected once release lands")
+    owner.joinOwner(5_000)
+    assertFalse(owner.isOwnerAlive(), "with closeDispatcherOnClose the thread must be collected once release lands")
   }
 
   /**
@@ -215,7 +248,10 @@ class PointerTest {
           override suspend fun releaseImpl(ptr: Long) = Unit
         }
       runBlocking { probe.closeDeferred().join() }
-      assertTrue(shared.thread.isAlive, "without closeDispatcherOnClose the shared dispatcher must not be touched")
+      assertTrue(
+        shared.isOwnerAlive(),
+        "without closeDispatcherOnClose the shared dispatcher must not be touched",
+      )
     } finally {
       shared.close()
     }
@@ -238,8 +274,8 @@ class PointerTest {
         override suspend fun releaseImpl(ptr: Long) = Unit
       }
     probe.close()
-    owner.thread.join(5_000)
-    assertFalse(owner.thread.isAlive, "an uninitialized handle still owes a thread shutdown")
+    owner.joinOwner(5_000)
+    assertFalse(owner.isOwnerAlive(), "an uninitialized handle still owes a thread shutdown")
   }
 
   /**
@@ -353,7 +389,8 @@ class PointerTest {
     }
 
   /**
-   * [Pointer.withPtrSync]：同步版 [Pointer.withPtr]，判据是 [ThreadDispatcher.thread]。
+   * [Pointer.withPtrSync]：同步版 [Pointer.withPtr]，判据是 `isOnCurrentThread`
+   * （[Pointer.withPtr] 现在也用同一个判据 —— 见类文档「归属 dispatcher + 归属线程」）。
    *
    * 两句都要成立：从别的线程调要投递到归属线程上跑；已经在归属线程上就**就地执行**。
    */
@@ -392,7 +429,7 @@ class PointerTest {
 
       // close() 只投递；等它落地要拿 closeDeferred() 去 await
       runBlocking { probe.closeDeferred().join() }
-      assertEquals(counting.thread, releasedOn)
+      assertSame(releasedOn, counting.thread, "release must land on the owner thread")
       assertTrue(probe.isClosed)
       // 只跑一次：归还动作不可重入
       runBlocking { probe.closeDeferred().join() }
@@ -482,16 +519,16 @@ class PointerTest {
       val viaSuspend = runBlocking(counting) { ComputedHandle(256L, counting) }
       assertEquals(2560L, runBlocking { viaSuspend.withPtr { it } })
       assertTrue(
-        owner != Thread.currentThread(),
+        owner !== Thread.currentThread(),
         "this case only makes sense when the owner thread differs from the caller",
       )
-      assertEquals(owner, viaSuspend.initPtrThread)
+      assertTrue(viaSuspend.initPtrThread === owner, "initPtr must run on the owner thread")
       assertEquals(1, viaSuspend.initPtrCalls)
 
       // 同步门同理（JNI 回调链走的那条）
       val viaSync = runBlocking(counting) { ComputedHandle(7L, counting) }
       assertEquals(70L, viaSync.withPtrSync { it })
-      assertEquals(owner, viaSync.initPtrThread)
+      assertTrue(viaSync.initPtrThread === owner, "sync gate must also land on the owner thread")
     }
 
   /**

@@ -2,7 +2,7 @@ package soko.ekibun.ffmpeg
 
 import soko.ekibun.Pointer
 import soko.ekibun.ThreadDispatcher
-import soko.ekibun.jniLoadLibrary
+import soko.ekibun.loadLibrary
 
 /**
  * 一个解码器实例 —— 绑定在 [stream] 上。
@@ -17,7 +17,7 @@ class AvCodec(
 ) : Pointer(dispatcher = ThreadDispatcher("avcodec"), closeDispatcherOnClose = true) {
   companion object {
     init {
-      jniLoadLibrary("ffmpeg")
+      loadLibrary("ffmpeg")
     }
 
     @JvmStatic

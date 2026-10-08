@@ -6,9 +6,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.channels.Channel
 import soko.ekibun.Pointer
 import soko.ekibun.ThreadDispatcher
-import soko.ekibun.jniLoadLibrary
-import java.util.Collections
-import java.util.IdentityHashMap
+import soko.ekibun.loadLibrary
 
 /**
  * 一个独立的 QuickJS runtime。
@@ -66,7 +64,7 @@ class QuickJS(
     val sharedDispatcher = ThreadDispatcher("quickjs")
 
     init {
-      jniLoadLibrary("quickjs")
+      loadLibrary("quickjs")
     }
 
     @JvmStatic
@@ -319,8 +317,12 @@ class QuickJS(
    * 这里刻意用强引用（与 flutter_qjs 的 `_RuntimeOpaque._ref` 一致）：只有强引用才能
    * 保证「还没 close 的对象一定还在册」，从而让清算**确定发生**而不是听天由命等 GC。
    * 这也是本类不设 GC 兜底清扫的底气 —— 见 [releaseImpl]。
+   *
+   * [HashSet] 在这里**就是**身份集合，不必换成按内容比对的表：登记的键只有 [JSRef]，
+   * 它与 [JSFunction] 都没有覆写 `equals` / `hashCode`，走的是 `Any` 的默认实现
+   * （引用相等 + 身份哈希）。将来若有子类覆写了那两个方法，这条等价就不成立了。
    */
-  private val refs = Collections.newSetFromMap(IdentityHashMap<JSRef, Boolean>())
+  private val refs = HashSet<JSRef>()
 
   internal fun register(value: JSRef) {
     refs.add(value)
@@ -364,8 +366,8 @@ class QuickJS(
    * 清算（[collectLeaks]）必须在标记之后、销毁之前照常归还引用，否则残留会撑到
    * `JS_FreeRuntime` 去触发 `gc_obj_list` 断言、整个进程 abort。这也是本函数**不走**查 [isClosed] 的两扇门、直读 [ptr] 的原因。
    *
-   * 本类**不设 GC 兜底**（曾尝试 `java.lang.ref.Cleaner`，已移除），两条理由：
-   * - Android 上 `java.lang.ref.Cleaner` 是 **API 33** 才有的类，而本工程
+   * 本类**不设 GC 兜底**（曾尝试 `Cleaner`，已移除），两条理由：
+   * - Android 上 `Cleaner` 是 **API 33** 才有的类，而本工程
    *   `minSdk = 24` 且没开 core library desugaring —— 低版本上是 `NoClassDefFoundError`，
    *   而它挂在实例字段上，构造 QuickJS 就会炸；
    * - 清理动作若持有被登记对象，该对象就永远可达、清扫器永不触发。`QuickJS` 的清理动作
@@ -373,7 +375,7 @@ class QuickJS(
    *   上其实从未生效过。
    *
    * 于是显式 [close] 是唯一销毁路径，[Pointer]（即 [AutoCloseable]）只是给它补上
-   * `use {}` 这类语法契约。漏掉的引用由 [refs] 在关闭时清算并报告到 System.err，
+   * `use {}` 这类语法契约。漏掉的引用由 [refs] 在关闭时清算并报告到标准错误流，
    * 测试捕获它断言。
    */
   override suspend fun releaseImpl(ptr: Long) {
@@ -381,11 +383,11 @@ class QuickJS(
     updateChannel.close()
     // 先清算再销毁，顺序承重（见 [collectLeaks]）：登记在册的 JSRef 指向本 runtime
     // 内部，销毁前必须逐个归还，否则 JS_FreeRuntime 的 gc_obj_list 断言 abort。
-    // 泄漏清单走 System.err —— 生产可观测；测试捕获它断言（没有为测试保留的
+    // 泄漏清单走标准错误流 —— 生产可观测；测试捕获它断言（没有为测试保留的
     // 结果通道）。
     val leaked = collectLeaks()
     if (leaked.isNotEmpty()) {
-      System.err.println("QuickJS reference leak:\n" + leaked.joinToString("\n"))
+      println("QuickJS reference leak:\n" + leaked.joinToString("\n"))
     }
     destroyContext(ptr)
   }
@@ -509,7 +511,8 @@ class QuickJS(
         }
         return arr
       }
-      // 普通对象：**整图展开**成 LinkedHashMap。展开出来的是纯数据，与 JS 侧脱钩
+      // 普通对象：**整图展开**成 LinkedHashMap（`kotlin.collections` 的有序表，键的插入
+      // 序即 JS 对象的属性序）。展开出来的是纯数据，与 JS 侧脱钩
       // —— 改它不会影响 JS，也就不需要包装 + 引用计数那一整套。
       val map = LinkedHashMap<Any?, Any?>()
       // 同样在填之前登记（理由同数组）。
@@ -668,16 +671,18 @@ class QuickJS(
    * Java 值 → JS 句柄。
    *
    * `cache` 是**按对象身份**的访问表，用来切断循环引用：`a["a"] = a` 这种图若不做
-   * 记忆，转换会在 `a` 上无限递归。必须用 [IdentityHashMap] 而不是普通 `HashMap`：
-   * - 语义上这里要的是「同一个对象实例」，不是「内容相等的对象」；
-   * - 更要命的是普通 `HashMap` 会对**键**调用 `hashCode()`/`equals()`，而循环引用的
-   *   对象（自引用 Map）在算哈希时就会无限递归，直接 `StackOverflowError`。
+   * 记忆，转换会在 `a` 上无限递归。键必须是「按身份」的（[IdentityMap]），**不能**用普通
+   * `HashMap` 顶替，两条各自都会静默出错、且都不会被 catch 接住：
+   * - 普通 `HashMap` 会对**键**调 `hashCode()` / `equals()`，而自引用的 Map 算哈希时就会
+   *   无限递归 —— 那是 `StackOverflowError`（`Error`，不是异常），整个进程死；
+   * - 即便躲过上一条，「内容相等但不同一」的两个对象（例如两个空 Map）会被折叠成同一个
+   *   entry，于是对象图里两处不同的容器在 JS 侧合并成了一个。
    *
-   * 这与 [jsToJava] 那边的 `cache` 是同一个思路（按 native 指针记忆）。
+   * 这与 [jsToJava] 那边的 `cache` 是同一个思路（那边按 native 指针记忆）。
    */
   private fun javaToJsImpl(
     obj: Any?,
-    cache: MutableMap<Any, Long> = IdentityHashMap<Any, Long>(),
+    cache: IdentityMap<Any, Long> = IdentityMap(),
   ): Long =
     withPtrSync { ptr ->
       if (obj == null || obj is Unit) return@withPtrSync jsNULL()
@@ -690,7 +695,7 @@ class QuickJS(
           ptr,
           ret,
           jsNewString(ptr, "name"),
-          jsNewString(ptr, obj.javaClass.name),
+          jsNewString(ptr, obj::class.qualifiedName ?: "Error"),
         )
         definePropertyValue(
           ptr,
@@ -839,4 +844,49 @@ class QuickJS(
     refs.clear()
     return leaked
   }
+}
+
+/**
+ * 按**对象身份**（`===`）比对的访问表 —— common 里没有现成的，而本工程需要它来切断
+ * 对象图的循环引用（见 [QuickJS.javaToJsImpl] 的 `cache`）。
+ *
+ * **判等自己写，哈希也自己写**：哈希一律给常数 0 ⇒ 全部落在同一个桶里，于是查找退化成
+ * 线性扫；而线性扫比的必须是 `===`（而不是 `==`），否则「内容相等但不同一」的两个对象会被
+ * 合并（`{a:{}, b:{}}` 里两个空 Map 会共用一个 JS 对象）。普通 `HashMap` 连第一步都过不去 ——
+ * 它会对键调 `hashCode()`，自引用的 Map 算哈希时无限递归，那是 `StackOverflowError`
+ * （`Error`，不是异常），catch 接不住、整个进程死。
+ *
+ * **常数哈希是刻意的**：要真正摊到 O(1) 就得用 `identityHashCode`，而它在 common 里不存在
+ * （得再开一个 expect 原语）。规模上没问题 —— 唯一的用户是**一次遍历内**的 `cache`，
+ * 装的是那棵对象图里的容器，桥接过来的也就几十量级。
+ *
+ * **刻意不实现 [MutableMap]**：那会把 size / remove / clear / containsValue 全拖进来，
+ * 而 [QuickJS.javaToJsImpl] 只用到 [get] 与 [put]。
+ */
+private class IdentityMap<K : Any, V> {
+  private val keys = ArrayList<K>()
+  private val values = ArrayList<V>()
+
+  /** [javaToJsImpl] 的读侧：`cache[obj]`。没有这一票就说明还没转过它，要新建。 */
+  operator fun get(key: K): V? {
+    val i = indexOfKey(key)
+    return if (i >= 0) values[i] else null
+  }
+
+  /** [javaToJsImpl] 的写侧：容器在**填之前**登记（`a["a"] = a` 时递归命中的正是它自己）。 */
+  operator fun set(
+    key: K,
+    value: V,
+  ) {
+    val i = indexOfKey(key)
+    if (i >= 0) {
+      values[i] = value
+    } else {
+      keys += key
+      values += value
+    }
+  }
+
+  /** 只有身份相同才算命中 —— 这是本类与普通 map 的**唯一**区别所在。 */
+  private fun indexOfKey(key: K): Int = keys.indexOfFirst { it === key }
 }

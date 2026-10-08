@@ -1,10 +1,10 @@
 package soko.ekibun.quickjs
 
-import soko.ekibun.jniLoadLibrary
+import soko.ekibun.loadLibrary
 
 object Highlight {
   init {
-    jniLoadLibrary("quickjs")
+    loadLibrary("quickjs")
   }
 
   private fun parseString(

@@ -1,7 +1,8 @@
 package soko.ekibun.quickjs
 
 import soko.ekibun.Pointer
-import java.util.concurrent.atomic.AtomicInteger
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 /**
  * 一个 JS 引用的持有者：**所有权账本 + native 句柄**。
@@ -34,6 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * 本类注入的是 [ctx] 的 dispatcher（借 [QuickJS] 的归属线程，自己没有可关的线程）；
  * 要同步读句柄一律走 [Pointer.withPtrSync] —— 已在归属线程就就地，否则投递过去。
  */
+@OptIn(ExperimentalAtomicApi::class)
 open class JSRef internal constructor(
   nativePtr: Long,
   internal val ctx: QuickJS,
@@ -42,10 +44,10 @@ open class JSRef internal constructor(
   // （测试线程、WebView 回调线程），而归还动作被投递到 JS 线程上。
   // 普通 Int / Boolean 会丢更新 —— 少一次计量就是提前释放（use-after-free），
   // 少一次归还就是 `JS_FreeRuntime` 的 gc_obj_list 断言 abort。
-  private val _refCount = AtomicInteger(1)
+  private val _refCount = AtomicInt(1)
 
   /** 当前持有者数量。仅用于泄漏诊断。 */
-  val refCount: Int get() = _refCount.get()
+  val refCount: Int get() = _refCount.load()
 
   init {
     @Suppress("LeakingThis")
@@ -59,7 +61,7 @@ open class JSRef internal constructor(
    */
   fun dup(): JSRef {
     if (isClosed) throw IllegalStateException("JSRef already released")
-    _refCount.incrementAndGet()
+    _refCount.addAndFetch(1)
     return this
   }
 
@@ -73,7 +75,7 @@ open class JSRef internal constructor(
    */
   fun free() {
     if (isClosed) return
-    if (_refCount.decrementAndGet() <= 0) close()
+    if (_refCount.addAndFetch(-1) <= 0) close()
   }
 
   override suspend fun releaseImpl(ptr: Long) {
@@ -83,9 +85,9 @@ open class JSRef internal constructor(
   /**
    * 泄漏诊断用的描述。
    *
-   * 关闭时若仍有未归零的引用，这里的内容会进入打印到 System.err 的泄漏报告。
+   * 关闭时若仍有未归零的引用，这里的内容会进入打印到标准错误流的泄漏报告。
    */
-  fun describe(): String = "${javaClass.simpleName}(refs=$refCount, ptr=$ptr)"
+  fun describe(): String = "${this::class.simpleName}(refs=$refCount, ptr=$ptr)"
 }
 
 /**

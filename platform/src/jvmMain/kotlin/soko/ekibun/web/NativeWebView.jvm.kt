@@ -2,7 +2,7 @@ package soko.ekibun.web
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
-import soko.ekibun.jniLoadLibrary
+import soko.ekibun.loadLibrary
 import java.awt.Component
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -172,14 +172,14 @@ public object NativeWebView {
   /**
    * 加载 webview 原生库。
    *
-   * 直接复用 [jniLoadLibrary]：dll 不再打进 jar，而是作为应用资源 / classpath 目录里的真文件
+   * 直接复用 [loadLibrary]：dll 不再打进 jar，而是作为应用资源 / classpath 目录里的真文件
    * 落盘（见 `jni.jvm.kt`）。`webview.dll` 与 `WebView2Loader.dll` 一定挨着，所以只
    * `System.load(webview.dll)` 即可 —— Windows 会按「自己所在目录」自动把 `WebView2Loader.dll`
    * 一起拉起来。以前非得自己解包，正是因为旧逻辑把每个 dll 解成 `%TEMP%` 里互不相邻的随机文件，
    * 而 webview.dll 是按「自己所在目录」找 `WebView2Loader.dll` 的。
    */
   private fun loadNativeLibraries() {
-    jniLoadLibrary("webview")
+    loadLibrary("webview")
   }
 
   // ---------------------------------------------------------------------

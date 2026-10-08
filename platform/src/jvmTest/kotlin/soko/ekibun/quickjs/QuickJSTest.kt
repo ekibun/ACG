@@ -55,25 +55,25 @@ class QuickJSTest {
   ): Any? = runBlocking { ctx.evaluate(cmd, name, flag) }
 
   /**
-   * 捕获 System.err 并等关闭落地（清算与泄漏报告都在 [QuickJS.releaseImpl] 里），
+   * 捕获标准输出并等关闭落地（清算与泄漏报告都在 [QuickJS.releaseImpl] 里），
    * 返回捕获到的输出 —— 泄漏断言读它，生产代码不为测试保留结果通道。
    */
-  private fun QuickJS.closeCapturingStderr(): String {
+  private fun QuickJS.closeCapturingOut(): String {
     val buf = ByteArrayOutputStream()
-    val old = System.err
-    System.setErr(PrintStream(buf, true, Charsets.UTF_8))
+    val old = System.out
+    System.setOut(PrintStream(buf, true, Charsets.UTF_8))
     try {
       runBlocking { closeDeferred().join() }
     } finally {
-      System.setErr(old)
+      System.setOut(old)
     }
     return buf.toString("UTF-8")
   }
 
-  /** 关闭并断言 stderr 里没有泄漏报告。 */
+  /** 关闭并断言输出里没有泄漏报告。 */
   private fun QuickJS.closeAndAssertNoLeak() {
-    val err = closeCapturingStderr()
-    assertTrue("reference leak" !in err, "close 不该报泄漏：\n$err")
+    val out = closeCapturingOut()
+    assertTrue("reference leak" !in out, "close 不该报泄漏：\n$out")
   }
 
   @Test
@@ -176,26 +176,26 @@ class QuickJSTest {
   /**
    * flutter_qjs: `test('reference leak')`。
    *
-   * 那条测试的用意是：**故意**不释放 `()=>{}` 的返回值，然后断言 close 在 stderr 打出
+   * 那条测试的用意是：**故意**不释放 `()=>{}` 的返回值，然后断言 close 在输出流打出
    * `reference leak:` 前缀的报告。这验证的是「泄漏不会静默变成 C 层断言」。
    *
    * 对照本工程重构前的表现：同样场景会让 QuickJS 在 `JS_FreeRuntime` 里
    * `assert(list_empty(&rt->gc_obj_list))` 失败并 `abort()`，整个测试进程死掉，
-   * 根本轮不到断言。现在它变成 close 时打印到 System.err 的一份报告，测试捕获断言。
+   * 根本轮不到断言。现在它变成 close 时打印出的一份报告，测试捕获断言。
    */
   @Test
   fun referenceLeak() {
     val ctx = context()
     // 故意不 close()：这个 JSFunction 包装在 close 时仍被登记着
     eval(ctx, "()=>{}", name = "<eval>")
-    val err = ctx.closeCapturingStderr()
+    val out = ctx.closeCapturingOut()
     assertTrue(
-      "reference leak:" in err,
-      "expected a reference leak report, got: $err",
+      "reference leak:" in out,
+      "expected a reference leak report, got: $out",
     )
   }
 
-  /** 正常路径不该报泄漏：所有包装都显式归还后，close 的 stderr 必须安静 */
+  /** 正常路径不该报泄漏：所有包装都显式归还后，close 的输出必须安静 */
   @Test
   fun noLeakWhenEverythingIsReleased() {
     val ctx = context()
@@ -501,19 +501,19 @@ class QuickJSTest {
     repeat(64) {
       eval(ctx, "(() => 1)", name = "<leak>")
     }
-    // 64 个函数都没归还 → close 时必须在 stderr 里逐一报告
-    val err = ctx.closeCapturingStderr()
+    // 64 个函数都没归还 → close 时必须逐一报告
+    val out = ctx.closeCapturingOut()
     assertTrue(
-      "reference leak:" in err,
-      "expected a reference leak report, got: $err",
+      "reference leak:" in out,
+      "expected a reference leak report, got: $out",
     )
     assertEquals(
       64,
-      err.split("\n").count { it.contains("JSFunction") },
+      out.split("\n").count { it.contains("JSFunction") },
       "64 个在册函数应逐一进报告",
     )
     // 再次调用应当幂等（已关闭）：报告不会重复打印
-    assertEquals("", ctx.closeCapturingStderr())
+    assertEquals("", ctx.closeCapturingOut())
   }
 
   /** close 之后的 QuickJS 不应再被使用（当前实现会抛错，属于可接受行为） */

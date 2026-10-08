@@ -4,7 +4,6 @@ import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
@@ -12,7 +11,7 @@ import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import java.util.concurrent.Executors
+import soko.ekibun.ThreadDispatcher
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
@@ -21,7 +20,8 @@ import kotlin.time.Duration.Companion.milliseconds
  * 落关键帧后立刻把主时钟拨到目标（`PTS(relate = ts)`），**再丢掉**关键帧→目标之间的帧
  * （[resumeImpl] 的 `resyncTo`）。逐项对照见 `silent-failures.md`。
  *
- * 播放入口只能在 [playerDispatcher] 上调：读 [pts] 与随后的检查必须落在同一段不被打断的序列里。
+ * 播放入口只能在 [playerDispatcher] 上调：读 [pts] 与随后的检查必须落在同一段不被打断的序列里
+ * （见那条字段的文档）。
  */
 class FFPlayer(
   url: String,
@@ -70,9 +70,14 @@ class FFPlayer(
 
   private var pts: PTS? = null
 
-  private val playerDispatcher by lazy {
-    Executors.newSingleThreadExecutor().asCoroutineDispatcher()
-  }
+  /**
+   * 播放侧的归属线程 —— 播放入口（[play] / [seekTo] / [stepForward] / [stepBack] / [pause] /
+   * [closeAsync]）**只在它上面调**：读 [pts] 与随后的检查必须落在同一段不被打断的序列里。
+   *
+   * 本类**从不 close 它**（全进程共用），所以 [ThreadDispatcher] 那道「关掉后当场抛」的拦截
+   * 平时不触发 —— 要的就是它顺带提供的归属线程语义。
+   */
+  private val playerDispatcher by lazy { ThreadDispatcher("ffplayer") }
 
   /**
    * 视频帧相对主时钟的最大可丢弃跨度（对应 `AV_NOSYNC_THRESHOLD`）。

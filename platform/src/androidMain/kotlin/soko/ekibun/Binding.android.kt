@@ -1,5 +1,5 @@
 package soko.ekibun
 
-actual fun jniLoadLibrary(name: String) {
+actual fun loadLibrary(name: String) {
   System.loadLibrary(name)
 }
