@@ -47,9 +47,12 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
   （Git Bash、`bash -c`）：`MSYSTEM` 缺失、`c++.exe` 找不到自己的 DLL 以 `0xC0000135` **静默**死、
   `TMPDIR` 空则编译期炸 `cc1plus: Cannot create temporary file`。
   **别用 Git Bash 编 native** —— 走 `buildJni` 就绕开了。
-- **Android 侧目前没有构建入口**：`androidApp/build.gradle.kts` 里没有 `externalNativeBuild` /
-  ndk 配置，根 `CMakeLists.txt` 的 `if (ANDROID)` 分支（链 `log` 库、不加 `JAVA_HOME` include）
-  暂时没人调用。要把 native 带进 Android 得自己补 CMake/AGP 配置。
+- **Android 侧的 native 走 AGP 的 `externalNativeBuild`**：`androidApp/build.gradle.kts` 挂根
+  `CMakeLists.txt`（`if (ANDROID)` 分支链 `log` 库、不加 `JAVA_HOME` include 就是给它用的），
+  入口是 `:androidApp:externalNativeBuildDebug`，编 arm64-v8a / armeabi-v7a / x86 / x86_64 四个
+  ABI，产物 `libffmpeg.so` 与 `libquickjs.so` 随 `assembleDebug` 打进 APK。
+  它与桌面侧的 `buildJni` 是**两条独立的路** ⇒ 改了 `cxx/` **两边都要验**，
+  桌面绿不代表 Android 绿（反之亦然）。
 
 两条容易白跑一轮的流程坑：
 

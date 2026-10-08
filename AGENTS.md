@@ -137,8 +137,7 @@ animeko 2913 个 kt/kts、60866 行注释里含 emoji 的只有 30 行（0.05%�
 
 - `commonMain` 里**不许**出现 `java.*` / `android.*` / `System.currentTimeMillis` 之类的平台符号。
   需要平台能力就 `expect` 一个**最小原语**，两端各 `actual`；照抄现有粒度，别自创抽象层。
-  这条**不打折**：现状里 `soko.ekibun.{quickjs,ffmpeg}`、`acg.engine`、`acg.player` 仍有直接引用，
-  方向是把这些 Java 语义**全部提到外面**。差距与进度见 [`TODO.md`](./TODO.md) B4 —— 别拿现状当依据。
+  这条**不打折**：判据是 import 与代码级符号（注释里提到平台类名不算）。
 - **平台"要求" ≠ 平台"输出"**：`AvSurfaceContext.audioFormat` 表示
   **平台要求 native 输出什么采样格式**，会传给 native 去配转码器 —— 所以两端各传不同格式是合法的
   （Android 用 `ENCODING_PCM_8BIT` 是有意为之）。改这里之前先确认方向。
@@ -180,7 +179,7 @@ animeko 2913 个 kt/kts、60866 行注释里含 emoji 的只有 30 行（0.05%�
   理由是本工程的测试里有大量**超时兜底**（`@Test(timeout = …)` 加 `withTimeout` 护栏，见
   [`.agents/skills/build-and-test/references/build-and-test.md`](./.agents/skills/build-and-test/references/build-and-test.md)
   的「测试」一节）—— 全量跑一遍慢，且失败时**分不清是超时到点还是真回归**，容易把结论带偏。
-- **编译闸门不跑**：三条编译（`build-and-test` 里的闸门）一条都不跑。定点 `jvmTest` 自身会编到
+- **编译闸门不跑**：四条编译（`build-and-test` 里的闸门）一条都不跑。定点 `jvmTest` 自身会编到
   jvm 侧，够挡住"改坏了自己写的那处"；跨端一致性与 Android 侧的编译错误**留给提交前那次**。
 - **lint 不跑**：`ktlintCheck` / `ktlintFormat` / `clang-format --dry-run` 一律不跑。
   尤其别用 `ktlintFormat` 顺手格式化 —— 它会改到本次改动之外的行，直接违反 §1 的「外科手术式改动」。
@@ -194,8 +193,9 @@ animeko 2913 个 kt/kts、60866 行注释里含 emoji 的只有 30 行（0.05%�
 ## 6. 提交
 
 - **提交前把三样全核对一遍**：用户确认提交时，依次跑
-  **三条编译闸门**（`./gradlew :shared:compileAndroidMain :shared:compileKotlinJvm :desktopApp:compileKotlin`，
-  注意不是 `compileDebugKotlinAndroid`）、
+  **四条编译闸门**（`./gradlew :shared:compileAndroidMain :shared:compileKotlinJvm
+  :desktopApp:compileKotlin :androidApp:compileDebugKotlin`；前三条里的 `:shared` 注意不是
+  `compileDebugKotlinAndroid`，第四条恰恰就叫它）、
   **全量测试**（`./gradlew :shared:jvmTest :platform:jvmTest --console=plain --rerun`，结果读
   `shared/build/test-results/jvmTest/TEST-*.xml` 与 `platform/build/test-results/jvmTest/TEST-*.xml`）、
   **lint**

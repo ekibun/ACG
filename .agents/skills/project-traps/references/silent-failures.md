@@ -241,10 +241,12 @@
   放掉（锯齿）；而且**回收之后 RSS 也不还** —— free 空间留在 native 堆里。
   症状形状：`jcmd <pid> GC.heap_info` 显示堆只有几十 MB，任务管理器却是 GB 级；
   `GC.class_histogram` 里 `org.jetbrains.skia.impl.CleanableImpl` / `Managed$CleanerThunk` 有几百个
-  （wrapper 已经没了、native 还没还）。**改前 900MB↔2.2GB 锯齿，改成复用位图池后稳定 280 MB**。
-   对策：**别在每帧路径上分配 skiko 对象** —— 复用 `Bitmap`（池化）+ `peekPixels()?.addr` +
-   `memcpy` 写入 + 让 Compose 从复用位图读（本地做法：`DesktopSurfaceContext.framePool` 与
-   `VideoSurface.jvm.kt` 的 `nativeCanvas.drawImageRect`）。
+  （wrapper 已经没了、native 还没还）。**改前 900MB↔2.2GB 锯齿，改成复用位图后稳定 280 MB**。
+  对策：**别在每帧路径上分配 skiko 对象** —— 只留一块复用 `Bitmap`，每帧把 native 那块像素
+  **挂进**位图（`installPixels`，不拷），Compose 侧直接画它（本地做法：
+  `DesktopSurfaceContext.currentFrame` / `getBitmap()` 与 `VideoSurface.jvm.kt` 的
+  `canvas.skiaCanvas.drawImageRect`）。
+  注意是**单块**不是池：尺寸变了才新建并 `close()` 旧的 —— 一路只播一个分辨率，池化纯属多余。
 - **`HttpClient.request(...)` 会把整个响应体先读进内存 ⇒ 远程播放「不报错地」先整包下载**（2026-10-03 实测）。
   症状形状：远程源迟迟不出画面（要等整包下完），内存随文件大小走，而**没有任何报错**。
   根因不在引擎，在 **ktor 的入口选择**：`HttpClient.request(...)` → `HttpStatement.execute()` →

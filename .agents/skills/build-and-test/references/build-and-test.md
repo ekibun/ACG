@@ -21,7 +21,11 @@ JAVA_HOME=<任意一份 JDK> ./gradlew :desktopApp:buildJni                     
 JAVA_HOME=<任意一份 JDK> ./gradlew :androidApp:assembleDebug                 # Android debug 包
 ```
 
-另外两件本机前提：**MSYS2**（只有编 native 用得到，见
+- Android 包产物：`androidApp/build/outputs/apk/debug/androidApp-debug.apk`（2026-10-08 实测）。
+  内含 `lib/<abi>/libffmpeg.so` 与 `libquickjs.so`，四个 ABI（arm64-v8a / armeabi-v7a / x86 /
+  x86_64）齐全 —— 这也是「Android 侧 native 有没有跟上」的快捷核对点。
+  首次跑要编 native（5 分钟量级），之后增量是几十秒。
+- 另外两件本机前提：**MSYS2**（只有编 native 用得到，见
 [`cxx/AGENTS.md`](../../../../cxx/AGENTS.md) 的「原生构建」）、**Android SDK**（`local.properties` 里的 `sdk.dir`，
 本机私有、已忽略）。
 
@@ -88,29 +92,33 @@ hotRun 的宿主，它的 `hotRun` 由 `:shared` 侧经 `evaluationDependsOn(":d
 **结果落盘再读**，别靠终端实时输出下判断：Windows 上 JVM 按控制台代码页编解码，与 UTF-8 的日志
 对不上就是乱码。加 `--console=plain` 让输出变成可线性读的纯文本。
 
-## 闸门：三条编译（**改代码时不跑**，提交前核对）
+## 闸门：四条编译（**改代码时不跑**，提交前核对）
 
 根 [`AGENTS.md`](../../../../AGENTS.md) §5 的规则：验收阶段**一条都不跑**，只跑定点 `jvmTest`；
-这三条只在**用户确认提交时**跑一次。
+这四条只在**用户确认提交时**跑一次。
 
 **任务名别写错**：
 
 ```bash
-./gradlew :shared:compileAndroidMain :shared:compileKotlinJvm :desktopApp:compileKotlin
-#         注意不是 compileDebugKotlinAndroid
+./gradlew :shared:compileAndroidMain :shared:compileKotlinJvm \
+          :desktopApp:compileKotlin :androidApp:compileDebugKotlin
+# :shared 那条注意不是 compileDebugKotlinAndroid；:androidApp 这条恰恰叫 compileDebugKotlin
 ```
 
-三条各自的覆盖面（`desktopApp` 只有一个 45 行的文件，另外两个才是大头）：
+四条的覆盖面（`desktopApp` 只有一个 45 行的文件、`androidApp` 也不大，大头仍是 `:shared` 那两条）：
 
 | 任务 | 编到哪 |
 |---|---|
 | `:shared:compileAndroidMain` | `shared/src/androidMain` + `commonMain` |
 | `:shared:compileKotlinJvm` | `shared/src/jvmMain` + `commonMain` |
 | `:desktopApp:compileKotlin` | `desktopApp/src` 自己（不含 shared） |
+| `:androidApp:compileDebugKotlin` | `androidApp/src` 自己（不含 shared 与 native） |
 
 ⚠️ `:shared:compile*` 会连带编 `:platform`（`shared` 以 `api` 挂接它）—— 平台层
 （jni / quickjs / ffmpeg / web）的编译错误由这两条顺带拦到，不需要单独的闸门任务。
-⚠️ `:androidApp` 自身的编译暂未纳入这道闸门 —— 改了 `androidApp/` 下的代码不会被这三条拦到。
+⚠️ **上面四条都不碰 native**：桌面侧的 `.so`/`.dll` 由 `buildJni` 管，Android 侧由
+`:androidApp:externalNativeBuildDebug` 管 ⇒ **改了 `cxx/` 要额外跑这两个**
+（见 [`cxx/AGENTS.md`](../../../../cxx/AGENTS.md) 的「原生构建」）。
 ⚠️ `commonMain` 的 `expect` / `actual` 是否两端都成立，只有**前两条一起跑**才查得出来；
 只跑一条时，跨端签名错要等提交前才暴露。
 

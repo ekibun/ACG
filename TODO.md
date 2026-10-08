@@ -16,30 +16,6 @@
 
 ## B. 已知缺陷，待修
 
-### B4. `commonMain` 里存在平台符号（违反根 AGENTS.md §4 的硬规则）
-
-- **现状**：约定是 `commonMain` 不许出现 `java.*` / `android.*`。**2026-10-02 复核**（全量
-  grep import 与代码级符号）：**import 9 处、6 个文件** —— `soko/ekibun/jni.kt` ×2
-  （`Executors` / `AtomicBoolean`）、`quickjs/QuickJS.kt` ×3（`Collections` /
-  `IdentityHashMap` / `AtomicBoolean`）、`quickjs/JSRef.kt`（`AtomicInteger`）、
-  `ffmpeg/FFPlayer.kt`（`Executors`）、`ffmpeg/AvSurfaceContext.kt`（`ByteBuffer`）、
-  `acg/engine/JsEngine.kt`（`Charset`）；另有代码级内联：`acg/player/HttpIO.kt:47` 的
-  `catch (_: java.io.IOException)`、`JsEngine.kt` 的 `::class.java`（:64）与
-  `javaClass`（:117）。
-  （2026-09-19 记录的 `ffmpeg/{AvFrame,AvCodec,AvFormat}.kt` 三个文件的 java import 已清掉，
-  本条从原「7 个文件 12 处」改写成当前清单；FFPlayer 的 `System.currentTimeMillis` 三处
-  已随 B17 换成 `monoTimeMs()` 原语。）
-  也就是说 `soko.ekibun.{quickjs,ffmpeg}` 事实上仍按 JVM-only 写。
-- **方向已定**（用户 2026-09-16 晚）：**不给这两个包开例外** —— 规则保持，把这些 Java 语义
-  逐处提到外面（`expect` 一个最小原语、两端各 `actual`），`commonMain` 里最终不剩平台符号。
-- **落点已就位**（2026-10-07）：绑定层（`soko.ekibun.{jni,quickjs,ffmpeg,web}`）已抽成 `:platform`
-  模块，上面那些 import 随代码搬了过去（搬移零语义变化）；摘除在新模块里做 —— 新模块的
-  API 面就是"纯 common 原语 + 平台 source set 放 Java 细节"。
-- **为什么现在没做**：属于独立的一次重构，要和文档改动分开。
-- **完成判据**：上述各处全部去掉；`commonMain` 里搜 `java\.` / `android\.` 结果均为 0。
-- **完成后必须做的收尾**：删掉 `AGENTS.md` §4 里那句"现状…仍有直接引用…见 `TODO.md` B4"
-  的指针（届时规则已无例外），并删掉本条。
-
 ### B9. 退帧在「落点正好是 GOP 首帧」时退不动
 
 - **现状**：**已修**（2026-09-22，路线 C）。空探步长由 `1µs` 改成 **3/4 × 已缓存的帧间隔**
@@ -258,7 +234,7 @@
   判据 = `frames` 长度：修前 `[106]×6` 不涨、常驻版 `[110]×6`）留着当参照。细节见
   [`.agents/skills/project-traps/references/silent-failures.md`](./.agents/skills/project-traps/references/silent-failures.md)
   对应 bullet。
-- **复测（同一探针、同一素材；提交前核对：三条编译闸门 + 全量 `:shared:jvmTest` + lint 全绿）**：
+- **复测（同一探针、同一素材；提交前核对：四条编译闸门 + 全量 `:shared:jvmTest` + lint 全绿）**：
 
   | 场景 | 修前未命中 | 修后未命中 |
   |---|---|---|
@@ -398,37 +374,7 @@
   （`version.ref = "ktorClientOkhttp"`）—— 别名以某个具体 artifact 命名，读到
   `ktor-client-core` 挂着 `ktorClientOkhttp` 会误判升级口径。
 - **完成判据**：别名改名 `ktor`（`[versions]` 一处 + `[libraries]` 三处引用同步），
-  提交前核对三条编译闸门。
-
-### B22. 取包超时改成「继续重试」后，`pause()` 的最坏耗时变成一个取包超时（100 ms）
-
-- **现状**（2026-10-04 改取包超时上报时落下）：`FFPlayer.resumeImpl` 的取包
-  超时分支从「置 `pts.playing = false` + `break`」改成了「上报 `FFPlayer.Event.ReadTimeout` +
-  `continue`」—— 网络恢复后能接着取包，不必让上层重新 `play`。代价是
-  **播放轮次不再因超时自己结束**，于是 [FFPlayer.pause] 的 `playingJob.join()` 要等当前那个
-  `withTimeout` 到点才返回（不再是毫秒级）。
-  `FFPlayerStallMidPlaybackTest` 的 `pause()` 探测预算 5 s，够用。
-- **还要定的**：超时重试的节奏。**已定：固定 10 Hz，不加退避**（2026-10-04 删掉超时分支里
-  的 `delay(100)`）—— 一轮就是 `withTimeout(100)` 那 100 ms，那个 `delay` 是白等一倍，
-  于是 [FFPlayer.pause] 的最坏耗时也缩到「等当前那个循环轮次走完」，机制上界 = 一个轮次
-  （实测是个跨度、七次 7～108 ms，取决于探测那一刻停在哪一格：可能是取包的 `withTimeout`，
-  也可能是回压分支的 `delay(1)` ⇒ **下界不是「毫秒级」**；略超 100 是调度与计测开销）。
-  ⚠️ **重试不重新进 native**（这条已核实，别再按「每轮一次 native 往返」推）：
-  [AvFormat.getPacket] 的 `packetChannel ?:` 在通道存活期走**非空分支、不重建**
-  `readerJob`（见 [AvFormat.resetChannel] 的 KDoc，那两个字段为什么没有 `@Volatile`）。
-  读作业建一次就始终 park 在 `getPacketNative` 里、跨所有重试（它不是轮次的子作业，
-  轮次结束也不等它）。所以每次重试的实际代价只是消费侧 `for (v in channel)` 空等
-  100 ms 再被 `withTimeout` 取消 ⇒ **只有 10 Hz 的协程定时器开销，没有 native 往返，
-  也不重建 `HttpIO` 会话检查**。原先「长时间停网时空转很贵、加限流」的顾虑不成立。
-  剩下的是**响应**问题：网络恢复后最迟 100 ms 就醒过来看一眼，够不够快由产品定。
-- **完成判据**（2026-10-04 已做；原 `isReadTimeOut` 属性已随事件上报的重构撤掉，判据改由
-  事件口径承担）：超时经 [FFPlayer.Event.ReadTimeout] / [FFPlayer.Event.ReadTimeoutResume] 上报；
-  `FFPlayerStallMidPlaybackTest` 探测 `pause()` 之前先断言已收到 ReadTimeout、
-  确认**那一刻确实处在取包超时进行中**（少了它，「`pause()` 返回了」这条断言在**没有**超时时
-  同样成立，量到的耗时证明不了任何事），并断言此刻还没有 ReadTimeoutResume（量的是超时轮次、
-  不是等恢复），再对耗时钉一个量级上界（1 s 预算，实测跨度 7～108 ms）。
-  ⚠️ 它管的是**量级**不是精确值：把 `delay(100)` 加回去会变成 200 ms 上下、仍在预算内 ⇒
-  抓不到那种回归；要钉精确值得另写判据。
+  提交前核对四条编译闸门。
 
 ### B23. JS 侧流式 response（缓做，随 E8 数据源契约落地）
 
@@ -485,11 +431,6 @@
 - **完成判据**：AES-128 测试流可播（open / 读 / seek 不再在分片打开处失败）。
 
 ## C. 事实未实测，文档里暂无据
-
-### C1. Android APK 产物路径
-
-- **现状**：`androidApp/build/outputs/apk/debug/` 是按标准 AGP 默认写的，**本机没实跑过**。
-- **完成判据**：真跑一次 `:androidApp:assembleDebug`，按实测结果写进 `AGENTS.md` / skill `build-and-test`。
 
 ### C2. 桌面安装包命令与产物路径
 
@@ -610,18 +551,6 @@
   关键链路），放对应 skill 的 `references/` 下，`AGENTS.md` §7 索引表加指针。
 
 ## E. 结构性改进（需要先决策）
-
-### E2. `:androidApp` 自身编译未纳入构建闸门
-
-- **现状**：闸门是三条任务，`androidApp/` 下的改动不会被拦到。
-- **完成判据**：把 `:androidApp:compileDebugKotlinAndroid` 加进闸门并实测通过。
-
-### E3. Android 侧 native 没有构建入口
-
-- **现状**：`androidApp/build.gradle.kts` 无 `externalNativeBuild` / ndk 配置；
-  根 `CMakeLists.txt` 的 `if (ANDROID)` 分支（链 `log` 库、不加 `JAVA_HOME` include）没人调用。
-- **为什么现在没做**：这是**决策题**，不是 bug——是否要在 Android 上用 native 尚未拍板。
-- **完成判据**：决定要做则补 CMake/AGP 配置；决定不做则删掉那条死分支。
 
 ### E4. （可选）把 MSYS2 的坑自愈进 `cxx/build.jni.sh`
 
