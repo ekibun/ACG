@@ -9,7 +9,6 @@ import soko.ekibun.ffmpeg.AVMediaType
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvSurfaceContext
 import soko.ekibun.ffmpeg.FFPlayer
-import java.nio.ByteBuffer
 import java.util.Collections
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -37,10 +36,10 @@ class FFPlayerStepTest {
     override val channels: Int = 2
     override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_S16
 
-    override suspend fun flushAudioBuffer(buf: ByteBuffer): Int = 0
+    override suspend fun flushAudioBuffer(buf: ByteArray): Int = 0
 
-    override fun flushVideoBuffer(
-      buf: ByteBuffer,
+    override suspend fun flushVideoBuffer(
+      buf: ByteArray,
       width: Int,
       height: Int,
     ) = Unit

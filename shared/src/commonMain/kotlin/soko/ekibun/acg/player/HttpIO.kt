@@ -165,42 +165,47 @@ class HttpIO(
     // 这里是**唯一**的 `runBlocking`：`AvIO.read` 是 native 回调要求的同步签名，
     // 而下面整条链路（建立会话 / 等数据 / 推进游标）现在全是 suspend —— 阻塞只能由
     // 发起方按需包。调用方（native 的 `av_read_frame`）本来就在本线程等这批数据。
-    runBlocking {
-      // **本次读的作废信号就在这里声明、只在这里消费**（不往任何下层传）：
-      // 下面那支哨兵负责 await 它，`Handler.abort()` 通过投递口 raise 它。
-      val signal = AbortSignal()
-      // 真正干活的读（建立会话 / 等数据 / 白读推进），单独一支协程 ——
-      // 好让哨兵能把它**整棵取消**掉。
-      val job = async { readSuspend(buf) }
-      // **旁路哨兵**：等信号，一醒来就 `cancel` 掉 `job` ⇒「叫醒」不依赖下面任何一层知道 signal 的
-      // 存在，取消顺着协程树走。哨兵**只能 `cancel`、不能 `throw`** —— 抛异常会 `parentCancelled`
-      // 向上取消整个 `runBlocking`（`http-streaming.md` 第二节）。
-      val abort =
-        async {
-          signal.await()
-          job.cancel()
+    try {
+      runBlocking {
+        // **本次读的作废信号就在这里声明、只在这里消费**（不往任何下层传）：
+        // 下面那支哨兵负责 await 它，`Handler.abort()` 通过投递口 raise 它。
+        val signal = AbortSignal()
+        // 真正干活的读（建立会话 / 等数据 / 白读推进），单独一支协程 ——
+        // 好让哨兵能把它**整棵取消**掉。
+        val job = async { readSuspend(buf) }
+        // **旁路哨兵**：等信号，一醒来就 `cancel` 掉 `job` ⇒「叫醒」不依赖下面任何一层知道 signal 的
+        // 存在，取消顺着协程树走。哨兵**只能 `cancel`、不能 `throw`** —— 抛异常会 `parentCancelled`
+        // 向上取消整个 `runBlocking`（`http-streaming.md` 第二节）。
+        val abort =
+          async {
+            signal.await()
+            job.cancel()
+          }
+        // 挂上投递口才能被 [Handler.abort] 叫醒；摘掉必须在 `finally` —— 正常返回、
+        // 作废收场、真故障三条路都要摘，否则下一条会话会被上一条的死读误伤。
+        handler.onSignal { signal.raise() }
+        try {
+          job.await()
+        } catch (e: CancellationException) {
+          // 哨兵叫醒的收场：`job.cancel()` 让这里抛 `CancellationException`，即「本轮作废」。
+          // 必须返回正数 `buf.size`（谎报读满 —— 字节并没有，但那条包必然被丢），不是任何错误码：
+          // 翻错误码会让 demuxer 再读一轮、重开 range 会话干等超时，`closeAsync` 被拖到 8s 量级。
+          // 逐档推演见 `http-streaming.md` 第二节。
+          buf.size
+        } catch (e: Throwable) {
+          // 真故障才出声。被作废叫醒的读走上面那条，落不到这里 —— 不必再查旗标。
+          e.printStackTrace()
+          -1
+        } finally {
+          // 那支哨兵正常收场时**永远**挂在 `signal.await()` 上，不取消它 `runBlocking`
+          // 会一直等下去（`runBlocking` 等它 scope 上所有子协程）。
+          abort.cancel()
+          handler.onSignal(null)
         }
-      // 挂上投递口才能被 [Handler.abort] 叫醒；摘掉必须在 `finally` —— 正常返回、
-      // 作废收场、真故障三条路都要摘，否则下一条会话会被上一条的死读误伤。
-      handler.onSignal { signal.raise() }
-      try {
-        job.await()
-      } catch (e: CancellationException) {
-        // 哨兵叫醒的收场：`job.cancel()` 让这里抛 `CancellationException`，即「本轮作废」。
-        // 必须返回正数 `buf.size`（谎报读满 —— 字节并没有，但那条包必然被丢），不是任何错误码：
-        // 翻错误码会让 demuxer 再读一轮、重开 range 会话干等超时，`closeAsync` 被拖到 8s 量级。
-        // 逐档推演见 `http-streaming.md` 第二节。
-        buf.size
-      } catch (e: Throwable) {
-        // 真故障才出声。被作废叫醒的读走上面那条，落不到这里 —— 不必再查旗标。
-        e.printStackTrace()
-        -1
-      } finally {
-        // 那支哨兵正常收场时**永远**挂在 `signal.await()` 上，不取消它 `runBlocking`
-        // 会一直等下去（`runBlocking` 等它 scope 上所有子协程）。
-        abort.cancel()
-        handler.onSignal(null)
       }
+    } catch (e: Throwable) {
+      e.printStackTrace()
+      -1
     }
 
   /**

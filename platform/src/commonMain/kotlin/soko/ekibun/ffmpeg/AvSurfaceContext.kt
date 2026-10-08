@@ -2,7 +2,6 @@ package soko.ekibun.ffmpeg
 
 import soko.ekibun.Pointer
 import soko.ekibun.loadLibrary
-import java.nio.ByteBuffer
 
 /**
  * native 输出端（ffmpeg.cpp 的 `SWContext`，Context 即指它）的门面：[postFrame] 把解码帧喂进
@@ -40,26 +39,28 @@ abstract class AvSurfaceContext : Pointer() {
     ): Int
 
     /**
-     * 取本轮输出缓冲 —— **DirectByteBuffer，零拷贝零分配**，直接指向 native 那块内存
-     * （`SWContext::videoBuffer` / `audioBuffer`）。下一帧会就地覆写它，所以调用方
-     * **必须同步消费**，不得留存引用（见 [flushFrame]）。
+     * 取本轮输出缓冲 —— native 把输出**拷进** `buf`：长度对得上就就地覆写那块，对不上才新建。
+     * 下一帧同样会覆写它，所以调用方**必须同步消费**，不得留存引用（见 [flushFrame]）。
      */
     @JvmStatic
-    private external fun getBuffer(
+    private external fun getBufferNative(
       ctx: Long,
       codecType: Int,
-    ): ByteBuffer?
+      buf: ByteArray?,
+    ): ByteArray?
 
-    /** DirectByteBuffer 背后的 native 地址（0 = 不是 direct）。给「零拷贝包成 Skia Data」用。 */
-    @JvmStatic
-    private external fun bufferAddress(buffer: ByteBuffer): Long
+    /** 按流类型留住上一轮那块数组，好让 native 侧能就地覆写、不每帧分配。 */
+    private val buffers = HashMap<Int, ByteArray>()
 
-    /**
-     * [bufferAddress] 的包装：桌面端拿它取 native 缓冲的地址。public 是给跨模块的调用点
-     * （`:shared` 的 `SurfaceContext` 桌面子类与 `AvSurfaceContextBufferReuseTest`）——
-     * `internal` 出了本模块就看不见。
-     */
-    fun addressOf(buffer: ByteBuffer): Long = bufferAddress(buffer)
+    private fun getBuffer(
+      ctx: Long,
+      codecType: Int,
+    ): ByteArray? =
+      getBufferNative(
+        ctx,
+        codecType,
+        buffers[codecType],
+      )?.also { buffers[codecType] = it }
 
     /** native→native 原样拷贝（给桌面端把 RGBA 写进复用位图，见 `DesktopSurfaceContext`）。 */
     @JvmStatic
@@ -110,8 +111,8 @@ abstract class AvSurfaceContext : Pointer() {
    * 静音后「真正上屏的时间戳」；视频恒 `-1`，丢帧收敛要用 [FFPlayer] 那边的 `AvFrame.timeStamp`
    * （单位同样是 `AV_TIME_BASE` 微秒）。
    *
-   * 交给平台的 `ByteBuffer` 是 **direct buffer**（零拷贝），必须**同一调用里同步消费** ——
-   * 下一帧 `sws_scale` / `swr_convert` 会就地覆写（同 [getBuffer] 的约束）；要留住像素自己拷一份。
+   * 交给平台的 `buf` 是**复用的那块数组**，必须**同一调用里同步消费** —— 下一帧
+   * `sws_scale` / `swr_convert` 会就地覆写（同 [getBuffer] 的约束）；要留住内容自己拷一份。
    */
   suspend fun flushFrame(
     codecType: Int,
@@ -131,12 +132,12 @@ abstract class AvSurfaceContext : Pointer() {
     }
   }
 
-  /** 见 [flushFrame] 那条 direct buffer 约束：`buf` 必须同步消费。 */
-  abstract suspend fun flushAudioBuffer(buf: ByteBuffer): Int
+  /** 见 [flushFrame] 那条「同步消费」约束：`buf` 会被下一帧覆写。 */
+  abstract suspend fun flushAudioBuffer(buf: ByteArray): Int
 
-  /** 见 [flushFrame] 那条 direct buffer 约束：`buf` 必须同步消费。 */
-  abstract fun flushVideoBuffer(
-    buf: ByteBuffer,
+  /** 见 [flushFrame] 那条「同步消费」约束：`buf` 会被下一帧覆写。 */
+  abstract suspend fun flushVideoBuffer(
+    buf: ByteArray,
     width: Int,
     height: Int,
   )

@@ -1,9 +1,6 @@
 package soko.ekibun.ffmpeg
 
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 
 /** 只放两端共用、且需要被 Compose 观察的状态。 */
 abstract class SurfaceContext : AvSurfaceContext() {
@@ -21,7 +18,4 @@ abstract class SurfaceContext : AvSurfaceContext() {
     // 避免每帧都写入快照状态
     if (ratio != aspectRatioState.floatValue) aspectRatioState.floatValue = ratio
   }
-
-  /** 人声消除（左右声道相减）开关 */
-  var isMuteVoice by mutableStateOf(false)
 }

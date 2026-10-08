@@ -10,20 +10,14 @@ import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.view.Surface
 import androidx.core.graphics.createBitmap
-import kotlinx.coroutines.MainScope
-import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
-import java.util.concurrent.Executors
 
 class AndroidSurfaceContext(
   var surfaceTexture: SurfaceTexture,
 ) : SurfaceContext() {
-  private val playbackDispatcher by lazy {
-    Executors.newSingleThreadExecutor().asCoroutineDispatcher()
-  }
-
   companion object {
     const val DEFAULT_RATE = 48000
     const val DEFAULT_CHANNEL = AudioFormat.CHANNEL_OUT_STEREO
@@ -76,44 +70,20 @@ class AndroidSurfaceContext(
 
   var frameWrite = 0L
 
-  override suspend fun flushAudioBuffer(buf: ByteBuffer): Int =
-    withContext(playbackDispatcher) {
-      val size = buf.remaining()
-      if (channels == 2 && isMuteVoice) {
-        // 左右声道相减（人声消除）。步长是每个采样点的字节数，不是固定 2：
-        // native 可能给 8bit(1) / 16bit(2) / float32(4)，按 2 走会串位。
-        val bytesPerSample =
-          when (audio.audioFormat) {
-            AudioFormat.ENCODING_PCM_8BIT -> 1
-            AudioFormat.ENCODING_PCM_FLOAT -> 4
-            else -> 2
-          }
-        val frameBytes = bytesPerSample * 2
-        var i = 0
-        while (i + frameBytes <= size) {
-          for (b in 0 until bytesPerSample) {
-            val diff =
-              (buf.get(i + b).toInt() and 0xFF) - (buf.get(i + bytesPerSample + b).toInt() and 0xFF)
-            // 8bit 是 unsigned，以 128 为零点，消声后要加回偏置
-            val v = if (bytesPerSample == 1) diff + 128 else diff
-            buf.put(i + b, v.toByte())
-            buf.put(i + bytesPerSample + b, v.toByte())
-          }
-          i += frameBytes
-        }
-      }
-      if (audio.playState != AudioTrack.PLAYSTATE_PLAYING) audio.play()
-      // `buf` 是 direct buffer，走 write(ByteBuffer, size, mode) 这条（省一次 Java 数组拷贝）
-      if (size > 0) audio.write(buf, size, AudioTrack.WRITE_BLOCKING)
-      // AudioTrack 的 framePosition 以采样帧为单位，与 channels 无关，不要再除
-      frameWrite += size / (audio.channelCount * bytesPerSampleOf(audio.audioFormat))
-      val timestamp = AudioTimestamp()
-      if (audio.getTimestamp(timestamp)) {
-        (frameWrite - timestamp.framePosition).toInt()
-      } else {
-        -1
-      }
+  override suspend fun flushAudioBuffer(buf: ByteArray): Int {
+    val size = buf.size
+    if (audio.playState != AudioTrack.PLAYSTATE_PLAYING) audio.play()
+    // 走 write(byte[], offset, size, mode) 这条：native 已经把数据拷进 buf，不再包一层
+    if (size > 0) audio.write(buf, 0, size, AudioTrack.WRITE_BLOCKING)
+    // AudioTrack 的 framePosition 以采样帧为单位，与 channels 无关，不要再除
+    frameWrite += size / (audio.channelCount * bytesPerSampleOf(audio.audioFormat))
+    val timestamp = AudioTimestamp()
+    return if (audio.getTimestamp(timestamp)) {
+      (frameWrite - timestamp.framePosition).toInt()
+    } else {
+      -1
     }
+  }
 
   private fun bytesPerSampleOf(encoding: Int): Int =
     when (encoding) {
@@ -133,8 +103,8 @@ class AndroidSurfaceContext(
 
   val paint by lazy { Paint() }
 
-  override fun flushVideoBuffer(
-    buf: ByteBuffer,
+  override suspend fun flushVideoBuffer(
+    buf: ByteArray,
     width: Int,
     height: Int,
   ) {
@@ -147,33 +117,26 @@ class AndroidSurfaceContext(
       bitmap = createBitmap(width, height)
       oldBitmap?.recycle()
     }
-    // buf 是 direct buffer，copyPixelsFromBuffer 原地收下（同步拷完，不留引用）
-    bitmap!!.copyPixelsFromBuffer(buf)
+    // copyPixelsFromBuffer 同步拷完，不留引用（native 下一帧会覆写 buf）
+    bitmap!!.copyPixelsFromBuffer(ByteBuffer.wrap(buf))
     val canvas = surface.lockCanvas(null)
     canvas.drawBitmap(bitmap!!, 0f, 0f, paint)
     surface.unlockCanvasAndPost(canvas)
   }
 
-  override suspend fun resume() =
-    withContext(playbackDispatcher) {
-      audio.play()
-    }
+  override suspend fun resume() = audio.play()
 
-  override suspend fun pause() =
-    withContext(playbackDispatcher) {
-      audio.pause()
-    }
+  override suspend fun pause() = audio.pause()
 
-  override suspend fun stop() =
-    withContext(playbackDispatcher) {
-      audio.pause()
-      frameWrite = 0
-      audio.flush()
-    }
+  override suspend fun stop() {
+    audio.pause()
+    frameWrite = 0
+    audio.flush()
+  }
 
   override fun close() {
     super.close()
-    MainScope().launch {
+    CoroutineScope(Dispatchers.IO).launch {
       stop()
       audio.release()
     }

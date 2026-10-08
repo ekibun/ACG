@@ -2,7 +2,6 @@ package soko.ekibun.ffmpeg
 
 import kotlinx.coroutines.runBlocking
 import java.io.ByteArrayOutputStream
-import java.nio.ByteBuffer
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -20,16 +19,15 @@ import kotlin.test.assertTrue
  * - 音频：[WavMedia] 的内存 WAV，`pcm_s16le` 解码 + `swr` 重采样到 Sink 声明的输出规格。
  *
  * 判据与来由：
- * 1. （历史回归）`getBuffer` 曾每帧 `NewByteArray` + `SetByteArrayRegion`，视频 1308×736
- *    RGBA = 3.67 MB/帧 ⇒ 60 帧/s 的播放 20 s 分配 3250 MB，Java 堆被顶在 `-Xmx` 上。现在必须
- *    交 **direct ByteBuffer**，直接指向 native 那块输出缓冲；
- * 2. 「复用」不体现在对象身份上（每次 `NewDirectByteBuffer` 都是新包装），而在**地址**上：
- *    视频缓冲整个上下文就一块，地址必须恒同；音频是**双缓冲交换**（`postFrameAudio` 把
- *    `_audioBuffer1` 与 `audioBuffer` 对调），地址在两个槽位间轮换 —— 上限 2，不能随帧数增长。
+ * 1. 缓冲**不能每帧新建**：视频 1308×736 RGBA = 3.67 MB/帧 ⇒ 60 帧/s 的播放 20 s 会分配
+ *    3250 MB，Java 堆被顶在 `-Xmx` 上。native 侧只在长度对不上时才新建（`getBufferNative`
+ *    收到上一轮那块、对得上就覆写），所以**视频**尺寸恒定 ⇒ 拿到的必须是同一块数组；
+ * 2. **音频**的输出长度随 swr 的样本数浮动（末帧还是残帧），复用不作保证 —— 这里只卡
+ *    「规格不随帧数增长」：不同长度的种类要远少于帧数，且每帧确实有字节。
  */
 class AvSurfaceContextBufferReuseTest {
   /**
-   * 真上下文（`initNative` 真跑）+ 空设备：只记下每帧拿到的缓冲地址与大小。
+   * 真上下文（`initNative` 真跑）+ 空设备：只记下每帧拿到的那块数组与大小。
    * 直驱全程单线程（`AvSurfaceContext` 没有归属 dispatcher，回调就地执行），普通列表即可。
    */
   private class Sink : AvSurfaceContext() {
@@ -37,11 +35,8 @@ class AvSurfaceContextBufferReuseTest {
     override val channels: Int = 2
     override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_S16
 
-    val videoAddresses = ArrayList<Long>()
-    val audioAddresses = ArrayList<Long>()
-
-    @Volatile
-    var allDirect = true
+    val videoBuffers = ArrayList<ByteArray>()
+    val audioBuffers = ArrayList<ByteArray>()
 
     @Volatile
     var videoBytes = 0L
@@ -50,22 +45,20 @@ class AvSurfaceContextBufferReuseTest {
     var audioBytes = 0L
 
     /** 声卡在放：真身按采样数节流，这里直驱不模拟节拍（判据与时间无关）。 */
-    override suspend fun flushAudioBuffer(buf: ByteBuffer): Int {
-      if (!buf.isDirect) allDirect = false
-      audioBytes += buf.remaining()
-      audioAddresses += addressOf(buf)
+    override suspend fun flushAudioBuffer(buf: ByteArray): Int {
+      audioBytes += buf.size
+      audioBuffers += buf
       // 返回 0 = 没有重采样前导偏移，flushFrame 的时间戳就是帧自己的 pts
       return 0
     }
 
-    override fun flushVideoBuffer(
-      buf: ByteBuffer,
+    override suspend fun flushVideoBuffer(
+      buf: ByteArray,
       width: Int,
       height: Int,
     ) {
-      if (!buf.isDirect) allDirect = false
-      videoBytes += buf.remaining()
-      videoAddresses += addressOf(buf)
+      videoBytes += buf.size
+      videoBuffers += buf
     }
 
     override suspend fun resume() = Unit
@@ -104,7 +97,7 @@ class AvSurfaceContextBufferReuseTest {
   }
 
   @Test(timeout = 60_000)
-  fun videoBufferIsZeroCopyAndReused() {
+  fun videoBufferIsReusedAcrossFrames() {
     val sink = Sink()
     runBlocking {
       AvFormat("memory:test.y4m", TestIo(y4mStream(WIDTH, HEIGHT, FRAMES))).use { format ->
@@ -128,23 +121,26 @@ class AvSurfaceContextBufferReuseTest {
       }
     }
     sink.close()
-    assertTrue(sink.videoAddresses.size >= 2, "at least 2 frames must reach the sink, got ${sink.videoAddresses.size}")
-    assertTrue(sink.allDirect, "buffers handed to the platform must be direct (zero-copy)")
-    val addresses = sink.videoAddresses.filter { it != 0L }.distinct()
+    assertTrue(
+      sink.videoBuffers.size >= 2,
+      "at least 2 frames must reach the sink, got ${sink.videoBuffers.size}",
+    )
+    // ByteArray 的相等就是引用相等：同一块数组才会被去成一份
+    val distinct = sink.videoBuffers.distinct()
     assertEquals(
       1,
-      addresses.size,
-      "the frame buffer must reuse one native address, got ${addresses.size}",
+      distinct.size,
+      "the frame buffer must be one reused array, got ${distinct.size} arrays for ${sink.videoBuffers.size} frames",
     )
     assertEquals(
-      WIDTH * HEIGHT * 4L * sink.videoAddresses.size,
+      WIDTH * HEIGHT * 4L * sink.videoBuffers.size,
       sink.videoBytes,
       "each frame must hand out exactly one RGBA frame (${WIDTH}x$HEIGHT)",
     )
   }
 
   @Test(timeout = 60_000)
-  fun audioBufferIsZeroCopyAndBoundedReuse() {
+  fun audioBufferIsNotEmptyAndBounded() {
     val sink = Sink()
     runBlocking {
       AvFormat("memory:test.wav", TestIo(WavMedia.bytes(durationSec = 2))).use { format ->
@@ -169,13 +165,17 @@ class AvSurfaceContextBufferReuseTest {
       }
     }
     sink.close()
-    assertTrue(sink.audioAddresses.size >= 2, "at least 2 frames must reach the sink, got ${sink.audioAddresses.size}")
-    assertTrue(sink.allDirect, "buffers handed to the platform must be direct (zero-copy)")
-    val addresses = sink.audioAddresses.filter { it != 0L }.distinct()
     assertTrue(
-      addresses.size <= 2,
-      "the audio buffer swaps between two slots, must not grow per frame, got ${addresses.size}",
+      sink.audioBuffers.size >= 2,
+      "at least 2 frames must reach the sink, got ${sink.audioBuffers.size}",
     )
     assertTrue(sink.audioBytes > 0, "the audio buffer must not be empty")
+    val sizes = sink.audioBuffers.map { it.size }.distinct()
+    // swr 每帧输出的样本数不恒定（实测 32 帧 3 种规格，末帧还是残帧），所以判据不能写成
+    // 「恒同一块」—— 只能卡「规格种类远少于帧数」：真每帧新建时种类数就等于帧数。
+    assertTrue(
+      sizes.size * 4 <= sink.audioBuffers.size,
+      "audio buffer sizes must not grow per frame, got ${sizes.size} kinds in ${sink.audioBuffers.size} frames: $sizes",
+    )
   }
 }

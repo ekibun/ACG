@@ -10,7 +10,6 @@ import soko.ekibun.ffmpeg.AvStream
 import soko.ekibun.ffmpeg.AvSurfaceContext
 import soko.ekibun.ffmpeg.FFPlayer
 import java.io.File
-import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
@@ -157,14 +156,14 @@ class FFPlayerStallMidPlaybackTest {
 
     private val frames = Collections.synchronizedList(ArrayList<Long>())
 
-    override suspend fun flushAudioBuffer(buf: ByteBuffer): Int {
-      val samples = buf.remaining() / (channels * 2)
+    override suspend fun flushAudioBuffer(buf: ByteArray): Int {
+      val samples = buf.size / (channels * 2)
       if (samples > 0) delay((samples * 1000L / sampleRate).coerceAtLeast(1))
       return 0
     }
 
-    override fun flushVideoBuffer(
-      buf: ByteBuffer,
+    override suspend fun flushVideoBuffer(
+      buf: ByteArray,
       width: Int,
       height: Int,
     ) {

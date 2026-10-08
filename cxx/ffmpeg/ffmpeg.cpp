@@ -572,37 +572,55 @@ Java_soko_ekibun_ffmpeg_AvSurfaceContext_postFrameNative(
       return -1;
   }
 }
-// 把 native 缓冲原样交给 Java：只包一个
-// DirectByteBuffer，不拷贝、不分配。
+// 把 native 缓冲**拷进** Kotlin 的 byte[]：长度对得上就覆写传入那块（Kotlin
+// 侧按流类型 留着复用），对不上才新建 —— 视频 3.67 MB/帧、约 60
+// 帧/s，每帧新建会把 Java 堆顶在 -Xmx 上。走 byte[] 而不是
+// DirectByteBuffer，是不让 commonMain 出现 java.nio.ByteBuffer （根 AGENTS.md
+// §4：commonMain 不许有平台符号）。
 //
-// 原先是每帧 NewByteArray + SetByteArrayRegion：
-// 视频 3.67 MB/帧、约 60 帧/s ⇒ 20 s 分配 3250 MB，
-// Java 堆被顶在 -Xmx 上。
-//
+// 返回 nullptr = 本轮没有缓冲，调用方据此早退。
 // ⚠️ 调用方必须同步消费这块内存、不能留存引用：
 // 下一帧 sws_scale / swr_convert 会就地覆写。
-extern "C" JNIEXPORT jobject JNICALL
-Java_soko_ekibun_ffmpeg_AvSurfaceContext_getBuffer(JNIEnv* env, jobject thiz,
-                                                   jlong pctx,
-                                                   jint codec_type) {
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_soko_ekibun_ffmpeg_AvSurfaceContext_getBufferNative(
+    JNIEnv* env, jobject thiz, jlong pctx, jint codec_type, jbyteArray buf) {
   auto ctx = (SWContext*)pctx;
+  uint8_t* addr = nullptr;
+  jlong size = 0;
   switch (codec_type) {
     case AVMEDIA_TYPE_AUDIO:
-      if (ctx->audioBufferSize <= 0) return nullptr;
-      return env->NewDirectByteBuffer(ctx->audioBuffer, ctx->audioBufferSize);
+      if (ctx->audioBufferSize > 0) {
+        addr = ctx->audioBuffer;
+        size = ctx->audioBufferSize;
+      }
+      break;
     case AVMEDIA_TYPE_VIDEO:
-      if (ctx->videoBufferSize <= 0) return nullptr;
-      return env->NewDirectByteBuffer(ctx->videoBuffer, ctx->videoBufferSize);
+      if (ctx->videoBufferSize > 0) {
+        addr = ctx->videoBuffer;
+        size = ctx->videoBufferSize;
+      }
+      break;
     default:
       return nullptr;
   }
-}
-extern "C" JNIEXPORT jlong JNICALL
-Java_soko_ekibun_ffmpeg_AvSurfaceContext_bufferAddress(JNIEnv* env,
-                                                       jobject thiz,
-                                                       jobject buffer) {
-  // 只对 direct buffer 有意义（我们自己的就是）。
-  return (jlong)(intptr_t)env->GetDirectBufferAddress(buffer);
+  if (size <= 0) return nullptr;
+  // 1. 获取传入 buf 的长度
+  jsize buflen = buf ? env->GetArrayLength(buf) : 0;
+  jbyteArray ret = nullptr;
+  // 2. 检查传入的 buf 是否可以完美复用
+  if (buf && buflen == (jsize)size) {
+    ret = buf;
+  } else {
+    // 长度不匹配或传入了 NULL，创建新数组
+    ret = env->NewByteArray((jsize)size);
+    if (!ret) {
+      // OOM 保护：创建失败直接返回 NULL
+      return nullptr;
+    }
+  }
+  // 3. 写入数据
+  env->SetByteArrayRegion(ret, 0, (jsize)size, (jbyte*)addr);
+  return ret;
 }
 extern "C" JNIEXPORT void JNICALL
 Java_soko_ekibun_ffmpeg_AvSurfaceContext_copyPixelsNative(JNIEnv* env,

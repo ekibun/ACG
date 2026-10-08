@@ -61,38 +61,42 @@ fun PlayScreen() {
             enabled = surfaceContext.value != null,
             onClick = {
               MainScope().launch {
-                player.value?.closeAsync()
-                val newPlayer =
-                  FFPlayer(
-                    url.value,
-                    HttpIO.Handler(),
-                    surfaceContext.value,
-                    onEvent = {
-                      when (it) {
-                        is FFPlayer.Event.Frame -> {
-                          val p = it.pts
-                          playing.value = p != null
-                          if (p != null && !seeking.value) pts.floatValue = p.toFloat()
+                try {
+                  player.value?.closeAsync()
+                  val newPlayer =
+                    FFPlayer(
+                      url.value,
+                      HttpIO.Handler(),
+                      surfaceContext.value,
+                      onEvent = {
+                        when (it) {
+                          is FFPlayer.Event.Frame -> {
+                            val p = it.pts
+                            playing.value = p != null
+                            if (p != null && !seeking.value) pts.floatValue = p.toFloat()
+                          }
+                          FFPlayer.Event.ReadTimeout, FFPlayer.Event.ReadTimeoutResume -> println(it)
                         }
-                        FFPlayer.Event.ReadTimeout, FFPlayer.Event.ReadTimeoutResume -> println(it)
-                      }
-                    },
-                  )
-                player.value = newPlayer
-                val streams = newPlayer.getStreams()
-                val ptsStreams = HashMap<Int, AvStream>()
-                for (type in arrayOf(AVMediaType.VIDEO, AVMediaType.AUDIO)) {
-                  streams.firstOrNull { it.codecType == type }?.let {
-                    ptsStreams[type] = it
+                      },
+                    )
+                  player.value = newPlayer
+                  val streams = newPlayer.getStreams()
+                  val ptsStreams = HashMap<Int, AvStream>()
+                  for (type in arrayOf(AVMediaType.VIDEO, AVMediaType.AUDIO)) {
+                    streams.firstOrNull { it.codecType == type }?.let {
+                      ptsStreams[type] = it
+                    }
                   }
+                  // 总时长优先走格式层（HLS 只把总时长记在格式层，流上恒未知），
+                  // 拿不到再退回流时长的最大值。
+                  val totalDurationUs =
+                    newPlayer.getDurationUs().takeIf { it > 0 }
+                      ?: ptsStreams.values.maxOf { it.duration }
+                  duration.floatValue = totalDurationUs.toFloat()
+                  newPlayer.play(ptsStreams, 0)
+                } catch (e: Exception) {
+                  e.printStackTrace()
                 }
-                // 总时长优先走格式层（HLS 只把总时长记在格式层，流上恒未知），
-                // 拿不到再退回流时长的最大值。
-                val totalDurationUs =
-                  newPlayer.getDurationUs().takeIf { it > 0 }
-                    ?: ptsStreams.values.maxOf { it.duration }
-                duration.floatValue = totalDurationUs.toFloat()
-                newPlayer.play(ptsStreams, 0)
               }
             },
           ) {
@@ -151,16 +155,6 @@ fun PlayScreen() {
           },
         ) {
           Text("+1f")
-        }
-        TextButton(
-          enabled = player.value != null,
-          onClick = {
-            MainScope().launch {
-              surfaceContext.value?.isMuteVoice = !(surfaceContext.value?.isMuteVoice ?: false)
-            }
-          },
-        ) {
-          Text(if (surfaceContext.value?.isMuteVoice == true) "mute" else "orig")
         }
         Slider(
           value = pts.floatValue,

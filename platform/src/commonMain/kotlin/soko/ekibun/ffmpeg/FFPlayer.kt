@@ -70,14 +70,16 @@ class FFPlayer(
 
   private var pts: PTS? = null
 
-  /**
-   * 播放侧的归属线程 —— 播放入口（[play] / [seekTo] / [stepForward] / [stepBack] / [pause] /
-   * [closeAsync]）**只在它上面调**：读 [pts] 与随后的检查必须落在同一段不被打断的序列里。
-   *
-   * 本类**从不 close 它**（全进程共用），所以 [ThreadDispatcher] 那道「关掉后当场抛」的拦截
-   * 平时不触发 —— 要的就是它顺带提供的归属线程语义。
-   */
-  private val playerDispatcher by lazy { ThreadDispatcher("ffplayer") }
+  companion object {
+    /**
+     * 播放侧的归属线程 —— 播放入口（[play] / [seekTo] / [stepForward] / [stepBack] / [pause] /
+     * [closeAsync]）**只在它上面调**：读 [pts] 与随后的检查必须落在同一段不被打断的序列里。
+     *
+     * 本类**从不 close 它**（全进程共用），所以 [ThreadDispatcher] 那道「关掉后当场抛」的拦截
+     * 平时不触发 —— 要的就是它顺带提供的归属线程语义。
+     */
+    private val playerDispatcher by lazy { ThreadDispatcher("ffplayer") }
+  }
 
   /**
    * 视频帧相对主时钟的最大可丢弃跨度（对应 `AV_NOSYNC_THRESHOLD`）。
