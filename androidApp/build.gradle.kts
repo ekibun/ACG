@@ -60,4 +60,9 @@ android {
   buildFeatures {
     compose = true
   }
+  externalNativeBuild {
+    cmake {
+      path = File("$rootDir/cxx/CMakeLists.txt")
+    }
+  }
 }
