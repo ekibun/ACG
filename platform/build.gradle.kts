@@ -29,6 +29,8 @@ kotlin {
     }
   }
 
+  applyDefaultHierarchyTemplate()
+
   sourceSets {
     // 「JVM 族」中间层：Android 与桌面 JVM 共用的那批**平台实现**。换绑定技术（cinterop /
     // 别的 FFI）时要换掉的是这一层，不是 commonMain 的编排逻辑。
@@ -43,8 +45,8 @@ kotlin {
       create("jvmShared") {
         dependsOn(commonMain.get())
       }
-    getByName("jvmMain").dependsOn(jvmShared)
-    getByName("androidMain").dependsOn(jvmShared)
+    jvmMain.get().dependsOn(jvmShared)
+    androidMain.get().dependsOn(jvmShared)
 
     commonMain.dependencies {
       // coroutines 用 api：Pointer.closeDeferred() 的返回类型 Job 与 ThreadDispatcher

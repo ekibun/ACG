@@ -110,8 +110,7 @@ animeko 2913 个 kt/kts、60866 行注释里含 emoji 的只有 30 行（0.05%�
 `Dmg` / `Deb` 只是模板默认值，不维护）。
 
 - `cxx/` 是**原生源码树，不是 Gradle 模块** —— 别去找它的 build 文件。
-- 依赖版本全部集中在 `gradle/libs.versions.toml`，**本文件不写任何版本号**。其中 `material3` 与
-  `androidx-lifecycle` 是**刻意**钉在 alpha/beta 上的，不是笔误 —— 不要"顺手"降成稳定版。
+- 依赖版本全部集中在 `gradle/libs.versions.toml`，**本文件不写任何版本号**。
 - 平台层收在 **`:platform` 模块**，住 `soko.ekibun.{jni,quickjs,ffmpeg,web,common}`：
   各包的 JNI 面、webview 契约与两端实现、播放器视图（`ffmpeg` 包的 `SurfaceContext` /
   `VideoSurface`）、IO 原语（`common` 包的 `File` / `Http` 与 ktor 引擎）——**新增绑定、
