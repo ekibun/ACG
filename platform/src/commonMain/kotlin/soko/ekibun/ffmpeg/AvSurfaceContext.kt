@@ -49,37 +49,22 @@ abstract class AvSurfaceContext : Pointer() {
       buf: ByteArray?,
     ): ByteArray?
 
-    /** 按流类型留住上一轮那块数组，好让 native 侧能就地覆写、不每帧分配。 */
-    private val buffers = HashMap<Int, ByteArray>()
-
-    private fun getBuffer(
-      ctx: Long,
-      codecType: Int,
-    ): ByteArray? =
-      getBufferNative(
-        ctx,
-        codecType,
-        buffers[codecType],
-      )?.also { buffers[codecType] = it }
-
-    /** native→native 原样拷贝（给桌面端把 RGBA 写进复用位图，见 `DesktopSurfaceContext`）。 */
-    @JvmStatic
-    private external fun copyPixelsNative(
-      src: Long,
-      dst: Long,
-      bytes: Int,
-    )
-
-    /** public 的由来同 [addressOf]：调用点在 `:shared`，跨模块 `internal` 不可见。 */
-    fun copyPixels(
-      src: Long,
-      dst: Long,
-      bytes: Int,
-    ) = copyPixelsNative(src, dst, bytes)
-
     @JvmStatic
     private external fun closeNative(ctx: Long)
   }
+
+  /** 按流类型留住上一轮那块数组，好让 native 侧能就地覆写、不每帧分配。 */
+  private val buffers = HashMap<Int, ByteArray>()
+
+  private fun getBuffer(
+    ctx: Long,
+    codecType: Int,
+  ): ByteArray? =
+    getBufferNative(
+      ctx,
+      codecType,
+      buffers[codecType],
+    )?.also { buffers[codecType] = it }
 
   var speedRatio = 1f
     private set

@@ -1,12 +1,9 @@
 package soko.ekibun.ffmpeg
 
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.neverEqualPolicy
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import org.jetbrains.skia.Bitmap
+import androidx.compose.runtime.mutableLongStateOf
 import org.jetbrains.skia.ColorAlphaType
 import org.jetbrains.skia.ColorType
+import org.jetbrains.skia.Image
 import org.jetbrains.skia.ImageInfo
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -16,8 +13,16 @@ import javax.sound.sampled.DataLine
 import javax.sound.sampled.SourceDataLine
 
 /**
- * 桌面端播放实现：音频走 javax.sound.sampled；视频写进**复用的 skiko 位图**（[frame]），
- * 由 `VideoSurface.jvm.kt` 取 skiaCanvas 直接画 —— 不每帧新建对象，理由见 [getBitmap]。
+ * 桌面端播放实现：音频走 javax.sound.sampled；视频把 native 经 `SetByteArrayRegion` 拷进复用
+ * `ByteArray` 的整帧，经 `Image.makeRaster` 复制成一份 Skia 自管的 [currentFrame]
+ * （[Image]），由 `VideoSurface.jvm.kt` 取 skiaCanvas 直接画。
+ *
+ * [frame] 是 Long 计数器（每帧自增），Compose 订阅它触发重绘 —— 与 mediamp 的 `frameTick`
+ * 同一思路，但本端走 **CPU 上传** 路径：每帧 2 次 CPU 拷贝（makeRaster 一次 memcpy +
+ * 绘制时一次 GPU 上传），与 Android 端持平；合并成单次传输的方向见 TODO B26。
+ * `buf` 下一帧会被 native 就地覆写，故 makeRaster 必须**复制**而非 alias —— 换帧时旧
+ * [Image] 被 [close]，不进 Cleaner；绘制方经 [getImage] 在锁内取当前帧、画完即弃，
+ * 不得把 [Image] 引用留到绘制之外。
  *
  * [soko.ekibun.ffmpeg.AvSurfaceContext] 的 native 侧会按构造时传入的 audioFormat 用 swr_convert
  * 转码输出，因此这里的 audioFormat = AV_SAMPLE_FMT_FLT 意味着拿到的是 float32。
@@ -73,45 +78,40 @@ class DesktopSurfaceContext : SurfaceContext() {
 
   private fun toPcm16(value: Float): Short = (value.coerceIn(-1f, 1f) * 32767f).toInt().toShort()
 
-  private val frameState = mutableStateOf<Bitmap?>(null, policy = neverEqualPolicy())
+  private val frameState = mutableLongStateOf(0L)
 
-  /**
-   * 最新一帧，供 Compose 绘制。
-   *
-   * 它是**复用**的位图（内容每帧被覆写），不是快照 —— 绘制方要留住像素必须自己拷一份
-   * （见 `VideoSurface.jvm.kt`）。靠「换块」让引用变化，Compose 据此重组 + 重绘。
-   */
-  val frame: Bitmap? get() = frameState.value
+  val frame get() = frameState.value
 
-  var currentFrame: Bitmap? = null
+  var currentFrame: Image? = null
 
-  private fun getBitmap(
-    width: Int,
-    height: Int,
-  ): Bitmap {
-    val bitmap = currentFrame
-    if (bitmap == null || bitmap.width != width || bitmap.height != height) {
-      val newBitmap =
-        Bitmap().apply {
-          allocPixels(ImageInfo(width, height, ColorType.RGBA_8888, ColorAlphaType.OPAQUE))
-        }
-      currentFrame = newBitmap
-      bitmap?.close()
-      return newBitmap
+  private val lock = Any()
+
+  fun getImage(block: (Image) -> Unit) {
+    synchronized(lock) {
+      val frame = currentFrame ?: return
+      block(frame)
     }
-    return bitmap
   }
 
   override suspend fun flushVideoBuffer(
     buf: ByteArray,
     width: Int,
     height: Int,
-  ) = withContext(Dispatchers.Main) {
-    if (width <= 0 || height <= 0) return@withContext
+  ) {
+    if (width <= 0 || height <= 0) return
     updateAspectRatio(width, height)
-    val target = getBitmap(width, height)
-    target.installPixels(target.imageInfo, buf, width * 4)
-    frameState.value = target
+    val image =
+      Image.makeRaster(
+        ImageInfo(width, height, ColorType.RGBA_8888, ColorAlphaType.OPAQUE),
+        buf,
+        width * 4,
+      )
+    synchronized(lock) {
+      val oldImage = currentFrame
+      currentFrame = image
+      oldImage?.close()
+    }
+    frameState.value++
   }
 
   override suspend fun resume() = line.start()
@@ -129,7 +129,7 @@ class DesktopSurfaceContext : SurfaceContext() {
 
   override fun close() {
     super.close()
-    frameState.value = null
+    frameState.value = 0
     lineRef?.let {
       it.stop()
       it.flush()

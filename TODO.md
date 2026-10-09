@@ -185,6 +185,38 @@
 - **测试材料**：在线 AES-128 流与本地生成法见 skill `build-and-test` 的「在线测试流」一节。
 - **完成判据**：AES-128 测试流可播（open / 读 / seek 不再在分片打开处失败）。
 
+### B26. 视频上传：把「每帧 2 次 CPU 拷贝」收敛成「单次 GPU 传输」（桌面 / Android 同题）
+
+- **现状（2026-10-09 核）**：两个平台都是 **每帧 2 次 CPU 拷贝**，与 mediamp/mpv 的
+  「解码即 GPU 纹理、CPU 零拷贝」不同：
+  - 桌面：`flushVideoBuffer` 里 `Image.makeRaster(buf)`（buf → Skia 自管像素，memcpy #1）
+    + `VideoSurface` 绘制时 `drawImageRect`（CPU → GPU 上传，memcpy #2）。
+  - Android：`bitmap.copyPixelsFromBuffer(buf)`（buf → Bitmap，memcpy #1）
+    + `surface.lockCanvas` 后 `drawBitmap`（Bitmap → Surface 缓冲，memcpy #2）。
+  - 两者之上还有一拷贝是**平台共享**的：`getBufferNative` 的 `SetByteArrayRegion`
+    把 native `videoBuffer` 拷进复用 JVM `buf` —— 这是 CPU 解码路径的固有代价，不算进「2」。
+  - 旧桌面实现多一次 `makeFromBitmap`（3 次），已在本次 `SurfaceContext.jvm.kt` 改动里对齐到 2。
+- **约束**：`buf` 下一帧被 native 就地覆写，所以任何「复用可变 CPU 侧位图/Image 当绘制源」
+  的尝试都必须**复制**或加锁（`makeRaster`、`copyPixelsFromBuffer` 复制正是为此）；
+  不能 alias `buf`，否则出撕裂。
+- **Android 那两处能不能合并成一次**（针对 `copyPixelsFromBuffer` + `drawBitmap`）：
+  - 用当前 `lockCanvas` 软件 Canvas **不能**——软件 Canvas 没有「直接 blit 裸像素」原语，
+    中间 Bitmap 是强制的；buf→Bitmap 与 Bitmap→Surface 是两道独立的 memcpy，没有公开 API
+    让 Bitmap 的后备存储 alias Surface 缓冲，故无法省掉其一。
+  - 退一步用 `ImageReader`：把 `buf` 直接写进 plane buffer（手处理行 stride），可压成 1 次
+    memcpy，但丢掉 Canvas/Paint 灵活性，且要自己兜底 stride 与格式。
+  - 正解是走 GPU：`glTexSubImage2D(buf)` 上传到纹理后渲染进 Surface 的 EGL window surface，
+    那时唯一的 CPU 拷贝就是 native `buf`→上传，合成是 GPU→GPU。
+- **方向（参考 mediamp，但本端是 CPU 上传路径）**：
+  - 桌面：把当前帧留在**一份持久的 GPU 纹理**里，`flushVideoBuffer` 每帧只 `updateTexture`
+    （或等价 `writePixels`）就地刷新像素，纹理对象不重建 ⇒ 省掉每帧 alloc/free 抖动。
+    但**上传动作仍每帧发生**（像素在变，无法只传一次）。
+  - Android：同款思路换成上面的 GLES 输出（或退而求其次 ImageReader 直写 plane）。
+  - **真正零每帧传输**需要 native 直接产出 GPU 纹理（ffmpeg → GPU，像 mediamp/mpv 那样走
+    IOSurface / ID3D12 / GL interop），跳过「native→CPU buf→Skia Image→GPU」整条——
+    那是 native/C++ 侧改造，不在本端 Kotlin 范围。
+- **完成判据**：桌面 / Android 播放 RSS 与纹理（或 Bitmap）分配次数稳定（无每帧 alloc 抖动），
+  且像素与现版本逐帧一致。
 
 ## C. 事实未实测，文档里暂无据
 
