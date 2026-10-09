@@ -59,78 +59,6 @@
   `av_dict_set(&opts, "protocol_whitelist", …, 0)` 或改传内联选项串，属**噪声治理**而非修 bug，  
   已记在 B12 的完成判据之外。
 
-### B12. HTTP 源读空：契约已定并改掉 `HttpIO`，剩下真远程源与 FFPlayer 口径没验
-
-- **已修**（2026-10-02）：`HttpIO.read` 原来在 ktor 缓冲还没追上 `offset` 时返回 0  
-  （注释写着「让 avio 稍后重试」——不成立），现在改成**在 IO 层阻塞等数据**：  
-  `getResponseBlocking()` 只在真读到流尾时返回 null（`read` 把它翻成 `AVERROR_EOF`），  
-  推进改用新的 `advanceTo()` 逐段真读丢弃 —— 不再用 `InputStream.skip`（它允许少跳，  
-  少跳一次 `offset` 的记账就与真实位置错开）。
-- **链条与「为什么既不能返回 0 也不能返回负数」**（逐行核过本仓 `cxx/ffmpeg/ffmpeg/`：  
-  `fill_buffer` → `avio_read` → `append_packet_chunked` → `mov_read_packet` →  
-  `av_read_frame`）：正本写在 `HttpIO.getResponseBlocking()` 的 KDoc 里，**别再抄一份到这里**。  
-  一句话：返回 0 ⇒ 「sample 游标前进、字节流没前进」外加把 0 长度的包交给上层；  
-  返回负数 ⇒ `s->error` 被置上且**没有任何代码清它**（`avio_seek` 只清 `eof_reached`），  
-  之后每次**零字节**读都以那个旧错误码收场，**真正的 EOF 也会冒充成它**。  
-  ⚠️ **`AVERROR(EAGAIN)` + `AVIO_FLAG_NONBLOCK` 这条路  
-  对我们不存在** —— 它们只长在 `avio.c` 的 `retry_transfer_wrapper` 里（只包 `URLProtocol`），  
-  我们走的是 `avio_alloc_context` + 自有回调，不经过那一层；头文件也写着 `read_packet`  
-  "must never return 0"（`avio.h` 的 `avio_alloc_context`）。
-- **新用例**：`shared/src/jvmTest/.../player/HttpReadContractTest.kt` —— 起本地服务喂入库  
-  素材（body 分块下发 + 块间 sleep），判据是**解出的视频帧序列与本地文件逐帧相同**；  
-  认 Range（206）与不认 Range（一律 200）各一个。  
-  **A/B 实测**：还原成旧实现后，「向前 seek」那个用例**根本不返回**（整轮构建被 SIGTERM）；  
-  新实现两个用例 8 秒过。
-- **作废读轮重构**（2026-10-03）：「本轮作废」收敛进 `AvFormat.resetChannel` 一个函数  
-  （io.abort 投「作废」事件 → cancel 通道 → join 读作业），`takeOverPlayback` 只停  
-  轮次不掀读作业，作废由换位置入口（play / seekTo / stepBack）在**调用方线程**上先行调  
-  resetChannel —— 事件必须赶在读作业占住归属线程之前投出（排到它后面的调用永远轮不到执行）。  
-  stepForward 不换位置、不掀读作业（预读包与在飞的读都有效）。`HttpIO.read` 的等待用 `select`  
-  让「等数据」与「闲置超时」（`SOCKET_TIMEOUT_MS`）两支竞速（ktor 3.5.2 的 `awaitContent(min)`  
-  参数是**最少字节数**不是超时，见 `project-traps/references/silent-failures.md`），  
-  超时由正在等的读换会话重试。
-- **真远程源已验（2026-10-04，`RealUrlProbeTest`）**：`soko.ekibun.acg.player.RealUrlProbeTest`  
-  连 `https://media.w3.org/2010/05/sintel/trailer.mp4`（**真实 HTTPS，走了系统代理**）实测通过 ——  
-  `initNative` 拿到 2 条流（854x480 视频 + 音频）、`duration=52208333`；读 38 包 0.5 s；  
-  读 20 包后 `seekTo(20_000_000)` 再读 28 帧 2.0 s 全过。**结论：真实网络下的  
-  open / 顺序读 / Range seek 三条路都通**，①里「真远程源没试」这一条可以划掉  
-  （剩下的是「高延迟 / 断流重连」的极端形态，仍没专门构造）。
-- **还剩**：① ~~只对本地 HTTP 服务验过~~**已补真远程源**（见上一条），  
-  高延迟 / 断流重连的极端形态仍未专门构造；  
-  ② 走 `FFPlayer` 真播一个 HTTP 源（本条原文的「播放」口径）**部分完成**：  
-  `FFPlayerHttpStallSeekTest`（@Ignore）已把场景稳定构造出来（WAV + 分段停摆服务端），  
-  但暴露了**先于本次改动就存在的编排竞态** —— play 挂在 takeOverPlayback 的 pause-join 上，  
-  轮次被别人的 resetChannel / closeAsync 杀掉后 join 恢复，play 继续在已作废的轮次上跑  
-  seekImpl（takeOver 的 `pts === before` 挡不住 close / 外部作废，因为 close 不换 pts）。  
-  修法方向：轮次被外部作废时 takeOver 也要能判假（close 与外部作废都作废 pts，或等价闸）。  
-  修完解开 @Ignore 补 wake 真路径断言。测试脚手架经验（stall server 设计）已写进该用例 KDoc。  
-  ③ 「IO 层超前下载」的窗口仍没动 —— 前置条件（没数据怎么表达）已定，窗口本身没做。  
-  ④ WAV/PCM 类流有个与播放器无关的坑先记着：`find_stream_info` 对「开着不关」的连接会  
-  无限读下去（WAV 的包没有 duration，时长分析窗凑不齐，实测喂 480KB 也不停，上限是  
-  probesize 5MB），`wav_read_header` 末尾还会回卷到数据起点重读一次 —— 停摆服务端必须  
-  把这两次读全量供给，open 才能完成。
-- **完成判据**：真连一个远程 HTTP 源播放，不再出现「读空 sample」。
-
-### B19. Android 端 VideoSurface 生命周期收口（待真机实测）
-
-- **代码已补**（2026-10-02）：`VideoSurface.android.kt` 此前没有 onDispose —— common 契约  
-  写明的「界面销毁时以 null 回调 `onSurfaceContext`」在 Android 侧从未发生，  
-  `AndroidSurfaceContext`（AudioTrack + Surface + SurfaceTexture）随页签切走而漏。现在用状态把 factory  
-  回调里建的播放器接出来，onDispose 里回调 null + `close()`；`AndroidSurfaceContext.close()` 顺带  
-  release 自己包出来的 Surface（TextureView 那侧 `onSurfaceTextureDestroyed` 恒 false、不代放）。
-- **为什么还留着**：完成判据里的「真机实测」没做过 —— 本机没跑 Android 端。
-- **完成判据**：真机（或模拟器）实测：进播放页 → 播放 → 切到别的页签，AudioTrack 已 release  
-  （无持续占用的音频会话）。
-
-### B20. 版本目录里 ktor 的版本别名名不副实
-
-- **现状**（2026-10-02 评估发现）：`gradle/libs.versions.toml` 的版本别名  
-  `ktorClientOkhttp = "3.5.2"` 同时喂给 `ktor-client-core` 与 `ktor-client-java`  
-  （`version.ref = "ktorClientOkhttp"`）—— 别名以某个具体 artifact 命名，读到  
-  `ktor-client-core` 挂着 `ktorClientOkhttp` 会误判升级口径。
-- **完成判据**：别名改名 `ktor`（`[versions]` 一处 + `[libraries]` 三处引用同步），  
-  提交前核对四条编译闸门。
-
 ### B23. JS 侧流式 response（缓做，随 E8 数据源契约落地）
 
 - **现状**（2026-10-05 评估）：`JsEngine.fetchAsync` 走 `Http.request(options).execute()` 再  
@@ -185,38 +113,31 @@
 - **测试材料**：在线 AES-128 流与本地生成法见 skill `build-and-test` 的「在线测试流」一节。
 - **完成判据**：AES-128 测试流可播（open / 读 / seek 不再在分片打开处失败）。
 
-### B26. 视频上传：把「每帧 2 次 CPU 拷贝」收敛成「单次 GPU 传输」（桌面 / Android 同题）
+### B26. 视频上传：桌面每帧仍 2 次拷贝 + 每帧 alloc，Android 已压到 1 次
 
-- **现状（2026-10-09 核）**：两个平台都是 **每帧 2 次 CPU 拷贝**，与 mediamp/mpv 的
-  「解码即 GPU 纹理、CPU 零拷贝」不同：
-  - 桌面：`flushVideoBuffer` 里 `Image.makeRaster(buf)`（buf → Skia 自管像素，memcpy #1）
-    + `VideoSurface` 绘制时 `drawImageRect`（CPU → GPU 上传，memcpy #2）。
-  - Android：`bitmap.copyPixelsFromBuffer(buf)`（buf → Bitmap，memcpy #1）
-    + `surface.lockCanvas` 后 `drawBitmap`（Bitmap → Surface 缓冲，memcpy #2）。
-  - 两者之上还有一拷贝是**平台共享**的：`getBufferNative` 的 `SetByteArrayRegion`
-    把 native `videoBuffer` 拷进复用 JVM `buf` —— 这是 CPU 解码路径的固有代价，不算进「2」。
-  - 旧桌面实现多一次 `makeFromBitmap`（3 次），已在本次 `SurfaceContext.jvm.kt` 改动里对齐到 2。
-- **约束**：`buf` 下一帧被 native 就地覆写，所以任何「复用可变 CPU 侧位图/Image 当绘制源」
-  的尝试都必须**复制**或加锁（`makeRaster`、`copyPixelsFromBuffer` 复制正是为此）；
-  不能 alias `buf`，否则出撕裂。
-- **Android 那两处能不能合并成一次**（针对 `copyPixelsFromBuffer` + `drawBitmap`）：
-  - 用当前 `lockCanvas` 软件 Canvas **不能**——软件 Canvas 没有「直接 blit 裸像素」原语，
-    中间 Bitmap 是强制的；buf→Bitmap 与 Bitmap→Surface 是两道独立的 memcpy，没有公开 API
-    让 Bitmap 的后备存储 alias Surface 缓冲，故无法省掉其一。
-  - 退一步用 `ImageReader`：把 `buf` 直接写进 plane buffer（手处理行 stride），可压成 1 次
-    memcpy，但丢掉 Canvas/Paint 灵活性，且要自己兜底 stride 与格式。
-  - 正解是走 GPU：`glTexSubImage2D(buf)` 上传到纹理后渲染进 Surface 的 EGL window surface，
-    那时唯一的 CPU 拷贝就是 native `buf`→上传，合成是 GPU→GPU。
-- **方向（参考 mediamp，但本端是 CPU 上传路径）**：
-  - 桌面：把当前帧留在**一份持久的 GPU 纹理**里，`flushVideoBuffer` 每帧只 `updateTexture`
+- **现状（2026-10 核对，含提交 `15f0da8` 的重构）**：`flushAudioBuffer`/`flushVideoBuffer`
+  已合并为统一的 `flushFrameImpl(codecType, frame, getBuffer)`，但两平台的视频上传路径**不一样**：
+  - **Android 已压到 1 次 CPU 拷贝**：视频分支直接调 `copyBufferToSurface(ptr, surface)`，
+    由 native（`ffmpeg.cpp`）从 `ctx->videoBuffer` 经 `ANativeWindow_setBuffersGeometry` +
+    **按 stride 逐行 memcpy** 直写 Surface 缓冲；`getBuffer`（`SetByteArrayRegion` 进 JVM `buf`）
+    在视频分支**根本不被调用** ⇒ 连平台共享的那次 JVM 数组拷贝都省了。旧的
+    `bitmap.copyPixelsFromBuffer` + `lockCanvas`/`drawBitmap` 路径已在 `15f0da8` 作为死代码删除。
+  - **桌面仍是 2 次 CPU 拷贝 + 每帧 alloc**：`flushFrameImpl` 里 `Image.makeRaster(buf)`
+    （native `videoBuffer` → 复用 JVM `buf` 经 `SetByteArrayRegion`，再 → Skia 自管 Image，memcpy #1）
+    + `VideoSurface.jvm.kt` 绘制时 `drawImageRect`（Skia Image → GPU 上传，memcpy #2）；
+    且每帧 `close()` 旧 Image、`makeRaster` 新 Image —— **每帧都 alloc 一块 Skia Image**。
+  - **约束不变**：`buf` 下一帧被 native 就地覆写，所以绘制源必须复制或加锁（Android 的
+    `copyBufferToSurface` 在 `flushFrameImpl` 调用内**同步** lock→memcpy→unlockAndPost 就安全；
+    桌面的 `makeRaster` 复制同理）；不能 alias `buf`，否则出撕裂。
+- **方向（剩下主要是桌面）**：
+  - 桌面：把当前帧留在**一份持久的 GPU 纹理**里，`flushFrameImpl` 每帧只 `updateTexture`
     （或等价 `writePixels`）就地刷新像素，纹理对象不重建 ⇒ 省掉每帧 alloc/free 抖动。
     但**上传动作仍每帧发生**（像素在变，无法只传一次）。
-  - Android：同款思路换成上面的 GLES 输出（或退而求其次 ImageReader 直写 plane）。
   - **真正零每帧传输**需要 native 直接产出 GPU 纹理（ffmpeg → GPU，像 mediamp/mpv 那样走
     IOSurface / ID3D12 / GL interop），跳过「native→CPU buf→Skia Image→GPU」整条——
     那是 native/C++ 侧改造，不在本端 Kotlin 范围。
-- **完成判据**：桌面 / Android 播放 RSS 与纹理（或 Bitmap）分配次数稳定（无每帧 alloc 抖动），
-  且像素与现版本逐帧一致。
+- **完成判据**：桌面播放 RSS 与 Skia 纹理分配次数稳定（无每帧 `makeRaster` alloc 抖动），
+  且像素与现版本逐帧一致；Android 侧的 1 次拷贝已达成、无需再动。
 
 ## C. 事实未实测，文档里暂无据
 

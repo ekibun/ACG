@@ -7,9 +7,6 @@ import android.media.AudioManager
 import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.view.Surface
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 
 class AndroidSurfaceContext(
   var surfaceTexture: SurfaceTexture,
@@ -122,9 +119,13 @@ class AndroidSurfaceContext(
 
   override suspend fun resume() = audio.play()
 
-  override suspend fun pause() = audio.pause()
+  override suspend fun pause() {
+    if (audio.state == AudioTrack.STATE_UNINITIALIZED) return
+    audio.pause()
+  }
 
   override suspend fun stop() {
+    if (audio.state == AudioTrack.STATE_UNINITIALIZED) return
     audio.pause()
     frameWrite = 0
     audio.flush()
@@ -132,10 +133,7 @@ class AndroidSurfaceContext(
 
   override fun close() {
     super.close()
-    CoroutineScope(Dispatchers.IO).launch {
-      stop()
-      audio.release()
-    }
+    audio.release()
     // Surface 是本类从 surfaceTexture 包出来的（TextureView 那侧
     // onSurfaceTextureDestroyed 恒 false、不代放），所有权在这里收口。
     surfaceRef?.release()
