@@ -1,7 +1,5 @@
 package soko.ekibun.ffmpeg
 
-import android.graphics.Bitmap
-import android.graphics.Paint
 import android.graphics.SurfaceTexture
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -9,11 +7,9 @@ import android.media.AudioManager
 import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.view.Surface
-import androidx.core.graphics.createBitmap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.nio.ByteBuffer
 
 class AndroidSurfaceContext(
   var surfaceTexture: SurfaceTexture,
@@ -29,6 +25,12 @@ class AndroidSurfaceContext(
      * （只是「不保证所有设备支持」）。
      */
     const val DEFAULT_FORMAT = AudioFormat.ENCODING_PCM_8BIT
+
+    @JvmStatic
+    private external fun copyBufferToSurface(
+      ctx: Long,
+      surface: Surface,
+    ): Boolean
   }
 
   override val sampleRate: Int by lazy { audio.sampleRate }
@@ -46,6 +48,25 @@ class AndroidSurfaceContext(
       AudioFormat.ENCODING_PCM_FLOAT -> AvFormat.AV_SAMPLE_FMT_FLT
       else -> AvFormat.AV_SAMPLE_FMT_S16
     }
+  }
+
+  override suspend fun flushFrameImpl(
+    codecType: Int,
+    frame: AvFrame,
+    getBuffer: () -> ByteArray?,
+  ): Long {
+    when (codecType) {
+      AVMediaType.AUDIO -> {
+        val offset = flushAudioBuffer(getBuffer() ?: return -1)
+        return if (offset < 0) -1 else frame.timeStamp - offset * AvFormat.AV_TIME_BASE / sampleRate
+      }
+      AVMediaType.VIDEO -> {
+        if (frame.width <= 0 || frame.height <= 0) return -1
+        updateAspectRatio(frame.width, frame.height)
+        copyBufferToSurface(ptr, surface)
+      }
+    }
+    return -1
   }
 
   val audio by lazy {
@@ -70,7 +91,7 @@ class AndroidSurfaceContext(
 
   var frameWrite = 0L
 
-  override suspend fun flushAudioBuffer(buf: ByteArray): Int {
+  fun flushAudioBuffer(buf: ByteArray): Int {
     val size = buf.size
     if (audio.playState != AudioTrack.PLAYSTATE_PLAYING) audio.play()
     // 走 write(byte[], offset, size, mode) 这条：native 已经把数据拷进 buf，不再包一层
@@ -92,37 +113,12 @@ class AndroidSurfaceContext(
       else -> 2
     }
 
-  var bitmap: Bitmap? = null
-
   // 显式持有而不是 `by lazy`：close() 要能只还**已经建过**的 Surface ——
   // `by lazy` 读一次才会建，为了释放去读它就变成"没画过也建一个"。
   private var surfaceRef: Surface? = null
 
   val surface: Surface
     get() = surfaceRef ?: Surface(surfaceTexture).also { surfaceRef = it }
-
-  val paint by lazy { Paint() }
-
-  override suspend fun flushVideoBuffer(
-    buf: ByteArray,
-    width: Int,
-    height: Int,
-  ) {
-    // 与桌面端同款早退：非正尺寸喂不进 createBitmap（它要求宽高为正）
-    if (width <= 0 || height <= 0) return
-    updateAspectRatio(width, height)
-    surfaceTexture.setDefaultBufferSize(width, height)
-    if (bitmap == null || bitmap?.width != width || bitmap?.height != height) {
-      val oldBitmap = bitmap
-      bitmap = createBitmap(width, height)
-      oldBitmap?.recycle()
-    }
-    // copyPixelsFromBuffer 同步拷完，不留引用（native 下一帧会覆写 buf）
-    bitmap!!.copyPixelsFromBuffer(ByteBuffer.wrap(buf))
-    val canvas = surface.lockCanvas(null)
-    canvas.drawBitmap(bitmap!!, 0f, 0f, paint)
-    surface.unlockCanvasAndPost(canvas)
-  }
 
   override suspend fun resume() = audio.play()
 

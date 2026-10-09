@@ -21,7 +21,7 @@ import kotlin.test.assertTrue
  * 跳转之后再走（连续播放 / 前进一帧 / 后退一帧）时的**显示帧序列**与**送显像素**。
  *
  * 观测点全是播放器的**公开输出**：[FFPlayer.Event.Frame] 的帧时间戳，与
- * [AvSurfaceContext.flushVideoBuffer] 拿到的 RGBA。像素的参考是「同一条流顺序解一遍」的整帧哈希 ——
+ * [AvSurfaceContext.flushFrameImpl] 经 `getBuffer()` 拿到的 RGBA。像素的参考是「同一条流顺序解一遍」的整帧哈希 ——
  * 从 IDR 起解码是确定的，所以「这一帧该长什么样」不依赖它之前播过什么。素材帧栅格已知
  * （25fps、GOP 50 ⇒ 时间戳恒为 40_000µs 的整数倍）⇒ 序列连续可直接对期望序列下断言。
  *
@@ -45,14 +45,16 @@ class FFPlayerSeekFrameSequenceTest {
     override val channels: Int = 2
     override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_S16
 
-    override suspend fun flushAudioBuffer(buf: ByteArray): Int = 0
-
-    override suspend fun flushVideoBuffer(
-      buf: ByteArray,
-      width: Int,
-      height: Int,
-    ) {
-      hashes += fnv1a(buf)
+    override suspend fun flushFrameImpl(
+      codecType: Int,
+      frame: AvFrame,
+      getBuffer: () -> ByteArray?,
+    ): Long {
+      when (codecType) {
+        AVMediaType.AUDIO -> return 0
+        AVMediaType.VIDEO -> getBuffer() ?.let { hashes += fnv1a(it) }
+      }
+      return -1
     }
 
     override suspend fun resume() = Unit

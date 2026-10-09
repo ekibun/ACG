@@ -34,6 +34,37 @@ class DesktopSurfaceContext : SurfaceContext() {
   override val channels: Int = 2
   override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_FLT
 
+  override suspend fun flushFrameImpl(
+    codecType: Int,
+    frame: AvFrame,
+    getBuffer: () -> ByteArray?,
+  ): Long {
+    when (codecType) {
+      AVMediaType.AUDIO -> {
+        val offset = flushAudioBuffer(getBuffer() ?: return -1)
+        return if (offset < 0) -1 else frame.timeStamp - offset * AvFormat.AV_TIME_BASE / sampleRate
+      }
+      AVMediaType.VIDEO -> {
+        if (frame.width <= 0 || frame.height <= 0) return -1
+        updateAspectRatio(frame.width, frame.height)
+        val buf = getBuffer() ?: return -1
+        val image =
+          Image.makeRaster(
+            ImageInfo(frame.width, frame.height, ColorType.RGBA_8888, ColorAlphaType.OPAQUE),
+            buf,
+            frame.width * 4,
+          )
+        synchronized(lock) {
+          val oldImage = currentFrame
+          currentFrame = image
+          oldImage?.close()
+        }
+        frameState.value++
+      }
+    }
+    return -1
+  }
+
   private var lineRef: SourceDataLine? = null
 
   private val line: SourceDataLine
@@ -50,7 +81,7 @@ class DesktopSurfaceContext : SurfaceContext() {
 
   var frameWrite = 0L
 
-  override suspend fun flushAudioBuffer(buf: ByteArray): Int {
+  fun flushAudioBuffer(buf: ByteArray): Int {
     val out = line
     // 对应 Android 端的 audio.playState != PLAYSTATE_PLAYING 时自动 play()。
     // 必须用 isRunning：向未 start 的 line 写入，缓冲区满后会永久阻塞。
@@ -91,27 +122,6 @@ class DesktopSurfaceContext : SurfaceContext() {
       val frame = currentFrame ?: return
       block(frame)
     }
-  }
-
-  override suspend fun flushVideoBuffer(
-    buf: ByteArray,
-    width: Int,
-    height: Int,
-  ) {
-    if (width <= 0 || height <= 0) return
-    updateAspectRatio(width, height)
-    val image =
-      Image.makeRaster(
-        ImageInfo(width, height, ColorType.RGBA_8888, ColorAlphaType.OPAQUE),
-        buf,
-        width * 4,
-      )
-    synchronized(lock) {
-      val oldImage = currentFrame
-      currentFrame = image
-      oldImage?.close()
-    }
-    frameState.value++
   }
 
   override suspend fun resume() = line.start()

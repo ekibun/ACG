@@ -56,16 +56,6 @@ abstract class AvSurfaceContext : Pointer() {
   /** 按流类型留住上一轮那块数组，好让 native 侧能就地覆写、不每帧分配。 */
   private val buffers = HashMap<Int, ByteArray>()
 
-  private fun getBuffer(
-    ctx: Long,
-    codecType: Int,
-  ): ByteArray? =
-    getBufferNative(
-      ctx,
-      codecType,
-      buffers[codecType],
-    )?.also { buffers[codecType] = it }
-
   var speedRatio = 1f
     private set
 
@@ -105,27 +95,21 @@ abstract class AvSurfaceContext : Pointer() {
   ): Long {
     if (isClosed) return -1
     return withPtr { ptr ->
-      when (codecType) {
-        AVMediaType.AUDIO -> {
-          val offset = flushAudioBuffer(getBuffer(ptr, codecType) ?: return@withPtr -1)
-          return@withPtr if (offset < 0) -1 else frame.timeStamp - offset * AvFormat.AV_TIME_BASE / sampleRate
-        }
-        AVMediaType.VIDEO ->
-          getBuffer(ptr, codecType)?.let { flushVideoBuffer(it, frame.width, frame.height) }
+      flushFrameImpl(codecType, frame) {
+        getBufferNative(
+          ptr,
+          codecType,
+          buffers[codecType],
+        )?.also { buffers[codecType] = it }
       }
-      -1
     }
   }
 
-  /** 见 [flushFrame] 那条「同步消费」约束：`buf` 会被下一帧覆写。 */
-  abstract suspend fun flushAudioBuffer(buf: ByteArray): Int
-
-  /** 见 [flushFrame] 那条「同步消费」约束：`buf` 会被下一帧覆写。 */
-  abstract suspend fun flushVideoBuffer(
-    buf: ByteArray,
-    width: Int,
-    height: Int,
-  )
+  abstract suspend fun flushFrameImpl(
+    codecType: Int,
+    frame: AvFrame,
+    getBuffer: () -> ByteArray?,
+  ): Long
 
   abstract suspend fun resume()
 

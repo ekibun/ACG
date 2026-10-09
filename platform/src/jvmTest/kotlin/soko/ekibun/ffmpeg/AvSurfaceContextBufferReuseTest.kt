@@ -1,6 +1,7 @@
 package soko.ekibun.ffmpeg
 
 import kotlinx.coroutines.runBlocking
+import soko.ekibun.ffmpeg.AvFrame
 import java.io.ByteArrayOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -44,21 +45,28 @@ class AvSurfaceContextBufferReuseTest {
     @Volatile
     var audioBytes = 0L
 
-    /** 声卡在放：真身按采样数节流，这里直驱不模拟节拍（判据与时间无关）。 */
-    override suspend fun flushAudioBuffer(buf: ByteArray): Int {
-      audioBytes += buf.size
-      audioBuffers += buf
-      // 返回 0 = 没有重采样前导偏移，flushFrame 的时间戳就是帧自己的 pts
-      return 0
-    }
-
-    override suspend fun flushVideoBuffer(
-      buf: ByteArray,
-      width: Int,
-      height: Int,
-    ) {
-      videoBytes += buf.size
-      videoBuffers += buf
+    override suspend fun flushFrameImpl(
+      codecType: Int,
+      frame: AvFrame,
+      getBuffer: () -> ByteArray?,
+    ): Long {
+      when (codecType) {
+        AVMediaType.AUDIO -> {
+          getBuffer()?.let { buf ->
+            audioBytes += buf.size
+            audioBuffers += buf
+          }
+          // 无重采样前导偏移（offset = 0），上屏时间戳即帧自身 pts —— 对应 flushFrame 的
+          // `frame.timeStamp - offset * AV_TIME_BASE / sampleRate`
+          return frame.timeStamp
+        }
+        AVMediaType.VIDEO ->
+          getBuffer()?.let { buf ->
+            videoBytes += buf.size
+            videoBuffers += buf
+          }
+      }
+      return -1
     }
 
     override suspend fun resume() = Unit
@@ -151,7 +159,7 @@ class AvSurfaceContextBufferReuseTest {
             for (frame in codec.sendPacketAndGetFrames(packet)) {
               sink.postFrame(AVMediaType.AUDIO, frame)
               val shown = sink.flushFrame(AVMediaType.AUDIO, frame)
-              // flushAudioBuffer 返回 0（无前导静音）⇒ 上屏时间戳就是帧自己的 pts
+              // flushFrameImpl 对音频返回 0（无前导静音）⇒ 上屏时间戳就是帧自己的 pts
               assertEquals(frame.timeStamp, shown, "flush timestamp must equal the frame pts when sink returns 0")
               frame.close()
             }

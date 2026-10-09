@@ -287,7 +287,7 @@ abstract class Pointer protected constructor(
    * 读只剩一次静态标志判断）。跨线程读 ptr 是 use-after-free 类错误，让它**在测试期就炸**
    * 而不是偶发崩在 native 里。
    */
-  val ptr: Long
+  internal val ptr: Long
     get() {
       val d = dispatcher
       val who = simpleClassName

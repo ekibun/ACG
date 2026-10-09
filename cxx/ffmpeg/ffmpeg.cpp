@@ -34,6 +34,7 @@ jobject av_dict_to_map(JNIEnv* env, AVDictionary* d) {
 #ifdef ANDROID
 
 #include <android/log.h>
+#include <android/native_window_jni.h>
 
 static void android_log_callback(void* ptr, int level, const char* fmt,
                                  va_list vl) {
@@ -665,3 +666,53 @@ Java_soko_ekibun_ffmpeg_AvSurfaceContext_speedRatioNative(JNIEnv* env,
   if (new_value > 0) ctx->speedRatio = new_value;
   return ctx->speedRatio;
 }
+
+#ifdef ANDROID
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_soko_ekibun_ffmpeg_AndroidSurfaceContext_copyBufferToSurface(
+    JNIEnv* env, jclass clazz, jlong pctx, jobject surface) {
+  auto ctx = (SWContext*)pctx;
+  if (ctx->videoBufferSize <= 0 || ctx->width <= 0 || ctx->height <= 0)
+    return false;
+
+  ANativeWindow* nativeWindow = ANativeWindow_fromSurface(env, surface);
+  if (nativeWindow == nullptr) return false;
+  // 先把目标几何对齐成 RGBA_8888 + 与 native 输出一致的宽高：Surface
+  // 默认不一定就是这套 （尺寸 / 像素格式可能不符），先设好再取 buffer。
+  if (ANativeWindow_setBuffersGeometry(nativeWindow, (int32_t)ctx->width,
+                                       (int32_t)ctx->height,
+                                       WINDOW_FORMAT_RGBA_8888) != 0) {
+    ANativeWindow_release(nativeWindow);
+    return false;
+  }
+  ANativeWindow_Buffer native_outBuffer;
+  if (ANativeWindow_lock(nativeWindow, &native_outBuffer, NULL) != 0) {
+    ANativeWindow_release(nativeWindow);
+    return false;
+  }
+  uint8_t* src = ctx->videoBuffer;
+  uint8_t* dst = (uint8_t*)native_outBuffer.bits;
+  if (src == nullptr || dst == nullptr) {
+    ANativeWindow_unlockAndPost(nativeWindow);
+    ANativeWindow_release(nativeWindow);
+    return false;
+  }
+  // 逐行拷贝：ANativeWindow 的 stride（像素）常大于 width，扁平 memcpy
+  // 会把每行错位累加 成斜向花屏——这是「不报错、只失效」的典型，按 stride
+  // 走才对。
+  const int rowBytes = (int)(ctx->width * 4);
+  const int dstStride = (int)(native_outBuffer.stride * 4);
+  const int rows = (int)ctx->height < native_outBuffer.height
+                       ? (int)ctx->height
+                       : native_outBuffer.height;
+  for (int y = 0; y < rows; y++) {
+    memcpy(dst + (size_t)y * dstStride, src + (size_t)y * rowBytes,
+           (size_t)rowBytes);
+  }
+  ANativeWindow_unlockAndPost(nativeWindow);
+  ANativeWindow_release(nativeWindow);
+  return true;
+}
+
+#endif

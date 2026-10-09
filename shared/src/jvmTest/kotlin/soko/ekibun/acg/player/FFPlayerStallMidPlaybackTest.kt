@@ -6,6 +6,7 @@ import soko.ekibun.TestMedia
 import soko.ekibun.TestMediaServer
 import soko.ekibun.ffmpeg.AVMediaType
 import soko.ekibun.ffmpeg.AvFormat
+import soko.ekibun.ffmpeg.AvFrame
 import soko.ekibun.ffmpeg.AvStream
 import soko.ekibun.ffmpeg.AvSurfaceContext
 import soko.ekibun.ffmpeg.FFPlayer
@@ -15,6 +16,7 @@ import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * 「播放到一半断掉」的现场：服务端**发到一半停住不关**（关掉等于告诉客户端 body 结束了，那叫
@@ -146,7 +148,7 @@ class FFPlayerStallMidPlaybackTest {
   }
 
   /**
-   * 空播放设备：只记帧数，不送显不送声（`flushVideoBuffer` 不碰像素，`flushAudioBuffer`
+   * 空播放设备：只记帧数，不送显不送声（`flushFrameImpl` 的 VIDEO 分支不碰像素，AUDIO 分支
    * 按采样数 `delay` 当声卡节拍，让播放按真实时长推进）。不碰 SDL / 声卡 ⇒ jvmTest 里能跑。
    */
   private class Sink : AvSurfaceContext() {
@@ -156,18 +158,21 @@ class FFPlayerStallMidPlaybackTest {
 
     private val frames = Collections.synchronizedList(ArrayList<Long>())
 
-    override suspend fun flushAudioBuffer(buf: ByteArray): Int {
-      val samples = buf.size / (channels * 2)
-      if (samples > 0) delay((samples * 1000L / sampleRate).coerceAtLeast(1))
-      return 0
-    }
-
-    override suspend fun flushVideoBuffer(
-      buf: ByteArray,
-      width: Int,
-      height: Int,
-    ) {
-      frames.add(System.nanoTime())
+    override suspend fun flushFrameImpl(
+      codecType: Int,
+      frame: AvFrame,
+      getBuffer: () -> ByteArray?,
+    ): Long {
+      when (codecType) {
+        AVMediaType.AUDIO ->
+          getBuffer()?.let { buf ->
+            val samples = buf.size / (channels * 2)
+            if (samples > 0) delay((samples * 1000L / sampleRate).coerceAtLeast(1).milliseconds)
+            return 0
+          }
+        AVMediaType.VIDEO -> frames.add(System.nanoTime())
+      }
+      return -1
     }
 
     override suspend fun resume() = Unit
