@@ -3,7 +3,7 @@ name: debugging
 description: >-
   本项目崩溃 / 挂死 / 开日志的排查路径：怎么看 hs_err_pid*.log 的 Problematic frame 与 Java frames、
   怎么区分阻塞与纯计算（看 worker 的 CPU 时间是否在涨）、jstack 抓栈、被强杀的 worker 在测试 XML 里
-  长什么样、ACG_WEBVIEW_DEBUG 与 ACG_WEBVIEW_LOG 两个原生日志开关、以及 Chromium 自己的日志怎么开。
+  长什么样、原生日志（`cxx/webview/webview.cpp` 一律走 stderr、无开关）、以及 Chromium 自己的日志怎么开。
   Use when 程序崩溃、测试挂死、或需要打开原生日志 / Chromium 日志来定位问题时。
 agent_created: true
 ---

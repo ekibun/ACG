@@ -80,19 +80,15 @@ tasks.matching { it.name == "createDistributable" }.configureEach {
   inputs.dir(nativeResourcesDir)
 }
 
-// 把原生日志的两个开关透传给跑起来的 App。
+// 把 MSYS2_BIN 透传给跑起来的 App。
 //
 // `JavaExec` 继承的是 **Gradle daemon** 的环境，命令行上现设的变量进不去 —— 所以这里
-// 显式透传一次，否则想看 `webview.cpp` 的日志只能去改代码。
+// 显式透传一次，否则 `buildJni` 里的 `exec.cmd` 找不到 MSYS2 的 bash。
 //
-//   ACG_WEBVIEW_DEBUG=1               → 日志走 stderr（控制台直接可见）
-//   ACG_WEBVIEW_LOG=D:/xxx/acg.log    → 追加到文件
-//
-// 例：`ACG_WEBVIEW_DEBUG=1 ./gradlew :desktopApp:run -x :desktopApp:buildJni`
+// （`cxx/webview/webview.cpp` 的原生日志一律走 stderr，没有开关；想看 Chromium 自己的
+// 日志，见 `.agents/skills/debugging/references/debugging.md`。）
 tasks.withType<JavaExec>().configureEach {
-  listOf("ACG_WEBVIEW_DEBUG", "ACG_WEBVIEW_LOG", "MSYS2_BIN").forEach { key ->
-    providers.environmentVariable(key).orNull?.let { environment(key, it) }
-  }
+  providers.environmentVariable("MSYS2_BIN").orNull?.let { environment("MSYS2_BIN", it) }
 }
 
 // JDK 24 起（JEP 472）调用 `System.load` / `System.loadLibrary` 这类 native 方法会打印警告：

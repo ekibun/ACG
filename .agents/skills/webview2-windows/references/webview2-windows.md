@@ -25,11 +25,13 @@ WebView2 通过 API 几乎不报告任何有用信息，下面每个症状都长
 GPU 与 utility 进程本来就会反复重启（`reason=2 TERMINATED`），
 把它们当失败会把一次进展正常的导航直接拆掉。
 
-另外：用 `nullptr` options 创建的 `ICoreWebView2Environment`，返回的错误串里只有一个 HRESULT。
-**必须自己把 HRESULT 格式化** —— 名字（`E_ACCESSDENIED`、`HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)`…）
-+ `FormatMessageW` 文本 + user data folder 路径 + `GetAvailableCoreWebView2BrowserVersionString`，
-再附一行提示。"environment failed, hr=0x80070005" 无法行动；
-"E_ACCESSDENIED, user data folder not writable" 可以。
+另外：environment 建失败时，宿主只会把 HRESULT 以 `0x%08X` 的形式打进原生日志与错误
+消息（"environment failed, hr=0x80070005" 无法行动）。
+**要把它翻成人话得手工查**，下面三样一起看：
+
+- 名字：`E_ACCESSDENIED`、`HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)`…；
+- `FormatMessageW` 文本（`FACILITY_WIN32` 的要先还原成 Win32 错误码才查得到）；
+- user data folder 路径与 `GetAvailableCoreWebView2BrowserVersionString`。
 
 ---
 
@@ -71,18 +73,34 @@ FATAL:<file>:<line>] GPU process isn't usable. Goodbye.
   > 正解应去查 Windows「漏洞利用防护 / Exploit Protection」的 Mandatory ASLR 或安全软件。
   > 诊断前先把环境变量清干净，否则会把环境态误判成代码回归。
 
-### 怎么设这些开关：优先走 native 默认值，而不是构建开关
+### 怎么设这些开关：本工程走 options 接口
 
-`ICoreWebView2EnvironmentOptions::AdditionalBrowserArguments` 需要在 WRL 缺 `RuntimeClass`
-的工具链（如 MinGW）上手写一个 COM 类。等价且便宜的做法：在
-`CreateCoreWebView2EnvironmentWithOptions` **之前**调
-`SetEnvironmentVariableW("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", ...)`。
-loader 会读它，浏览器子进程会继承这一块环境变量。
-**只追加、不覆盖** —— 这样运维侧仍然可以从外面加参数做 A/B。
+两种方式 WebView2 都支持，且会**合并**——环境变量 / 注册表的值会**追加**到
+`CreateCoreWebView2EnvironmentWithOptions` 的 `environmentOptions` 参数之后（webview2-idl
+的 `Globals` 明示此合并语义）：
+
+1. **options 接口**（当前本工程采用）：一个实现了 `ICoreWebView2EnvironmentOptions` 的
+   COM 对象，作为第三实参传给 `CreateCoreWebView2EnvironmentWithOptions`。
+2. **环境变量**：在 `CreateCoreWebView2EnvironmentWithOptions` **之前**调
+   `SetEnvironmentVariableW("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", ...)`。loader 会读它，
+   浏览器子进程继承这一块环境块。
+
+**本工程为什么不走环境变量**：`CoreWebView2EnvironmentOptions`（官方那个辅助类）构建在
+`Microsoft::WRL::Implements` 上（`WebView2EnvironmentOptions.h:205`），而编 webview 的是
+MinGW/g++，其 WRL 只带 `client.h`（ComPtr）、没有 `implements.h`（`RuntimeClass`），见
+`webview.cmake`。所以 `webview.cpp` 的 `WebviewEnviorment` **手写**了一个最小的
+`ICoreWebView2EnvironmentOptions`（零 WRL 依赖），参数由 JVM 侧当**构造参数**给进来。
+
+⚠️ 手写 vtable 错一格就会出现「建环境成功、参数不生效」的假象——早期那条「options 不生效」
+的实测即因此误判，不应作为改回环境变量的理由。
+
+⚠️ **提权宿主的坑**：宿主以高 IL 运行时，WebView2 **忽略** `WEBVIEW2_*` 环境变量（含
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`），但**认**通过 API 设的 flags
+（Microsoft Learn《Develop secure WebView2 apps》）。这正是不走环境变量更稳的一条理由。
 
 测试期想换参数又不改代码：在 Gradle 里用
-`providers.environmentVariable("ACG_WEBVIEW2_ARGS")` 追加到 `Test` 任务的
-`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 上（见 `shared/build.gradle.kts`）。
+`providers.environmentVariable("WEBVIEW2_ARGS")` 追加到 `Test` 任务的
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 上（见 `platform/build.gradle.kts`）。
 注意这个变量**只对 jvmTest 生效**，`:desktopApp:run` 不吃它。
 
 ---
@@ -321,9 +339,8 @@ if (rootTid && rootTid != hostTid && view->attachedTid != rootTid) {
   它只能让你自己的 `GetFocus()` 读起来正确，永远移不动前台队列的 `hwndFocus`。
   **不要把长期接改回作用域接** —— 留一行注释说明。
 - 接**根**窗口的线程（`GA_ROOT`），不要接 `GetForegroundWindow()` 的线程，目标才稳定。
-- 留一个环境变量关掉它的开关（如 `ACG_WEBVIEW_NO_THREAD_ATTACH=1`，读一次并缓存）：
-  `AttachThreadInput` 在 `SendMessage` 层面把两个消息循环耦合在一起，
-  万一在别的机器上出现卡死，你需要一个不改代码的 A/B。
+- 没有留关掉它的环境变量开关：症状已经定位清楚（就是前台队列的 `hwndFocus` 没跟着
+  走），开关只是当初排查期的对照手段，留着只会让人以为那是条待修的配置。
 
 **为什么某些库完全不需要这些**：它们是在 JNI 里**从 AWT 线程**用
 `CreateWindowExW(WS_CHILD, parent_hwnd)` 建宿主的，父子同线程，焦点链天然连通，
@@ -507,7 +524,7 @@ STA + 消息泵的线程上去 `CreateCoreWebView2Controller` —— **稳定失
 
 ⇒ **要验「放行」就一次都别命中**：接了回调、每次都返回 `null`、只记录不复议，
 页面照样跑完（回调在每一次请求上都被调了不止一次，这本身也是「放行不影响加载」的证据）。
-回归在 `NativeWebViewHostTest.releasingEveryRequestLetsPageFinish`。
+回归在 `WebViewHostTest.releasingEveryRequestLetsPageFinish`。
 
 **为什么值得单列一节**：早先那条用例把「命中 → 放行」当成真实能力，来源是**一个桩里的
 手攥 `CompletableDeferred`** —— 桩有那道闸门，真实现没有对应物，于是实测挂满 608 s。

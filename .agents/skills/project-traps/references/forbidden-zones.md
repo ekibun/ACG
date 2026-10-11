@@ -5,7 +5,7 @@
 
 改代码时容易踩的坑、以及"不要做 X"的约束。每条都曾真实地踩过——但实现可能已变，下面只作参考。
 
-- **原生桥**：JNI 符号是**不带签名的名称导出**（`Java_soko_ekibun_web_NativeWebView_<name>`）。
+- **原生桥**：JNI 符号是**不带签名的名称导出**（`Java_soko_ekibun_web_Webview2Context_<name>`）。
   改了 native 方法签名却用着旧 dll **不会报错**，只会参数错位 → 改签名后务必确认 dll 已刷新。
 - **QuickJS**：`init.js` 里的能力**一律内联**，动态 `import()` / `require()` 会让进程 `abort()`。
   引用所有权有明确模型，改动前读 [quickjs-reference-ownership.md](../../quickjs-ownership/references/quickjs-reference-ownership.md)。

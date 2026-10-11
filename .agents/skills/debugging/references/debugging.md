@@ -79,21 +79,21 @@ close2 -> null          ← 隔了 5s ⇒ 这次超时了，问题在第二条
 一个字都不打，用例数会被上一轮的结果骗过。`mtime` 也要一并核对。
 
 
-## 原生日志开关
+## 原生日志
 
-只有下面这些会被透传给跑起来的 App：
+`cxx/webview/webview.cpp` 的日志**一律写 stderr，没有开关** —— 消费端只有 Gradle 起的
+测试与桌面端进程，两个都有 stderr。测试进程那份在 Gradle 的测试输出里，桌面端那份在
+`./gradlew :desktopApp:run` 的控制台上。
 
-- `ACG_WEBVIEW_DEBUG=1` 走 stderr
-- `ACG_WEBVIEW_LOG=<路径>` 追加到文件
-
-（`MSYS2_BIN` 是**构建期** `buildJni`→`exec.cmd` 桥要的环境变量，不是日志开关，见 [`cxx/AGENTS.md`](../../../../cxx/AGENTS.md) 的「原生构建」。）
+唯一被透传给跑起来的 App 的环境变量是 `MSYS2_BIN`，那是**构建期** `buildJni`→`exec.cmd`
+桥要用的，不是日志开关，见 [`cxx/AGENTS.md`](../../../../cxx/AGENTS.md) 的「原生构建」。
 
 ## Chromium 日志
 
 Chromium 自己的日志才是引擎级问题唯一说得清的东西：设
 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--enable-logging --v=1`（必须在创建 environment 之前），
 日志落在 user data folder 的 `EBWebView/chrome_debug.log`。
-想试别的浏览器参数用真 JVM 宿主，`jvmTest` 认 `ACG_WEBVIEW2_ARGS`（**只对 jvmTest 生效**，
+想试别的浏览器参数用真 JVM 宿主，`jvmTest` 认 `WEBVIEW2_ARGS`（**只对 jvmTest 生效**，
 `:desktopApp:run` 不吃它），别用临时探针。
 
 ## 快速信号

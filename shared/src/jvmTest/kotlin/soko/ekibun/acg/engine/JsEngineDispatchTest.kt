@@ -6,7 +6,6 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
-import soko.ekibun.web.NativeWebView
 import soko.ekibun.web.WebViewTask
 import soko.ekibun.web.WebViewTaskResult
 import soko.ekibun.web.loadBackgroundWebView
@@ -30,7 +29,7 @@ import kotlin.test.assertTrue
  * **参数形状**：`args[0]` 是什么、`args[1]` 是什么。
  * 判据与踩坑取证见 `.agents/skills/quickjs-ownership/references/ability-bridge.md`。
  *
- * [soko.ekibun.web.NativeWebViewHostTest] 补的是另一半：它直接构造 [WebViewTask]
+ * [soko.ekibun.web.WebViewHostTest] 补的是另一半：它直接构造 [WebViewTask]
  * 调 [loadBackgroundWebView]、绕开 JS 桥，验 WebView2 宿主本身的行为。
  * **它证明不了派发改对了** —— `args` 的下标写错时它照样全绿。
  *
@@ -276,8 +275,8 @@ class JsEngineDispatchTest {
   /**
    * `webview` 的**空脚本**分支：不传 script 时宿主回空串，JS 侧要给出 `undefined`。
    *
-   * 这条覆盖的是 `webview.cpp` 里 `!view->hasScript -> notifyBackgroundFinished(token, L"")`
-   * 那一条产出的值 —— 宿主在「没传脚本」时回的是**空串**，不是 JSON。
+   * 这条覆盖的是「没传脚本」时宿主那一支：由 Kotlin 侧直接发
+   * `ScriptFinished(json = null)`，不是 JSON。
    *
    * 断言只锁 `=== undefined` 这个**可观测结果**，不关心 `init.js` 是从哪个分支出来的：
    * `!ret` / `ret.value == null` / `json === ""` 三条路都收敛到 `undefined`，
@@ -436,20 +435,20 @@ class JsEngineDispatchTest {
   /**
    * 宿主体检：真导航一次 `about:blank`。
    *
-   * 与 [soko.ekibun.web.NativeWebViewHostTest] 的 `checkHost` 同一套理由（那边有完整
-   * 说明）：`NativeWebView.ensureStarted()` 成功但引擎完全不动是一种真实坏法 ——
-   * 连 `about:blank` 都到不了 `NavigationCompleted`。不体检就 skip 会让人误以为验过了，
-   * 不体检就直跑则 30s 超时加一堆看不懂的断言失败，纯属噪声。
+   * 与 [soko.ekibun.web.WebViewHostTest] 的 `checkHost` 同一套理由（那边有完整
+   * 说明）：环境建得成但**引擎完全不动**是一种真实坏法 —— 连 `about:blank` 都到不了
+   * `NavigationCompleted`。不体检就 skip 会让人误以为验过了，不体检就直跑则 30s
+   * 超时加一堆看不懂的断言失败，纯属噪声。
+   *
+   * 宿主没有「全局 `ensureStarted()`」可问了（environment 随第一个上下文建，没有
+   * 单独的「启动」入口），所以体检就只剩这次真导航 —— 它建不出环境时同样会在超时里
+   * 现形。
    *
    * 重复一份而不复用那边的：`checkHost` 是它的 `private companion object` 成员，
    * 跨类不可见（提可见性要动那个文件，超出本次范围）。
    */
   private fun hostHealth(): String? =
     runBlocking {
-      NativeWebView
-        .ensureStarted()
-        .exceptionOrNull()
-        ?.let { return@runBlocking "WebView2 环境不可用 —— ${it.message}" }
       val result =
         withTimeoutOrNull(HOST_HEALTH_TIMEOUT_MS) {
           loadBackgroundWebView(WebViewTask(url = "about:blank", script = "1 + 1"))

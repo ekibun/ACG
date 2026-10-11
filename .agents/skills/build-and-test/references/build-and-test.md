@@ -188,7 +188,7 @@ git 对**没有执行位的 hook 是静默跳过**的。
 **默认只跑定点的**（根 [`AGENTS.md`](../../../../AGENTS.md) §5 的规则，理由见本节末尾）：
 
 ```bash
-./gradlew :platform:jvmTest --tests "soko.ekibun.web.NativeWebViewHostTest" --console=plain
+./gradlew :platform:jvmTest --tests "soko.ekibun.web.WebViewHostTest" --console=plain
 # 平台层（jni / quickjs / ffmpeg / web 宿主）的用例在 :platform:jvmTest，同样要 dll：
 ./gradlew :platform:jvmTest --tests "soko.ekibun.quickjs.QuickJSTest.objectWithVariousTagsRoundTrips" --console=plain
 ```

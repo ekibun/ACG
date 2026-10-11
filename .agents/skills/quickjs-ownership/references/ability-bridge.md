@@ -89,14 +89,14 @@ $ javap -p -classpath shared/build/classes/kotlin/jvm/main soko.ekibun.acg.engin
 ### 为什么长期没被发现：这条路径零覆盖
 
 **历史**（2026-10-03 之前）：`InitJsTest` / `WebviewJsTest` 都**注入自己的桩**顶替 `_binding`，
-`NativeWebViewHostTest` 则直接构造 `WebViewTask` 调 `loadBackgroundWebView`、绕开整条 JS 桥
+`WebViewHostTest` 则直接构造 `WebViewTask` 调 `loadBackgroundWebView`、绕开整条 JS 桥
 —— 三个都不走 `JsEngine` 的真实派发。⇒ `1dc16fa` 那种把四条链路全打成不可达的改动，
 **套件照样全绿**。
 
 **现在**：`JsEngineDispatchTest`（jvmTest，**零桩**、真 `JsEngine.instance`）是这条路径的
 **唯一**测试面 —— 那两个桩文件已删除。断言写在**真 JS 表达式**里（`encodeURIComponent` /
 `TextDecoder` / `console.log` / 真 `fetch` / 真 `webview` / 真 `FormData`）。
-`NativeWebViewHostTest` 补另一半（WebView2 宿主本身的行为），它证明不了派发改对了。
+`WebViewHostTest` 补另一半（WebView2 宿主本身的行为），它证明不了派发改对了。
 
 ### 桩为什么必须删（不是「不优雅」，是**验错了东西**）
 
@@ -109,7 +109,8 @@ $ javap -p -classpath shared/build/classes/kotlin/jvm/main soko.ekibun.acg.engin
 （`block(arrayOf(argv))`）这个 bug **全套件无感**。删掉桩之后不可能再发生。
 
 ⚠️ 反过来，删桩也暴露了两条**真分支**以前被桩挡着看不见：
-① `webview.cpp` 在 `!hasScript` 时回空串 ⇒ `init.js` 的 `json === ""` 判定；
+① 「没传脚本」那一支：Kotlin 侧直接发 `ScriptFinished(json = null)` ⇒ `init.js` 的
+`json == null` / `json === ""` 判定；
 ② 可见视图链路上 WebView2 把 `undefined` 序列化成 `"null"`（4 个字符），
 后台链路只判 `null`/`""` 不判 `"null"` ⇒ 后台脚本没返回值时脚本侧拿到 `null` 而非 `undefined`。
 
@@ -122,20 +123,18 @@ Kotlin 用手攥的 `CompletableDeferred` 决定何时放行」—— 那个闸�
 当时的假设是「命中 → 放行」在真实现里也该存在，改用「页面自己的加载过程当时钟」：
 在 `/sub.png` 上命中、主框架与 `<script>` 上返回 null，断言整轮以 `Scripted` 收场。
 **实测整轮仍以 `Intercepted` 收场**，断言必红。查 `cxx/webview/webview.cpp` 的
-`RequestHandler::Invoke` 才知道两条硬约束：
+`WebResourceRequested` 回调才知道那条硬约束：
 
-- 回调返回命中 ⇒ 立刻 `view->settled = true` + `webview->Stop()`；
-- 同一个 `Invoke` 开头还有 `if (!view || view->settled) return S_OK;`
-  ⇒ **命中之后连回调都不会再被调一次**，更谈不上「再放行一次」。
+- 回调返回命中 ⇒ native 立刻给一个空 204 并 `webview_->Stop()`，整轮加载中止。
 
 加上 `loadBackgroundWebView` 的 `outcome.complete` 幂等、**只取第一个终态**，
 所以「命中」与「放行」在真引擎里是**互斥的两种终局**，不存在「先命中再放行」的时序。
-真正的等价覆盖是 `NativeWebViewHostTest.releasingEveryRequestLetsPageFinish`：
+真正的等价覆盖是 `WebViewHostTest.releasingEveryRequestLetsPageFinish`：
 **接了回调、每次都返回 null（一次都不命中）**，页面照样跑完、整轮以 `Scripted` 收场 ——
 这才是「放行」这一支的真能力。
 
 ⇒ 迁条目前先问「**真实现里这条时序存在吗**」，别因为桩里能造就假定能。
-`grep -n "settled\|Stop()" cxx/webview/webview.cpp` 一次就能问清。
+`grep -n "Stop()" cxx/webview/webview.cpp` 一次就能问清。
 
 ⚠️ 「`when` 分支与 `init.js` 送来的实参对不对得上」这件事，**本文件不再有任何断言**。
 原先有个文本哨兵 `initFactoryTakesOnlyOneBridge`（锁引导函数形参个数与名字），

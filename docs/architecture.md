@@ -93,7 +93,10 @@ resolveEpisode(line, episode)     → { url, headers? }            // sort + lin
 
 **按任务一实例；前台 = 同一实例的可见态。** 悬浮球（App 级 overlay，非 WebScreen 私有）点击后把任务实例的 `WebViewSurface` 叠在浏览页之上；两层都保持在组合里，靠叠放次序切换。任务被显示期间 30s 超时暂停。不做全局单实例（并发互砸、clearCache 防串失效、砸用户浏览页）。
 
-落地缺口：桌面 `WebView.jvm.kt:83` 强转缝（后台控制器改为继承）；桌面 C++ 摘 `View.background` 标志 + `put_IsVisible`（焦点闸 webview.cpp:929）；Android 显示时重配 `blockNetworkImage`、会话中不 `clearCache`；引擎侧任务注册表。纯登录墙可不投前台（cookie 已共享）。
+落地缺口：Android 显示时重配 `blockNetworkImage`、会话中不 `clearCache`；引擎侧任务注册表。
+桌面那两条已随重写后的 `cxx/webview/webview.cpp` 一并落地：后台控制器改成 `by` 委托（不再强转），
+原生 `attach`/`focus` 里已有 `put_IsVisible` 与 `MoveFocus`，也没有 `View.background` 那个标志。
+纯登录墙可不投前台（cookie 已共享）。
 
 ## 5. 落地顺序
 

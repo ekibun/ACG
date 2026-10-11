@@ -104,15 +104,4 @@ tasks.named<Test>("jvmTest") {
   // 而 Gradle 默认只汇总结果，崩了就只能从上一轮残留的 XML 去猜死在哪个用例。
   // 打印逐用例事件才能一眼定位，代价是每轮几十行输出 —— 留着当偶发崩的第一现场。
   testLogging { events("started", "passed", "skipped", "failed") }
-  // webview.cpp 的原生日志开关与 Chromium 日志重定向（随 NativeWebViewHostTest 迁入本模块）。
-  environment("ACG_WEBVIEW_DEBUG", "1")
-  environment("ACG_WEBVIEW_LOG", "${rootProject.layout.projectDirectory.asFile}/build/acg-webview.log")
-  // 让 WebView2 把自己那份 Chromium 日志写到 user data folder 下的
-  // EBWebView/chrome_debug.log —— 引擎出的问题只有这份日志说得清。
-  // 想试别的浏览器参数（比如 --disable-gpu）就设 ACG_WEBVIEW2_ARGS，会追加在后面。
-  val extraArgs = providers.environmentVariable("ACG_WEBVIEW2_ARGS").orNull.orEmpty()
-  environment(
-    "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-    "--enable-logging --v=1" + if (extraArgs.isBlank()) "" else " $extraArgs",
-  )
 }

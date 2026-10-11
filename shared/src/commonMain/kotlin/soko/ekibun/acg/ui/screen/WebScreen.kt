@@ -29,7 +29,7 @@ import soko.ekibun.web.rememberWebViewState
 /**
  * 固定站点页面的默认地址。换站点只改这一个常量（或从外部传 [WebScreen] 的 homeUrl）。
  */
-const val WEBVIEW_HOME_URL: String = "https://www.bing.com"
+const val WEBVIEW_HOME_URL: String = "https://www.google.com"
 
 /**
  * 跨端 WebView 页面：顶部进度条 + 前进/后退/刷新工具条。首屏加载 [WEBVIEW_HOME_URL]。

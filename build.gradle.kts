@@ -1,3 +1,4 @@
+import org.gradle.plugins.ide.idea.model.IdeaModel
 import org.jlleitschuh.gradle.ktlint.KtlintExtension
 
 plugins {
@@ -34,4 +35,19 @@ allprojects {
       exclude("**/generated/**")
     }
   }
+}
+
+// 让 cxx 下两个 vendored submodule（ffmpeg / quickjs）与 native 构建产物不进 Studio 索引，
+// 压低 IDE 内存（实测 IDE 工作集 ~3.6GB，主因是 cxx 1.3 万文件被全量索引）。
+// excludeDirs 在每次 Gradle sync 时写回生成的 .iml，跨 sync 不丢失。
+allprojects {
+  apply(plugin = "idea")
+  val ideaModule = extensions.getByType<IdeaModel>().module
+  ideaModule.excludeDirs =
+    ideaModule.excludeDirs +
+    setOf(
+      rootDir.resolve("cxx/ffmpeg"),
+      rootDir.resolve("cxx/quickjs"),
+      rootDir.resolve("cxx/build"),
+    )
 }

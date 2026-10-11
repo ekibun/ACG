@@ -135,11 +135,9 @@ class WebViewConfig {
   /**
    * 是否允许页面自己弹新窗口。**两端当前都取 `false`**。
    *
-   * 实际生效的只有 Android（`setSupportMultipleWindows`）。桌面宿主的
-   * `nativeCreateView` 没有这个参数，`ViewOptions::allowNewWindow`
-   * （`cxx/webview/webview.cpp`）恒为默认 `false` —— 也就是说桌面端恒按「把
-   * 新窗口请求压回当前视图」处理（`NewWindowHandler` 就地导航）。要让桌面端
-   * 认这个旋钮，得给 native 加参数。
+   * 实际生效的只有 Android（`setSupportMultipleWindows`）。桌面宿主
+   * （`cxx/webview/webview.cpp`）**没注册 `NewWindowRequested`**，走的是 WebView2
+   * 的默认行为 —— 要让桌面端认这个旋钮，得给 native 补一个处理器。
    */
   var allowNewWindow: Boolean = false
 

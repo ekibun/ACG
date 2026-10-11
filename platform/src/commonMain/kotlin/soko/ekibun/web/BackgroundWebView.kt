@@ -19,8 +19,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 // 任务骨架（建 headless 控制器 → 导航 → 等终态 → 超时 → 销毁）在 commonMain 这一份，
 // 平台只按 [createWebViewController] 的 headless 路径提供实现。
 //
-// cookie 也是统一的：桌面端可见页与后台页共用同一个 WebView2 environment
-// （同一份 user data folder），Android 端共用系统 `CookieManager`。在这一页登录过，
+// cookie 也是统一的：桌面端可见页与后台页用的是**同一个 user data folder**
+// （`Webview2Context.defaultUserDataDir`），Android 端共用系统 `CookieManager`。在这一页登录过，
 // 脚本那边就是登录态；反之亦然。
 //
 // 有一条**两端都一样**的硬约束，见 WebViewTask.onInterceptRequest 的说明：

@@ -205,7 +205,7 @@ async (_binding) => {
       // 空串/null 表示脚本没有返回值 —— 对齐 http.js 的 `it = it && JSON.parse(it)`。
       // 没有「非 JSON 就原样返回」的兜底：宿主给的 json 一定是 JSON
       // （WebView2 的 ExecuteScript 自己序列化，裸文本会被加引号变合法 JSON，
-      // 压根到不了这里），而 `webview.cpp` 在没有脚本时回的是空串。
+      // 压根到不了这里），而「没有脚本」那一支宿主回的是空值（老宿主是空串、新宿主是 null）。
       if (json == null || json === "") return undefined;
       return JSON.parse(json);
     }

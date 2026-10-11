@@ -5,7 +5,8 @@
 标「基线」的是该指南原文规则，标「本项目」的是本仓库叠加的决定。
 
 适用范围：**只约束 `cxx/{webview,quickjs,ffmpeg}/` 下我们自己的源码**
-（`webview.cpp` / `quickjs.cpp` / `ffmpeg.cpp` 三个文件，没有自研头文件）。
+（`webview.cpp` / `quickjs.cpp` / `ffmpeg.cpp` 三个文件，自研头文件只有
+webview.cpp 里内联的 `WebviewEnvironmentOptions`）。
 下面这些**不在范围内**，风格不由我们决定，**也不要对它们"顺手格式化"**：
 
 - `cxx/ffmpeg/ffmpeg/`、`cxx/quickjs/quickjs/` —— 上游 **submodule**；
@@ -87,12 +88,13 @@
 - **JNI 入口命名不由 Google 指南规定**，由 JVM 约定决定：符号必须是
   `Java_<包名下划线化>_<类名>_<方法名>`，**不带签名**。这条比风格重要得多 ——
   改了 Kotlin 侧签名却用旧 dll 不会报错，只会参数错位（见 [`cxx/AGENTS.md`](../../../../cxx/AGENTS.md)）。
-- 现有三个库都是**单文件成库**（`webview.cpp` / `quickjs.cpp` / `ffmpeg.cpp`），没有自研头文件。
+- 三个库基本都是**单文件成库**（`webview.cpp` / `quickjs.cpp` / `ffmpeg.cpp`），
+  webview.cpp 里内联了手写的 COM options（`ICoreWebView2EnvironmentOptions`）。
   新增同类小库可以照此办；但一旦要拆，就按基线的 `.h` / `.cc` 规则拆，不要一边拆一边留半截。
 - 现有三个文件**平铺、没有 namespace**，内部链接用 `static`。**不要求回改它们**；
   但**新增的共享库**建议按基线用命名空间包裹整体。
 - 注释语言与格式：**中文 + 行注释 `//` + 文档注释 `/** … */`**，完整规则在
   [`comments.md`](./comments.md)（四种文件同一套）。现状并不统一：`webview.cpp` 以中文为主、
   `quickjs.cpp` 近乎全英文、`ffmpeg.cpp` 几乎无注释 —— 新代码一律按 `comments.md` 写。
-- 现有 `webview.cpp` 里用宏 `WV_JNI(...)` 生成 JNI 函数名，另两个库手写全名。**新增时照抄同一个库
+- `webview.cpp` 手写 JNI 全名（一条一个导出，便于 grep），另两个库用宏 `WV_JNI(...)`生成。**新增时照抄同一个库
   现有的做法**，不要在一个文件里混用两种。

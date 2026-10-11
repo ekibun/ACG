@@ -2,9 +2,7 @@ package soko.ekibun.web
 
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import java.net.InetSocketAddress
@@ -30,25 +28,26 @@ import kotlin.test.fail
  * 1. **子资源在拦截回调里看得见**（`<script src>`），且 `isForMainFrame == false`、
  *    `method` / `headers` 都是真值。
  * 2. **脚本注入拿得回结果**，且 DOM 里确实有子资源产生的副作用。
- * 3. **cookie 在不同任务之间是共享的** —— 两次任务走的是同一个 environment
- *    （同一份 user data folder）。可见页与后台页共用同一份存储靠的就是这个机制。
- * 4. **可见视图的 `evaluate` 拿得回结果** —— `nativeScriptResult` 那条管道的收件人接上了。
+ * 3. **cookie 在不同任务之间是共享的** —— 两次任务走的是同一个 user data folder
+ *    （可见页与后台页共用同一份存储靠的就是这个机制）。
+ * 4. **可见视图的 `evaluate` 拿得回结果** —— `ExecuteScript` 那条管道的收件人接上了。
  * 5. **拦截回调全程放行也能把页面跑完** —— 回调在每个请求上都被调了不止一次，
  *    一次都不命中时整轮仍以「脚本跑完」收场。（注意别写成「命中 → 放行」：
- *    真引擎里命中即 `Stop()`，那条时序不可达 —— 见 `releasingEveryRequestLetsPageFinish`。）
+ *    命中即 `Stop()`，整轮加载当场中止，那条时序不可达 —— 见
+ *    `releasingEveryRequestLetsPageFinish`。）
  *
  * 环境不满足时这几个用例都跳过：这测的是集成，不是环境。跳过前会先跑一次
  * [checkHost] 体检（真导航一个 `about:blank`），并把原因打到 stdout ——
  * 静默跳过容易让人误以为「验过了」。
  *
- * 注意 `loadBackgroundWebView` 用的是 [`BACKGROUND_WEBVIEW_TIMEOUT_MS`] = 30s，
+ * 注意 `loadBackgroundWebView` 用的是 [BACKGROUND_WEBVIEW_TIMEOUT_MS] = 30s，
  * 这里外面再套一层 60s 的护栏，免得真出问题把构建挂死。
  *
  * 正因为不走 `_binding`，本类证明不了 `JsEngine` 的 `when` 派发改对了 ——
  * 那一路由 [soko.ekibun.acg.engine.JsEngineDispatchTest] 管（零桩、真 `JsEngine`）。
  * 两类合起来才覆盖两端：本类验宿主，那个验能力桥的派发形状。
  */
-class NativeWebViewHostTest {
+class WebViewHostTest {
   private lateinit var server: HttpServer
   private lateinit var serverPool: ExecutorService
   private var port = 0
@@ -89,7 +88,7 @@ class NativeWebViewHostTest {
 
   private fun webViewReady(): Boolean {
     val reason = hostHealth ?: return true
-    println("[NativeWebViewHostTest] skip: $reason")
+    println("[WebViewHostTest] skip: $reason")
     return false
   }
 
@@ -174,12 +173,10 @@ class NativeWebViewHostTest {
    * 摆在脚本面前的那个选择里，`null` 这一支到底通不通。
    *
    * **别把它写成「命中 → 放行」**：那条时序在真引擎里**不可达**。
-   * `cxx/webview/webview.cpp` 的 `RequestHandler::Invoke` 里，一旦回调返回命中就
-   * 置 `view->settled = true` 并立刻 `webview->Stop()`；而同一个 `Invoke` 的开头
-   * 还有 `if (!view || view->settled) return S_OK;` —— 也就是说**命中之后连回调
-   * 都不会再被调一次**，更谈不上「再放行一次」。实测也印证了：在 `/sub.png` 上命中、
-   * 主框架与 `<script>` 上返回 null，整轮仍然以 `Intercepted` 收场（`outcome.complete`
-   * 幂等、取第一个终态，命中那一刻结果就定了）。
+   * `cxx/webview/webview.cpp` 的 `WebResourceRequested` 回调里，一旦 JVM 侧返回
+   * 命中，native 立刻给一个空 204 并 `webview_->Stop()` —— 整轮加载当场中止，
+   * 不会再有第二次回调。结果在命中那一刻就定了（`loadBackgroundWebView` 的
+   * `outcome.complete` 幂等、只取第一个终态）。
    *
    * 回调在每一次请求上都被调了不止一次，这本身也是「放行不影响加载」的证据。
    */
@@ -233,9 +230,10 @@ class NativeWebViewHostTest {
   /**
    * cookie 跨任务共享。
    *
-   * 两次任务各自建一个隐藏窗口，但 environment（→ 浏览器进程 → cookie 存储）是
-   * 同一个。这正是「可见页和后台页共用一套登录态」的实现机制，所以这里用两次
-   * 后台任务来验它。分开的 environment 会让第二次读到空 cookie。
+   * 两次任务各自建一个自己的 environment，但 **user data folder 是同一份**
+   * （`Webview2Context.defaultUserDataDir`），所以 cookie 存储也是同一份。
+   * 这正是「可见页和后台页共用一套登录态」的实现机制，所以这里用两次后台任务来验它。
+   * 分开的目录会让第二次读到空 cookie。
    *
    * **用带 `max-age` 的持久 cookie，而不是 session cookie** —— 这一点踩过坑：
    *
@@ -247,8 +245,7 @@ class NativeWebViewHostTest {
    *
    *   对产品的影响是有限的：可见页开着的时候浏览器进程就活着，后台任务照样看得到
    *   它写的 session cookie（登录态的常见路径）。真正会丢的只有「所有视图都关掉、
-   *   只剩后台任务在跑」这种场景。真要让 session cookie 也熬过空窗期，得留一个
-   *   常驻的 keep-alive WebView 把浏览器进程钉住。
+   *   只剩后台任务在跑」这种场景。
    */
   @Test
   fun cookiesAreSharedAcrossTasks() =
@@ -286,19 +283,18 @@ class NativeWebViewHostTest {
     }
 
   /**
-   * 可见视图上的 `evaluate` —— 和后台任务同一个 `ExecuteScript`，只是结果走
-   * `nativeScriptResult` 那条管道。**这条管道的收件人是 `WebViewTask.onScriptResult`
-   * 这一侧的回调**，它空着的时候结果回到 native 就掉地上了，所以这条用例锁的就是
-   * 「收件人接上了」。
+   * 可见视图上的 `evaluate` —— 和后台任务同一个 `ExecuteScript`，只是收件人换成了
+   * [WebviewContext.executeScript] 挂的那个 `CompletableDeferred`。**这条管道以前
+   * 没有收件人**（结果回到 native 就掉地上了），所以这条用例锁的就是「接上了」。
    *
    * **不 attach 也能测**，这也是它能在 jvmTest 里跑的原因：
    *
-   * - 可见视图建出来就是 `createViewWindow(nullptr, ...)` 一个**隐藏的顶层窗口**，
-   *   父子关系要等 `attachView`（经 JAWT 取 AWT 组件的 HWND）才建立 —— 测试里没有
-   *   AWT 组件，它就一直是个没有父窗口的隐藏窗口，**附到桌面上**；
+   * - 上下文建出来就是隐藏的顶层窗口，父子关系要等 [WebviewContext.attach]（经
+   *   JAWT 取 AWT 组件的 HWND）才建立 —— 测试里没有 AWT 组件，它就一直是个没有
+   *   父窗口的隐藏窗口，**附到桌面上**；
    * - `ExecuteScript` 既不要求窗口可见，也不要求它有父窗口。
    *
-   * 所以这里完全不碰 AWT，只验「建视图 → 等文档 → 执行脚本 → 拿回值」。
+   * 所以这里完全不碰 AWT，只验「建上下文 → 导航 → 执行脚本 → 拿回值」。
    * 反过来，涉及 attach / 尺寸跟随 / 焦点的部分**在 jvmTest 里测不了**，那需要真的
    * 组合树和窗口（得起 Compose 窗口，会真弹出来）。
    */
@@ -307,41 +303,27 @@ class NativeWebViewHostTest {
     runBlocking {
       if (!webViewReady()) return@runBlocking
 
-      val handle =
-        guarded {
-          withContext(Dispatchers.IO) {
-            NativeWebView.createView(
-              url = url("/page.html"),
-              userAgent = null,
-              enableDevtools = false,
-              zoom = 1.0,
-            )
+      val ctx = WebviewContext()
+      val loaded = CompletableDeferred<Unit>()
+      ctx.listener =
+        object : WebviewContext.Listener {
+          override fun onEvent(
+            event: String,
+            data: String,
+          ) {
+            if (event == "navigationCompleted") loaded.complete(Unit)
           }
         }
-      assertTrue(handle != 0L, "cannot create the visible view - local WebView2 may be misbehaving, check native logs")
-
-      val ready = CompletableDeferred<Unit>()
-      val loaded = CompletableDeferred<Unit>()
       try {
-        NativeWebView.addViewListener(handle) { what, a, _ ->
-          if (what == NativeWebView.EVENT_READY) ready.complete(Unit)
-          // 控制器就绪之后才导航，加载完成（loading=0）才有文档可以跑脚本。
-          if (what == NativeWebView.EVENT_LOADING && a == "0") loaded.complete(Unit)
-        }
-        // 没 attach 的视图没有「父窗口客户区」可用，尺寸得自己给；否则 controller
+//        guarded { ctx.start() }
+        // 没 attach 的上下文没有「父窗口客户区」可用，尺寸得自己给；否则 controller
         // 一直是 0×0，页面未必会真的排版。
-        NativeWebView.setViewBounds(handle, 800, 600)
-
-        guarded {
-          ready.await()
-          loaded.await()
-        }
+        ctx.setBounds(800, 600)
+        ctx.navigate(url("/page.html"))
+        guarded { loaded.await() }
 
         val json =
-          NativeWebView.evaluateScript(
-            handle,
-            "({ sub: !!window.__subLoaded, imgs: document.images.length })",
-          )
+          ctx.executeScript("({ sub: !!window.__subLoaded, imgs: document.images.length })")
         assertTrue(json != null, "evaluate must return a result, got null (timeout or script failure)")
         assertTrue(json.contains("\"sub\":true"), "the external script should have run: $json")
         assertTrue(json.contains("\"imgs\":1"), "the image subresource should be in the DOM: $json")
@@ -351,12 +333,11 @@ class NativeWebViewHostTest {
         // 故后台脚本没返回值时拿到 `null` 而非 `undefined`（要不要对齐取决于插件有没有依赖它）。
         assertEquals(
           "null",
-          NativeWebView.evaluateScript(handle, "undefined"),
+          ctx.executeScript("undefined"),
           "没有返回值的脚本应该给 JSON 的 null 字符串",
         )
       } finally {
-        NativeWebView.removeViewListener(handle)
-        NativeWebView.destroyView(handle)
+        ctx.close()
       }
     }
 
@@ -364,7 +345,7 @@ class NativeWebViewHostTest {
     contentType: String,
     body: ByteArray,
   ) {
-    println("[NativeWebViewHostTest] server got $requestMethod $requestURI")
+    println("[WebViewHostTest] server got $requestMethod $requestURI")
     responseHeaders.add("Content-Type", contentType)
     sendResponseHeaders(200, body.size.toLong())
     responseBody.use { it.write(body) }
@@ -399,10 +380,6 @@ class NativeWebViewHostTest {
      * @return null 表示健康；否则是给人看的跳过原因。
      */
     fun checkHost(): String? {
-      NativeWebView.ensureStarted().exceptionOrNull()?.let { cause ->
-        return "WebView2 环境不可用 —— ${cause.message}"
-      }
-
       // about:blank 不碰网络，能把「运行时坏」和「本地 HTTP 服务/网络有问题」分开。
       val result =
         runBlocking {

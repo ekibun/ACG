@@ -26,7 +26,8 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
   `desktopApp/build/compose/tmp/prepareAppResources/`（run 与打包共用 `syncNativeResources` 喂料）、
   打包态 `<app-image>/app/resources/`。打包侧 `createDistributable` 已把 `nativeResources` 登记成显式
   输入（插件的 `appResourcesDir` 是 @Internal、不进 up-to-date 判据），打出旧包时用 `--rerun` 复查。
-  加载侧按什么顺序找库，正本在 `jni.jvm.kt` 的 `jniLoadLibrary` KDoc；运行态反复走到兜底解包，
+  加载侧按什么顺序找库，正本在 `platform/src/jvmMain/kotlin/soko/ekibun/Binding.jvm.kt`
+  的 `loadLibrary` KDoc；运行态反复走到兜底解包，
   就是资源布局回归。
 - **Hot Reload 换不了 native 库**：`System.load` 是进程启动时做的，热重载只换 Kotlin 类 ——
   改完 `cxx/` 必须整进程重启，否则你以为在测新代码，其实跑的是旧 dll（症状：修复「没生效」）。
@@ -62,19 +63,27 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
 
 ## JNI
 
-- 符号是**不带签名的名称导出**：`Java_soko_ekibun_web_NativeWebView_<name>`。
+- 符号是**不带签名的名称导出**：`Java_soko_ekibun_web_WebviewContext_<name>`。
   改了 Kotlin 侧的方法签名却用着旧 dll，**不会报错**，只会参数错位 ——
   改签名后第一件事是确认 dll 真的刷新到了运行位置。
 - 绑定收在 `:platform` 模块：`platform/src/{commonMain,jvmMain,androidMain}/kotlin/soko/ekibun/jni.kt`
   与 `soko.ekibun.{quickjs, ffmpeg, web}`。webview 整层（JNI 面
-  `platform/src/jvmMain/kotlin/soko/ekibun/web/NativeWebView.jvm.kt` 与控制器
+  `platform/src/jvmMain/kotlin/soko/ekibun/web/WebviewContext.kt` 与控制器
   `WebView.jvm.kt` / `BackgroundWebView.jvm.kt`）都在这个模块。
   （2026-10-02 拍板把整个 web 文件夹移出 `acg`，JNI 符号随之从 `_acg_web_` 变 `_web_`）——
   包名别再动：那会又改 JNI 导出名，连带重编 dll。
-- **加载方式三个库统一**：都走 `jniLoadLibrary()`，它优先加载**应用资源目录 / classpath 资源目录
+- **加载方式三个库统一**：都走 `loadLibrary()`，它优先加载**应用资源目录 / classpath 资源目录
   里的真文件**（打包态与开发态都不解包），两条都不成立才退到 `System.loadLibrary`。
   ⇒ 「`WebView2Loader.dll` 必须与 `webview.dll` 同级」这条要求由资源布局直接满足 —— 两者在
-  那些目录里本来就挨着，Windows 按 DLL 自己所在目录找得到。
+  那些目录里本来就挨着，依赖解析优先按被加载 dll 自己所在目录找（实测如此）。
+- **`webview.dll` 的两个依赖都是隐式导入**：`webview.cmake` 把 `WebView2Loader.dll` 与
+  `$JAVA_HOME/bin/jawt.dll` **直接当链接输入**（GNU ld 读导出表就地合成导入表；官方 SDK 与
+  JDK 都只给 dll，`.lib` 要么在 NuGet 里、要么是 MSVC 的 COFF 归档 GNU ld 读不了）。
+  ⚠️ 后果是解析失败发生在**映射那一刻**，表现为 `System.load` 抛
+  `UnsatisfiedLinkError`、**整个 JVM 起不来**，native 侧没有机会报错。
+  `WebviewContext.kt` 伴生对象的 `init` 因此**先加载两个依赖再加载 webview**
+  （已加载模块排在搜索路径之前，`jawt.dll` 靠 `java.library.path` = `java.home\bin` 那一档
+  命中）—— **顺序反了就不成立**，别把这三行调换。
 - native 调用都要回 `dispatcher` 线程（`QuickJS.kt` 里的做法照抄）。
 - **Kotlin 侧 `external fun` 声明在哪，决定 JNI 名**（可见性不影响）：
   - 声明在**类体**里 → 编译成**实例**原生方法，JNI 名就是外层类名
@@ -102,7 +111,9 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
   自定义 `AdditionalBrowserArguments` 和 CDP 访问；现成的 KMP WebView 封装把钩子挂在导航事件上，
   换过去这些能力全部丢失。自研宿主没有这个限制。
 - 子资源拦截：`add_WebResourceRequested` + `AddWebResourceRequestedFilter(L"*", ALL)`，
-  端到端用例 `NativeWebViewHostTest.subResourcesAreVisibleToInterceptor`。
+  端到端用例 `WebViewHostTest.subResourcesAreVisibleToInterceptor`。
+- JNI 面的冒烟用例 `Webview2Test`（`:platform:jvmTest`）：建上下文 → 导航 → 归还，
+  只验「宿主起得来」，不锁行为细节 —— 行为细节归 `WebViewHostTest`。
 - `WebView2.h` 在 MinGW 下能编，但 SDK 的 C++ 辅助类（如 `WebView2EnvironmentOptions.h`）
   依赖 MSVC 专有的 `Microsoft::WRL::RuntimeClass`，MinGW 的 WRL 只移植了 `ComPtr` —— 别去引那些头。
 - **页面脚本注入为零**：`initScript` 已整体删除，`put_IsWebMessageEnabled` 恒 `FALSE`。

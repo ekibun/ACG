@@ -6,9 +6,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
-import soko.ekibun.web.NativeWebView
+import soko.ekibun.web.WebviewContext
 import java.awt.Dimension
-import java.io.File
 
 /**
  * 桌面入口。
@@ -20,15 +19,15 @@ import java.io.File
  * JAWT 只在 AWT 后端有东西可取，所以窗口必须是 AWT 的。
  *
  * 插件 JS 的「后台 WebView」**不需要额外窗口**：自研的 `cxx/webview` 宿主自己建
- * 隐藏窗口 + 自己的消息泵。`App()` 里的 `BackgroundWebViewHost()` 只是预热。
+ * 隐藏窗口 + 自己的消息泵，调用时才创建（宿主线程与 environment 进程内共享，
+ * 每个上下文只开自己的窗口），
+ * 所以 `App()` 里的 `BackgroundWebViewHost()` 在桌面端是个空实现。
+ *
+ * user data folder（cookie / 登录态落在哪）由 web 组件自己按回退链定
+ * （`Webview2Context.defaultUserDataDir`），App 层不必再指定 —— 可见页与后台页都是
+ * 同一份，登录态天然共享。
  */
 fun main(args: Array<String>) {
-  // WebView2 的 user data folder（cookie / 登录态）：App 启动时显式传入，对齐
-  // Android 由 App 提供 `Context` 的模式 —— 目录是 App 层的决定，web 组件不自己猜。
-  // LOCALAPPDATA 取不到时不设置，web 组件走它自己的回退链。
-  System.getenv("LOCALAPPDATA")?.takeIf { it.isNotBlank() }?.let {
-    NativeWebView.setUserDataDir(File(it, "ACG/webview2"))
-  }
   application {
     Window(
       onCloseRequest = ::exitApplication,
@@ -42,4 +41,5 @@ fun main(args: Array<String>) {
       App()
     }
   }
+  WebviewContext.releaseEnvironment()
 }

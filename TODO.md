@@ -227,7 +227,7 @@
     `offset` 8→6、`private` 的 `channelOrNull` **8→1**、`applyOptions` 去掉签名复述、  
     删掉「移除自动带上的 Cookie」这类复述，`requestStreaming` 体内三处各压 1 行；
   - **函数体内 `//` ≥ 5 行的 11 处全部收掉**（最长 `QuickJS.kt` 12→2、`HttpIO.kt` 9→4、  
-    `NativeWebViewHostTest.kt` 8→3、`JsEngine.kt` 7→3 与 5→3、`FileIOTest` 5→3、  
+    `WebViewHostTest.kt` 8→3、`JsEngine.kt` 7→3 与 5→3、`FileIOTest` 5→3、  
     `AvFormat` 5→3 等），**现在 ≥ 5 行为 0**；行内注释 ≤ 2 行的占比 80% → 81%（animeko 93%）。
 - **剩下不动的**（密度高但内容该留）：
   - `player/Playback.kt`：另 4 行是短契约句与 `updateAspectRatio` 那个「避免每帧写快照」的  
