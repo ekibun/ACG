@@ -6,6 +6,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import soko.ekibun.common.closeWebViewCookieStorage
 import soko.ekibun.web.WebviewContext
 import java.awt.Dimension
 
@@ -41,5 +42,6 @@ fun main(args: Array<String>) {
       App()
     }
   }
+  closeWebViewCookieStorage()
   WebviewContext.releaseEnvironment()
 }

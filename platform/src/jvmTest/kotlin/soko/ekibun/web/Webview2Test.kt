@@ -10,6 +10,25 @@ class Webview2Test {
     runBlocking {
       WebviewContext.prepareEnvironment()
       WebviewContext().use { ctx ->
+        ctx.listener =
+          object : WebviewContext.Listener {
+            override fun onEvent(
+              event: String,
+              data: String,
+            ) {
+              println("onEvent($event, $data)")
+            }
+
+            override fun onWebResourceRequested(
+              url: String,
+              method: String,
+              isForMainFrame: Boolean,
+              headers: Map<String, String>,
+            ): Boolean {
+              println("onWebResourceRequested($url, $method $isForMainFrame ${headers.toList()})")
+              return false
+            }
+          }
         ctx.navigate("https://www.google.com")
         Thread.sleep(10000)
       }

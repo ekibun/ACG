@@ -151,7 +151,92 @@ class WebviewContext : Pointer(dispatcher = dispatcher) {
     @JvmStatic
     private external fun focus(ptr: Long)
 
+    /**
+     * 读 url 下的 cookie，摊平成 `"n1=v1; n2=v2"` 经 [CookieCallback.onResult] 回来；
+     * 没有 cookie 也给空串。回调只来一次。走**本上下文自己**的 cookie manager（native
+     * 侧在 controller 就绪时一次取好缓存，随取随用）。
+     */
+    @JvmStatic
+    private external fun getCookie(
+      ptr: Long,
+      url: String,
+      callback: CookieCallback,
+    )
+
+    /**
+     * 写一个 cookie（结构化字段）到**本上下文自己**的 manager。域 / 路径
+     * 缺省由 Kotlin 端按 url 推好再传进来。`expiresEpochSeconds > 0` 表示带过期时间
+     * （自 Unix 纪元起的秒），否则会话 cookie。`sameSite`：0=NONE, 1=LAX, 2=STRICT。
+     */
+    @JvmStatic
+    external fun setCookie(
+      ptr: Long,
+      name: String,
+      value: String,
+      domain: String,
+      path: String,
+      expiresEpochSeconds: Double,
+      isSecure: Boolean,
+      isHttpOnly: Boolean,
+      sameSite: Int,
+    )
+
+    /** `getCookie` 的结果收件人 —— 由 native 线程直接调进来，故 [Keep]。 */
+    @Keep
+    abstract class CookieCallback {
+      @Keep
+      abstract fun onResult(cookies: String)
+    }
+
     private const val SCRIPT_TIMEOUT_MS = 15_000L
+
+    /** cookie 读写的超时（比脚本短，读不到就当没有，别卡住请求）。 */
+    internal const val COOKIE_TIMEOUT_MS = 5_000L
+  }
+
+  /**
+   * 读 url 下的 cookie，返回 native 摊平的
+   * `"n1=v1; n2=v2"`（没有则空串）。
+   */
+  suspend fun getCookie(url: String): String =
+    withPtr { ptr ->
+      val result = CompletableDeferred<String>()
+      getCookie(
+        ptr,
+        url,
+        object : CookieCallback() {
+          override fun onResult(cookies: String) {
+            if (result.isActive) result.complete(cookies)
+          }
+        },
+      )
+      return@withPtr withTimeoutOrNull(COOKIE_TIMEOUT_MS.milliseconds) { result.await() } ?: ""
+    }
+
+  /**
+   * 写一个 cookie 到本上下文自己的 manager。字段口径同 [setCookie]。
+   */
+  suspend fun setCookie(
+    name: String,
+    value: String,
+    domain: String,
+    path: String,
+    expiresEpochSeconds: Double,
+    isSecure: Boolean,
+    isHttpOnly: Boolean,
+    sameSite: Int,
+  ) = withPtr { ptr ->
+    setCookie(
+      ptr,
+      name,
+      value,
+      domain,
+      path,
+      expiresEpochSeconds,
+      isSecure,
+      isHttpOnly,
+      sameSite,
+    )
   }
 
   override fun initPtr(): Long = initContext(this)
