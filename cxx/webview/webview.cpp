@@ -535,27 +535,30 @@ class WebviewContext
   }
 
   ~WebviewContext() {
-    // 顺序不能反。归还跑在**调用线程**上（Kotlin 侧 dispatcher 的线程，
-    // 不是建窗口那条 STA），而 `pending_` 里的闭包归属宿主线程 ——
-    // 先清掉它们，宿主线程才不会在下面那几个 `Reset` 之后还去跑残留
-    // 闭包（那时 `webview_` / `ctrl_` 已经空了）。传 `nullptr` 让每个
-    // 闭包在 `post` 的包装层直接返回，所以这一步只清队列、不碰 COM。
-    flushPending(nullptr);
-    // 摘除之后宿主线程遍历 `handlers_` 时不会再拿到本对象（遍历持
-    // `mu_`，与本函数互斥），此时的 `Reset` 才没有并发对手。
-    WebviewEnviorment::instance().unregisterHandler(this);
     ctrl_.Reset();
     webview_.Reset();
     webview2_.Reset();
     cookieManager_.Reset();
-    if (hwnd_) PostMessage(hwnd_, WM_CLOSE, 0, 0);
   }
   void release(JNIEnv* env) {
-    std::lock_guard<std::mutex> lock(mu_);
-    if (ctx_) {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (ctx_ == nullptr) return;  // 幂等：已释放过直接 no-op
       env->DeleteGlobalRef(ctx_);
-      ctx_ = nullptr;
+      ctx_ = nullptr;  // 之后新起回调经 getCtx 早退
     }
+    // 排空 pending_ 闭包（传 nullptr → 包装层直接返回，不碰
+    // COM），并摘除处理器，
+    // 使宿主线程不再拿到本对象。这两步都在锁外，无重入死锁。
+    flushPending(nullptr);
+    WebviewEnviorment::instance().unregisterHandler(this);
+    // hwnd 有效且 PostMessage 成功 → 销毁在 STA 上发生（WM_CLOSE 由消息泵处理，
+    // FIFO 排在在飞回调之后）；否则（无窗口 /
+    // 线程已死，投递失败）直接删，防泄漏。 注意 delete this
+    // 必须在锁外，否则析构销毁 mu_ 后 lock_guard 再 unlock → UB。
+    if (!(hwnd_ &&
+          PostMessage(hwnd_, WM_CLOSE, 0, reinterpret_cast<LPARAM>(this))))
+      delete this;
   }
   bool post(std::function<void(WebviewContext*)> fn) {
     return post_([&, fn](ICoreWebView2Environment* env) {
@@ -887,6 +890,7 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
     case WM_CLOSE:
       DestroyWindow(hwnd);
+      if (lp) delete reinterpret_cast<WebviewContext*>(lp);
       return 0;
   }
   return DefWindowProcW(hwnd, msg, wp, lp);
@@ -984,7 +988,6 @@ Java_soko_ekibun_web_Webview2Context_initContext(JNIEnv* env, jclass,
     return reinterpret_cast<jlong>(ptr);
   } else {
     ptr->release(env);
-    delete ptr;
     return 0;
   }
 }
@@ -995,7 +998,6 @@ Java_soko_ekibun_web_Webview2Context_releaseContext(JNIEnv* env, jclass,
   if (pctx != 0) {
     auto ptr = reinterpret_cast<WebviewContext*>(pctx);
     ptr->release(env);
-    delete ptr;
   }
 }
 
