@@ -9,7 +9,10 @@ package soko.ekibun.common
  */
 object File {
   /** 打开 [path] 处的文件；失败（不存在、没有权限）返回 null。 */
-  fun open(path: String): FileHandle? = openFileHandle(path)
+  fun open(
+    path: String,
+    mode: String,
+  ): FileHandle? = openFileHandle(path, mode)
 }
 
 /**
@@ -38,4 +41,7 @@ interface FileHandle {
  * native 仍会继续用返回值，症状是更难查的崩溃。失败统一表现为读取方返回 -1，
  * 最终由 `avformat_open_input` 报"打不开"。
  */
-expect fun openFileHandle(path: String): FileHandle?
+internal expect fun openFileHandle(
+  path: String,
+  mode: String,
+): FileHandle?

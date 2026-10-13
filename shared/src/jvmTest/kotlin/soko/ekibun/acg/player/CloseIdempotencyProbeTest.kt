@@ -1,7 +1,8 @@
-package soko.ekibun.common
+package soko.ekibun.acg.player
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
+import soko.ekibun.acg.common.Http
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit

@@ -11,32 +11,27 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withTimeout
 import kotlinx.io.bytestring.ByteString
 import kotlinx.io.bytestring.decodeToString
-import soko.ekibun.common.Http
+import soko.ekibun.acg.common.Http
 import soko.ekibun.quickjs.JSError
 import soko.ekibun.quickjs.JSFunction
 import soko.ekibun.quickjs.JSInvokable
 import soko.ekibun.quickjs.JSRef
 import soko.ekibun.quickjs.QuickJS
-import soko.ekibun.quickjs.freeRecursive
 import soko.ekibun.web.WebViewEvent
 import soko.ekibun.web.createWebviewContext
+import soko.ekibun.web.getWebviewCookieManager
+import kotlin.time.Duration.Companion.seconds
 
 class JsEngine {
   companion object {
     val instance by lazy { JsEngine() }
-
-    /** [webviewAsync] 与 `init.js` 里内联的 `webview` wrapper 约定的结果标记键。 */
-    private const val WEBVIEW_KIND_KEY = "__webview_kind__"
   }
 
   private var quickjsDelegate: QuickJS? = null
@@ -106,19 +101,50 @@ class JsEngine {
                         "_opaque" to rsp,
                       )
                     }
+
                   "Response.arrayBuffer" ->
                     CoroutineScope(Dispatchers.IO).async {
                       (args[0] as Http.Response).readAll()
                     }
+
+                  "Cookies.get" ->
+                    CoroutineScope(Dispatchers.IO).async {
+                      getWebviewCookieManager().get(args[0] as String)
+                    }
+
+                  "Cookies.set" ->
+                    CoroutineScope(Dispatchers.IO).async {
+                      getWebviewCookieManager().set(args[0] as String, args[1] as String)
+                    }
                   // webview 的 4 个实参打进 args，不是位置参数。args[3] 是回调，
-                  // 它的归属语义见 [webviewAsync]。
+                  // 它的归属语义见 [webviewAsync]：JS 函数引用由 asyncReleasing 收尾，
+                  // 并在本地包一层拦截器转成本地回调。
                   "webview" ->
-                    webviewAsync(
-                      args[0] as String,
-                      args[1] as Map<Any, Any?>?,
-                      args[2] as String?,
-                      args[3] as JSFunction?,
-                    )
+                    CoroutineScope(Dispatchers.IO).asyncReleasing(args[3] as JSFunction?) {
+                      webviewAsync(
+                        args[0] as String,
+                        args[1] as Map<Any, Any?>?,
+                        args[2] as String?,
+                        (args[3] as JSFunction?)?.let { fn ->
+                          { url, headers, method, isForMainFrame ->
+                            try {
+                              fn.invoke(
+                                mapOf(
+                                  "url" to url,
+                                  "headers" to headers,
+                                  "method" to method,
+                                  "isForMainFrame" to isForMainFrame,
+                                ),
+                              )
+                            } catch (e: Throwable) {
+                              e.printStackTrace()
+                              false
+                            }
+                          }
+                        },
+                      )
+                    }
+
                   else -> throw JSError("unknown method '${argv[0]}'")
                 }
               },
@@ -211,249 +237,96 @@ class JsEngine {
   /**
    * 后台 WebView 桥 —— 插件 JS 里的 `webview(url, header, script, onInterceptRequest)`。
    *
-   * 两处有意的差异：
+   * 返回**原始值**，由 `init.js` 里的 `webview` wrapper 自己判断形状：
    *
-   * 1. 返回 [Deferred]（JS 侧是 Promise），不阻塞 —— QuickJS 只有一个事件循环，
-   *    照参照实现那样 `Thread.sleep` 等加载会把整个引擎锁死；
-   * 2. 结果多包一层 [WEBVIEW_KIND_KEY]，好让 JS wrapper 区分「命中拦截」与
-   *    「脚本返回值」—— 两者都可能是任意对象，不加标记无从判别。
+   * - 命中拦截：回 `{ url, headers }` 对象；
+   * - 脚本返回值：回 JSON 字符串（可能为空串 / null）；
+   * - 无脚本：回 `null`。
    *
-   * `onInterceptRequest` 是全图里**唯一**要归还的东西：函数仍以 [JSFunction]
-   * 包装存在、持着一票，而且它要活到 WebView 任务结束（早还就会让回调打在已经
-   * 释放的包装上），所以交给 [asyncReleasing]。
+   * 失败（环境起不来 / 导航失败 / 超时）抛 [JSError]，让 JS 侧 Promise reject，
+   * 而不是回一个让脚本误判的空值。
    *
-   * `header` 不用归还 —— 它和 `options` 一样，已经被整图展开成纯数据的 `Map`。
+   * [interceptor] 是 `onInterceptRequest` 的 Kotlin 落地：返回**非 null 且非 false** 的值即命中、
+   * 中止加载，并用该值直接 `complete` 后台任务结果（脚本侧拿到什么就是什么）；返回 `null` / `false`
+   * 放行。它**不是** [JSFunction] —— JS 侧来的函数引用由调用方（`_binding`）包一层转成本地回调，
+   * 票也由调用方归还。
+   *
+   * 骨架只有这一份：建 headless 上下文（失败即抛 [JSError]）→ 配拦截回调 → 导航 →
+   * 等第一个终态（拦截命中 / 脚本结果 / 加载失败）→ 超时兜底 → `finally` 销毁。
+   * 终态只取第一个 —— `CompletableDeferred.complete` 幂等，之后的重复事件自然被忽略
+   * （Android 拦截命中后 `onPageFinished` 仍会到；桌面命中后的 Stop 会引出一个被
+   * native 吞掉的 OperationCanceled）。
    */
-  private fun webviewAsync(
+  internal suspend fun webviewAsync(
     url: String,
     header: Map<Any, Any?>?,
     script: String?,
-    onInterceptRequest: JSFunction?,
-  ): Deferred<Any?> =
-    CoroutineScope(Dispatchers.IO).asyncReleasing(onInterceptRequest) {
-      val task =
-        WebViewTask(
-          url = url,
-          headers =
-            header?.entries?.associate { it.key.toString() to it.value.toString() }
-              ?: emptyMap(),
-          script = script,
-          onInterceptRequest =
-            onInterceptRequest?.let { fn ->
-              { url: String, headers: Map<String, String>, method: String, isForMainFrame: Boolean ->
-                invokeInterceptor(fn, url, headers, method, isForMainFrame)
-              }
-            },
-        )
+    interceptor: ((url: String, headers: Map<String, String>, method: String, isForMainFrame: Boolean) -> Any?)?,
+  ): Any? {
+    // header 展开成纯数据 Map，并补齐后台加载默认要带的 Referer（对齐 http.js：
+    // header.referer = header.referer || url）。
+    val normalized =
+      header?.entries?.associate { it.key.toString() to it.value.toString() } ?: emptyMap()
+    val baseHeaders =
+      if (normalized.keys.any { it.equals("Referer", ignoreCase = true) }) {
+        normalized
+      } else {
+        normalized + ("Referer" to url)
+      }
 
-      val payload: Any? =
-        when (val result = loadBackgroundWebView(task)) {
-          is WebViewTaskResult.Intercepted ->
-            mapOf(
-              WEBVIEW_KIND_KEY to "intercept",
-              "value" to
-                mapOf(
-                  "url" to result.url,
-                  "headers" to result.headers,
-                ),
-            )
-
-          is WebViewTaskResult.Scripted ->
-            mapOf(
-              WEBVIEW_KIND_KEY to "script",
-              "value" to result.json,
-            )
-
-          // 失败要让 JS 侧 reject，而不是回一个空值让脚本去猜哪一步没生效。
-          is WebViewTaskResult.Failed -> throw JSError(result.message)
-        }
-      payload
-    }
-
-  /**
-   * 把 WebView 的拦截回调转给 JS 侧的 `onInterceptRequest`，返回它的**真值** ——
-   * `true` = 命中。
-   *
-   * JS 回调抛错按放行处理 —— 一次回调出错不该把整次加载搞崩，但会把错误打到
-   * console 上，别让它无声无息。
-   *
-   * 回调收到的是 `{ url, headers, method, isForMainFrame }` 四个字段（Android 独有的
-   * `isRedirect` 两端对不齐，没上进接口）；老脚本 `return { url, headers }` 仍然命中
-   * （对象是真值），只是那份改写后的 url / headers 不再被采用 —— 回传给脚本的是
-   * **被拦下请求自己**的那一份。
-   *
-   * 它的返回值在 Kotlin 侧已经被 `jsToJava` 整图展开成 `Map` / `Array` 那样的纯数据，
-   * 数据本身没有票可还，但展开出来的图里可能嵌着函数包装（它们各持一票），所以收尾用
-   * `freeRecursive()` 穿透容器去还 —— 不还的话每拦一次请求就在 `QuickJS` 的登记表上
-   * 挂一笔。
-   *
-   * 调用时机：本函数跑在 WebView 的回调线程上，此时脚本正挂起等 `webviewAsync`
-   * 的结果，QuickJS 派发线程是空闲的，所以这里的 `fn.invoke` / `close`
-   * 都能安全地借道 `Pointer.withPtrSync` 落到 JS 线程（`fn.invoke` 内部就是它）。
-   */
-  private fun invokeInterceptor(
-    fn: JSFunction,
-    url: String,
-    headers: Map<String, String>,
-    method: String,
-    isForMainFrame: Boolean,
-  ): Boolean {
-    val ret =
+    val outcome = CompletableDeferred<Any?>()
+    // evaluate 要挂起等结果：平台回调线程（桌面是宿主线程，挂着消息泵）不能钉住，
+    // 脚本执行丢到 Dispatchers.IO 上（沿用 _binding 的 inline CoroutineScope(Dispatchers.IO) 派发，不另建 scope）。
+    val ctx =
       try {
-        fn.invoke(
-          mapOf(
-            "url" to url,
-            "headers" to headers,
-            "method" to method,
-            "isForMainFrame" to isForMainFrame,
-          ),
-        )
-      } catch (e: Throwable) {
-        console("error", listOf("onInterceptRequest 回调出错，按放行处理: $e"))
-        return false
+        createWebviewContext(isHeadless = true)
+      } catch (t: Throwable) {
+        throw JSError("Create webview failed：${t.message ?: t}")
       }
+
     try {
-      // 按 JS 真值判定：`null` / `undefined` / `false` / `0` / `""` 是放行，其余命中
-      // （对象也是真值，老脚本那种 `return { url, headers }` 因此仍然命中）。
-      return when (ret) {
-        null, false -> false
-        is Number -> ret.toDouble() != 0.0 && !ret.toDouble().isNaN()
-        is String -> ret.isNotEmpty()
-        else -> true
-      }
-    } finally {
-      ret.freeRecursive()
-    }
-  }
-}
-
-/** 一次后台 WebView 任务。字段与 `webview(url, header, script, onInterceptRequest)` 一一对应。 */
-data class WebViewTask(
-  val url: String,
-  val headers: Map<String, String> = emptyMap(),
-  /** 页面加载完成后注入并取回其返回值的脚本；null 表示不注入。 */
-  val script: String? = null,
-  /**
-   * 请求拦截：命中即中止加载，被拦下的 url + headers 经 [WebViewTaskResult.Intercepted]
-   * 回到脚本。入参是 `(url, headers, method, isForMainFrame)`，与平台侧
-   * `soko.ekibun.web.WebviewContext.onInterceptor` 同一个口径。
-   * **会在 WebView 的回调线程上被调用**，实现里不要假设自己在哪条线程。
-   *
-   * 硬约束：**不能从 JS 调用内部同步回调它** —— 脚本调 `webviewAsync` 时 `_binding`
-   * 仍在 native `evaluate` 里没返回，此时反向调 JS 是对引擎的重入，本桥会让整轮
-   * Promise 停摆（实测挂死不返回）。拦截回调必须来自平台侧
-   * （`shouldInterceptRequest` / `WebResourceRequested`），那一刻脚本正挂在 `await` 上。
-   */
-  val onInterceptRequest:
-    ((url: String, headers: Map<String, String>, method: String, isForMainFrame: Boolean) -> Boolean)? = null,
-) {
-  /**
-   * 补齐后台加载默认要带的头，对齐 `http.js`：`header.referer = header.referer || url`。
-   *
-   * 纯函数：不写传入的 [headers]，缺 `Referer` 时返回加了它的**新** Map —— 同一个
-   * [WebViewTask] 可能被跑不止一轮，改原对象会把上一轮的 `Referer` 带进这一轮。
-   */
-  fun effectiveHeaders(): Map<String, String> =
-    if (headers.keys.any { it.equals("Referer", ignoreCase = true) }) {
-      headers
-    } else {
-      headers + ("Referer" to url)
-    }
-}
-
-/** 一次后台 WebView 任务的结果。 */
-sealed interface WebViewTaskResult {
-  /** 命中了 [WebViewTask.onInterceptRequest]：回传**被拦下那个请求自己**的 url + headers。 */
-  data class Intercepted(
-    val url: String,
-    val headers: Map<String, String>,
-  ) : WebViewTaskResult
-
-  /** [WebViewTask.script] 的返回值，已由平台侧序列化成 JSON 字符串（可能为 null）。 */
-  data class Scripted(
-    val json: String?,
-  ) : WebViewTaskResult
-
-  /**
-   * 没跑起来或者超时：WebView 环境不可用（比如 Windows 没装 WebView2 运行时）、
-   * 导航失败、脚本执行失败。
-   *
-   * 之所以要单独一个分支而不是简单返回 null：这些情况很容易被**静默降级成
-   * 空壳**（既不加载也不报错），脚本侧只会看到一个永远为空的结果。给一条明确的
-   * 失败信息，比让人去猜哪一步没生效强。
-   */
-  data class Failed(
-    val message: String,
-  ) : WebViewTaskResult
-}
-
-/** 后台任务的默认超时。`http.js` 是「页面加载完再等 10s」，这里给整轮一个上限。 */
-const val BACKGROUND_WEBVIEW_TIMEOUT_MS: Long = 30_000
-
-/**
- * 跑一次后台 WebView 任务；调用方挂起直到页面出结果、命中拦截或超时。
- *
- * 骨架只有这一份：建 headless 上下文（失败即 [WebViewTaskResult.Failed]）→ 配拦截
- * 回调 → 导航 → 等第一个终态（拦截命中 / 脚本结果 / 加载失败）→ 超时兜底 →
- * `finally` 销毁。终态只取第一个 —— `CompletableDeferred.complete` 幂等，之后的重复
- * 事件自然被忽略（Android 拦截命中后 `onPageFinished` 仍会到；桌面命中后的 Stop 会
- * 引出一个被 native 吞掉的 OperationCanceled）。
- *
- * 命中之后不再跑脚本由 `outcome.isCompleted` 兜住：脚本结果要等页面加载完才可能来，
- * 而命中那一刻结果就已经定了。
- */
-suspend fun loadBackgroundWebView(task: WebViewTask): WebViewTaskResult {
-  val outcome = CompletableDeferred<WebViewTaskResult>()
-  // evaluate 要挂起等结果：平台回调线程（桌面是宿主线程，挂着消息泵）不能钉住，
-  // 脚本执行丢到这条独立 scope 上。
-  val evalScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-  val ctx =
-    try {
-      createWebviewContext(isHeadless = true)
-    } catch (t: Throwable) {
-      evalScope.cancel()
-      return WebViewTaskResult.Failed("后台 WebView 起不来：${t.message ?: t}")
-    }
-
-  try {
-    ctx.onEvent = { event ->
-      when (event) {
-        is WebViewEvent.PageFinished ->
-          if (!outcome.isCompleted) {
-            val script = task.script
-            if (script == null) {
-              outcome.complete(WebViewTaskResult.Scripted(null))
-            } else {
-              evalScope.launch {
-                val json = runCatching { ctx.evaluate(script) }.getOrNull()
-                outcome.complete(WebViewTaskResult.Scripted(json))
+      ctx.onEvent = { event ->
+        when (event) {
+          is WebViewEvent.PageFinished ->
+            if (!outcome.isCompleted) {
+              if (script == null) {
+                // 没传脚本：页面加载完即终态，结果就是 null（init.js 转成 undefined）。
+                outcome.complete(null)
+              } else {
+                CoroutineScope(Dispatchers.IO).launch {
+                  // 脚本返回值由平台侧序列化成 JSON 字符串；执行失败静默成 null，
+                  // 不让一次脚本错误把整轮搞崩。
+                  val json = runCatching { ctx.evaluate(script) }.getOrNull()
+                  outcome.complete(json)
+                }
               }
             }
-          }
 
-        is WebViewEvent.LoadFailed ->
-          outcome.complete(WebViewTaskResult.Failed("后台 WebView 失败：${event.message}"))
+          is WebViewEvent.LoadFailed ->
+            outcome.completeExceptionally(JSError("webview run failed：${event.message}"))
 
-        else -> {}
-      }
-    }
-    task.onInterceptRequest?.let { callback ->
-      ctx.onInterceptor = { url, headers, method, isForMainFrame ->
-        if (callback(url, headers, method, isForMainFrame) && !outcome.isCompleted) {
-          outcome.complete(WebViewTaskResult.Intercepted(url, headers))
-          true
-        } else {
-          false
+          else -> {}
         }
       }
+      interceptor?.let { callback ->
+        ctx.onInterceptor = { u, headers, method, isForMainFrame ->
+          val ret = callback(u, headers, method, isForMainFrame)
+          if (ret != null && ret != false && !outcome.isCompleted) {
+            outcome.complete(ret)
+            true
+          } else {
+            false
+          }
+        }
+      }
+      ctx.navigate(url, baseHeaders)
+      return withTimeout(30.seconds) { outcome.await() }
+    } catch (_: TimeoutCancellationException) {
+      // 超时兜底：与上面的 try 共用 finally 销毁上下文。
+      throw JSError("Background webView timeout：$url")
+    } finally {
+      // close() 非挂起：底层 Pointer 自己把销毁派发到归属线程，调用方不必包 NonCancellable。
+      runCatching { ctx.close() }
     }
-    ctx.navigate(task.url, task.effectiveHeaders())
-    return withTimeoutOrNull(BACKGROUND_WEBVIEW_TIMEOUT_MS) { outcome.await() }
-      ?: WebViewTaskResult.Failed("后台 WebView 超时（${BACKGROUND_WEBVIEW_TIMEOUT_MS}ms）：${task.url}")
-  } finally {
-    evalScope.cancel()
-    // 超时那条路进这里时协程已被 withTimeoutOrNull 取消，suspend 的 dispose 会立刻抛
-    // CancellationException —— 不包 NonCancellable 就是「不报错、只失效」的上下文泄漏。
-    withContext(NonCancellable) { runCatching { ctx.dispose() } }
   }
 }

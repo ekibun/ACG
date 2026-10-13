@@ -2,15 +2,10 @@ package soko.ekibun.common
 
 import java.io.RandomAccessFile
 
-actual fun openFileHandle(path: String): FileHandle? =
-  try {
-    RandomAccessFileHandle(RandomAccessFile(path, "r"))
-  } catch (e: Throwable) {
-    // 路径不存在 / 没有权限 / 落在 scoped storage 之外（Android）：按契约返回 null，
-    // 让调用方看到"打不开"而不是异常。
-    e.printStackTrace()
-    null
-  }
+internal actual fun openFileHandle(
+  path: String,
+  mode: String,
+): FileHandle? = runCatching { RandomAccessFileHandle(RandomAccessFile(path, mode)) }.getOrNull()
 
 private class RandomAccessFileHandle(
   private val file: RandomAccessFile,

@@ -197,21 +197,13 @@ async (_binding) => {
       script == null ? null : "" + script,
       typeof onInterceptRequest === "function" ? onInterceptRequest : null
     ]);
-    if (!ret || typeof ret !== "object") return undefined;
-
-    // Kotlin 侧用这个键区分「命中拦截」与「脚本返回值」；两者都可能是任意对象。
-    if (ret.__webview_kind__ === "intercept") return ret.value;
-
-    if (ret.__webview_kind__ === "script") {
-      const json = ret.value;
-      // 空串/null 表示脚本没有返回值 —— 对齐 http.js 的 `it = it && JSON.parse(it)`。
-      // 没有「非 JSON 就原样返回」的兜底：宿主给的 json 一定是 JSON
-      // （WebView2 的 ExecuteScript 自己序列化，裸文本会被加引号变合法 JSON，
-      // 压根到不了这里），而「没有脚本」那一支宿主回的是空值（老宿主是空串、新宿主是 null）。
-      if (json == null || json === "") return undefined;
-      return JSON.parse(json);
+    // Kotlin 侧 webviewAsync 直接回原始值，形状由这里自己判断：
+    if (ret == null) return undefined;            // 无脚本 / 脚本无返回值
+    if (typeof ret === "string") {               // 脚本返回值（JSON 字符串）
+      if (ret === "") return undefined;
+      return JSON.parse(ret);
     }
-
+    if (typeof ret === "object") return ret;      // 命中拦截，{url, headers} 原样
     return undefined;
   };
 
@@ -220,6 +212,14 @@ async (_binding) => {
     TextDecoder: _TextDecoder,
     Request,
     Response,
+    Cookies: {
+      get: (url) => {
+        return _binding('Cookies.get', [url]);
+      },
+      set: (url, cookie) => {
+        _binding('Cookies.set', [url, cookie]);
+      }
+    },
     FormData,
     console: {
       log: (...args) => {

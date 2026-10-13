@@ -15,7 +15,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
-import kotlin.test.fail
 
 /**
  * 拦截回调里记下一次请求 —— `onInterceptRequest` 的四个入参全留：
@@ -31,7 +30,7 @@ private data class SeenRequest(
 /**
  * 自研 WebView2 宿主（`cxx/webview/webview.cpp`）的**端到端**回归测试。
  *
- * 本类**不走** `_binding`：直接构造 [WebViewTask] 调 [loadBackgroundWebView]，
+ * 本类**不走** `_binding`：直接调同包的 [webviewAsync] 驱动，
  * 验的是**WebView2 宿主本身**的行为 —— 起一个本地 HTTP 服务，把真的页面喂给真的
  * WebView2，锁住几件**只有真的跑起来才会坏**的事：
  *
@@ -49,14 +48,14 @@ private data class SeenRequest(
  * [checkHost] 体检（真导航一个 `about:blank`），并把原因打到 stdout ——
  * 静默跳过容易让人误以为「验过了」。
  *
- * 注意 `loadBackgroundWebView` 用的是 [BACKGROUND_WEBVIEW_TIMEOUT_MS] = 30s，
+ * 注意 [webviewAsync] 内部用的是 `30.seconds` 护栏（约 30s），
  * 这里外面再套一层 60s 的护栏，免得真出问题把构建挂死。
  *
  * 正因为不走 `_binding`，本类证明不了 `JsEngine` 的 `when` 派发改对了 ——
  * 那一路由同包的 [JsEngineDispatchTest] 管（零桩、真 `JsEngine`）。两类合起来才
  * 覆盖两端：本类验宿主，那个验能力桥的派发形状。
  *
- * 驱动（[WebViewTask] / [WebViewTaskResult] / [loadBackgroundWebView]）随 2026-10-13 的
+ * 驱动（[webviewAsync]）随 2026-10-13 的
  * 接口重设计搬进了本包，所以本类从 `:platform` 的 jvmTest 迁到这里。留在 `:platform`
  * 的是另一种东西：**直接构平台类**验 `Webview2Context` 自己的 `evaluate` 管道
  * （`platform/jvmTest/.../web/Webview2Test.kt`、`WebViewCookieManagerTest.kt`）。
@@ -117,26 +116,28 @@ class WebViewHostTest {
       val seen = Collections.synchronizedList(mutableListOf<SeenRequest>())
       val result =
         guarded {
-          loadBackgroundWebView(
-            WebViewTask(
-              url = url("/page.html"),
-              onInterceptRequest = { url, headers, method, isForMainFrame ->
-                seen += SeenRequest(url, headers, method, isForMainFrame)
-                // 只在子资源上命中：主框架要放行，页面才有机会去请求子资源。
-                url.endsWith("/sub.js")
-              },
-            ),
+          JsEngine.instance.webviewAsync(
+            url("/page.html"),
+            null,
+            null,
+            { u, headers, method, isForMainFrame ->
+              seen += SeenRequest(u, headers, method, isForMainFrame)
+              // 只在子资源上命中，并直接回「被拦请求自己」的 url + headers；主框架放行，
+              // 页面才有机会去请求子资源。返回 false 即放行。
+              if (u.endsWith("/sub.js")) mapOf("url" to u, "headers" to headers) else false
+            },
           )
         }
 
       val hit =
-        assertIs<WebViewTaskResult.Intercepted>(
+        assertIs<Map<*, *>>(
           result,
           "子资源 /sub.js 没被拦下来（结果是 $result）。看到的请求：${seen.map { it.url }}",
         )
+      val hitUrl = assertIs<String>(hit["url"], "命中结果应带回被拦请求的 url")
       assertTrue(
-        hit.url.endsWith("/sub.js"),
-        "命中的应该是子资源：${hit.url}",
+        hitUrl.endsWith("/sub.js"),
+        "命中的应该是子资源：$hitUrl",
       )
 
       val main = seen.firstOrNull { it.url.endsWith("/page.html") }
@@ -160,18 +161,17 @@ class WebViewHostTest {
 
       val result =
         guarded {
-          loadBackgroundWebView(
-            WebViewTask(
-              url = url("/page.html"),
-              // 返回对象而不是字符串：WebView2 给的是结果的 JSON，字符串会被
-              // 再包一层引号，断言起来全是转义。
-              script = "({ sub: !!window.__subLoaded, imgs: document.images.length })",
-            ),
+          JsEngine.instance.webviewAsync(
+            url("/page.html"),
+            null,
+            // 返回对象而不是字符串：WebView2 给的是结果的 JSON，字符串会被
+            // 再包一层引号，断言起来全是转义。
+            "({ sub: !!window.__subLoaded, imgs: document.images.length })",
+            null,
           )
         }
 
-      val scripted = assertIs<WebViewTaskResult.Scripted>(result, "应该走到脚本分支，实际是 $result")
-      val json = scripted.json ?: fail("json must not be null when the script returns a value")
+      val json = assertIs<String>(result, "应该走到脚本分支，实际是 $result")
       assertTrue(json.contains("\"sub\":true"), "the external script should have run: $json")
       assertTrue(json.contains("\"imgs\":1"), "the image subresource should be in the DOM: $json")
     }
@@ -179,13 +179,13 @@ class WebViewHostTest {
   /**
    * 拦截回调**全程放行**（一次都不命中）之后，加载能自己跑完。
    *
-   * 这条验的是「放行」这个结局本身 —— 也就是 [WebViewTask.onInterceptRequest]
+   * 这条验的是「放行」这个结局本身 —— 也就是 [webviewAsync] 的 interceptor
    * 摆在脚本面前的那个选择里，返回 falsy 这一支到底通不通。
    *
    * **别把它写成「命中 → 放行」**：那条时序在真引擎里**不可达**。
    * `cxx/webview/webview.cpp` 的 `WebResourceRequested` 回调里，一旦 JVM 侧返回
    * 命中，native 立刻给一个空 204 并 `webview_->Stop()` —— 整轮加载当场中止，
-   * 不会再有第二次回调。结果在命中那一刻就定了（`loadBackgroundWebView` 的
+   * 不会再有第二次回调。结果在命中那一刻就定了（[webviewAsync] 的
    * `outcome.complete` 幂等、只取第一个终态）。
    *
    * 回调在每一次请求上都被调了不止一次，这本身也是「放行不影响加载」的证据。
@@ -198,16 +198,14 @@ class WebViewHostTest {
       val seen = Collections.synchronizedList(mutableListOf<SeenRequest>())
       val result =
         guarded {
-          loadBackgroundWebView(
-            WebViewTask(
-              url = url("/page.html"),
-              // 一次都不命中：只记录，一律放行。
-              onInterceptRequest = { url, headers, method, isForMainFrame ->
-                seen += SeenRequest(url, headers, method, isForMainFrame)
-                false
-              },
-              script = "({ sub: !!window.__subLoaded, imgs: document.images.length })",
-            ),
+          JsEngine.instance.webviewAsync(
+            url("/page.html"),
+            null,
+            "({ sub: !!window.__subLoaded, imgs: document.images.length })",
+            { u, headers, method, isForMainFrame ->
+              seen += SeenRequest(u, headers, method, isForMainFrame)
+              false
+            },
           )
         }
 
@@ -221,12 +219,11 @@ class WebViewHostTest {
       assertTrue(seen.size >= 2, "回调应该在每个请求上都被调用一次，实际只调了 ${seen.size} 次：$urls")
 
       // 全程放行 ⇒ 没有任何一次命中 ⇒ 整轮必须以「脚本跑完」收场。
-      val scripted =
-        assertIs<WebViewTaskResult.Scripted>(
+      val json =
+        assertIs<String>(
           result,
           "全程不命中（放行）不该产生 Intercepted：实际是 $result",
         )
-      val json = scripted.json ?: fail("json must not be null when the script returns a value")
       assertTrue(
         json.contains("\"sub\":true"),
         "放行之后 <script> 应该真的执行了（这是「放行」这个结局的证据）：$json",
@@ -264,30 +261,27 @@ class WebViewHostTest {
 
       val wrote =
         guarded {
-          loadBackgroundWebView(
-            WebViewTask(
-              url = url("/page.html"),
-              script =
-                "document.cookie = 'webview_probe=1; path=/; max-age=3600'; " +
-                  "document.cookie.includes('webview_probe=1')",
-            ),
+          JsEngine.instance.webviewAsync(
+            url("/page.html"),
+            null,
+            "document.cookie = 'webview_probe=1; path=/; max-age=3600'; " +
+              "document.cookie.includes('webview_probe=1')",
+            null,
           )
         }
       assertEquals(
         "true",
-        assertIs<WebViewTaskResult.Scripted>(wrote, "写 cookie 的任务没走到脚本分支：$wrote").json,
+        assertIs<String>(wrote, "写 cookie 的任务没走到脚本分支：$wrote"),
         "cookie 应该写得进去",
       )
 
       val read =
         guarded {
-          loadBackgroundWebView(
-            WebViewTask(url = url("/page.html"), script = "document.cookie.includes('webview_probe=1')"),
-          )
+          JsEngine.instance.webviewAsync(url("/page.html"), null, "document.cookie.includes('webview_probe=1')", null)
         }
       assertEquals(
         "true",
-        assertIs<WebViewTaskResult.Scripted>(read, "读 cookie 的任务没走到脚本分支：$read").json,
+        assertIs<String>(read, "读 cookie 的任务没走到脚本分支：$read"),
         "另一个视图应该看得到上一个视图写的 cookie —— 否则两端就不是同一份存储",
       )
     }
@@ -307,7 +301,7 @@ class WebViewHostTest {
     const val PNG_1X1 =
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
 
-    /** 体检里那次 about:blank 的护栏，比 [BACKGROUND_WEBVIEW_TIMEOUT_MS] 稍宽一点。 */
+    /** 体检里那次 about:blank 的护栏，比 `30.seconds` 稍宽一点。 */
     const val HOST_HEALTH_TIMEOUT_MS = 40_000L
 
     /** 环境体检结果，`null` 表示健康。各用例共用，别重复跑。 */
@@ -341,7 +335,9 @@ class WebViewHostTest {
       val result =
         runBlocking {
           withTimeoutOrNull(HOST_HEALTH_TIMEOUT_MS) {
-            loadBackgroundWebView(WebViewTask(url = "about:blank", script = "1 + 1"))
+            runCatching {
+              JsEngine.instance.webviewAsync("about:blank", null, "1 + 1", null)
+            }.getOrNull()
           }
         }
       return when {
@@ -349,7 +345,7 @@ class WebViewHostTest {
           "宿主编译得起来但引擎没有响应：about:blank 在 ${HOST_HEALTH_TIMEOUT_MS}ms 内" +
             "没有走到 NavigationCompleted。多半是这台机器上的 WebView2 运行时坏了" +
             "（重装 Evergreen Runtime 通常能好）。"
-        result is WebViewTaskResult.Scripted && result.json == "2" -> null
+        result is String && result == "2" -> null
         else -> "宿主异常：about:blank 健康检查返回 $result"
       }
     }

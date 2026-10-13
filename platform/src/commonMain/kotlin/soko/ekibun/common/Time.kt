@@ -1,4 +1,4 @@
-package soko.ekibun.ffmpeg
+package soko.ekibun.common
 
 /**
  * 单调时钟的毫秒读数 —— 只保证**两次读数的差**有意义，与墙钟无关（NTP 校时、

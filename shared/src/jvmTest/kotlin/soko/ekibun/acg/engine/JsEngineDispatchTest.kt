@@ -5,7 +5,6 @@ import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.withTimeoutOrNull
 import java.net.InetSocketAddress
 import java.util.Base64
 import java.util.Collections
@@ -26,8 +25,8 @@ import kotlin.test.assertTrue
  * **参数形状**：`args[0]` 是什么、`args[1]` 是什么。
  * 判据与踩坑取证见 `.agents/skills/quickjs-ownership/references/ability-bridge.md`。
  *
- * [WebViewHostTest] 补的是另一半：它直接构造 [WebViewTask]
- * 调 [loadBackgroundWebView]、绕开 JS 桥，验 WebView2 宿主本身的行为。
+ * [WebViewHostTest] 补的是另一半：它直接调同包的 [webviewAsync] 驱动、
+ * 绕开 JS 桥，验 WebView2 宿主本身的行为。
  * **它证明不了派发改对了** —— `args` 的下标写错时它照样全绿。
  *
  * 两条容易写错的前提，改测试前先读：
@@ -235,9 +234,9 @@ class JsEngineDispatchTest {
    * **实参有没有真的按位送到** —— 所以除了解禁结果，还断言 `User-Agent` 真到了页面
    * （`pageRequests` 里查）：这一条对「header 被换成别的东西」敏感。
    *
-   * 回调仍按**老口径**返回对象（`{ url, headers }`）—— D10 之后返回值只当布尔用，对象也是真值 ⇒
-   * 老脚本照样命中；但回传的 url / headers 取的是**被拦下请求自己**那份，不是返回对象里那份
-   * （断言里那条 `no-range` 钉的就是这个）。
+   * 回调返回 `{ url, headers }` 这类对象：命中判定是「非 null 且非 false」，命中后**返回对象
+   * 被整体采用** —— 回传的就是它自己，连它塞进去的 `Range` 也在（断言里那条 `has-range`
+   * 钉的就是这个）。要回「被拦下请求自己」的 url / headers，就自己拼成对象返回。
    */
   @Test
   fun webviewBranchIsReachable() {
@@ -264,9 +263,9 @@ class JsEngineDispatchTest {
       )
 
     assertEquals(
-      "${url("/sub.js")}|headers-ok|no-range",
+      "${url("/sub.js")}|headers-ok|has-range",
       out,
-      "命中的应是子资源、带回它自己的头；返回对象里的 Range 按 D10 不该被采用",
+      "命中的应是子资源；拦截回调返回的对象被整体采用（它自己塞的 Range 也在）",
     )
 
     // args[1]（header）真的送到了 —— 下标 1↔2 串位时这条会红，而上面那条不会。
@@ -314,8 +313,7 @@ class JsEngineDispatchTest {
   /**
    * `webview` 失败必须 **reject**，而不是回一个让脚本误判的空值。
    *
-   * 用一个导航不了的端口逼出 `WebViewTaskResult.Failed` ⇒ `JsEngine` 里
-   * `is Failed -> throw JSError(result.message)` ⇒ JS 侧 Promise 拒绝。
+   * 用一个导航不了的端口逼出 [JSError]（[webviewAsync] 直接抛）⇒ JS 侧 Promise 拒绝。
    *
    * **只断言「拒绝了」不断言文案**：失败文案是平台给的（`导航失败（WebView2
    * 错误码 …）` / 超时 / 起不来），锁死它等于把测试焊死在这台机器的 WebView2 版本上。
@@ -457,14 +455,16 @@ class JsEngineDispatchTest {
   private fun hostHealth(): String? =
     runBlocking {
       val result =
-        withTimeoutOrNull(HOST_HEALTH_TIMEOUT_MS) {
-          loadBackgroundWebView(WebViewTask(url = "about:blank", script = "1 + 1"))
-        }
+        runCatching {
+          withTimeout(HOST_HEALTH_TIMEOUT_MS) {
+            JsEngine.instance.webviewAsync("about:blank", null, "1 + 1", null)
+          }
+        }.getOrNull()
       when {
         result == null ->
           "宿主编译得起来但引擎没有响应：about:blank 在 ${HOST_HEALTH_TIMEOUT_MS}ms 内没走到" +
             "NavigationCompleted。多半这台机器的 WebView2 运行时坏了。"
-        result is WebViewTaskResult.Scripted && result.json == "2" -> null
+        result is String && result == "2" -> null
         else -> "宿主异常：about:blank 健康检查返回 $result"
       }
     }

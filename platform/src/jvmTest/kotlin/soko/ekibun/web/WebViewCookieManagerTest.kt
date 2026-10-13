@@ -1,8 +1,6 @@
 package soko.ekibun.web
 
 import com.sun.net.httpserver.HttpServer
-import io.ktor.http.Cookie
-import io.ktor.http.Url
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -16,9 +14,9 @@ import kotlin.test.Test
 import kotlin.test.assertTrue
 
 /**
- * [WebViewCookieStorage] 这条产品链路的回归测试。
+ * [WebView2CookieManager] 这条产品链路的回归测试。
  *
- * 背景：ktor 的 cookie 读写在桌面端桥到 WebView2 的 cookie 库。[WebViewCookieStorage] 内部
+ * 背景：ktor 的 cookie 读写在桌面端桥到 WebView2 的 cookie 库。[WebView2CookieManager] 内部
  * **惰性缓存一个 [Webview2Context]**（第一次用时才建，之后所有读写都走它），不再「每次读 / 写
  * 都现建一个上下文、用完即关」。上下文自己的 `ICoreWebView2CookieManager` 在 controller
  * 就绪时一次取好缓存在 native 侧，随取随用。这条路能成立的前提是：
@@ -27,8 +25,8 @@ import kotlin.test.assertTrue
  *
  * 本类就钉这一条，以及它带来的两个后果：
  *
- * 1. [cookieRoundTripsThroughStorage] —— 经 [WebViewCookieStorage.addCookie] 写下的持久
- *    cookie，能被同一个缓存上下文读回来（`addCookie` → `get` 往返）。
+ * 1. [cookieRoundTripsThroughStorage] —— 经 [WebView2CookieManager.set] 写下的持久
+ *    cookie，能被同一个缓存上下文读回来（`set` → `get` 往返）。
  * 2. [cookieWrittenViaStorageIsSeenByFreshWebView] —— 经产品路径写下的 cookie，会被一个
  *    **全新的、独立的** webview 在加载页面时看到（`document.cookie`）—— 即「别的 webview
  *    捕捉得到」。
@@ -96,10 +94,10 @@ class WebViewCookieManagerTest {
   }
 
   /**
-   * 经产品路径 [WebViewCookieStorage.addCookie] 写下的持久 cookie，能被读回来。
+   * 经产品路径 [WebView2CookieManager.set] 写下的持久 cookie，能被读回来。
    *
    * 这是整条链路的地基：storage 内部那个**缓存上下文**（连同它自己的 cookie manager）确实
-   * 能写进共享 cookie 库、也能从中读回。`get` 走的 native `getCookie` 与 `addCookie` 走的
+   * 能写进共享 cookie 库、也能从中读回。`get` 走的 native `getCookie` 与 `set` 走的
    * `setCookie` 用的是同一个 manager。
    */
   @Test
@@ -110,35 +108,25 @@ class WebViewCookieManagerTest {
       val name = "acg_roundtrip"
       val value = "via_cached_ctx"
 
-      val storage = WebViewCookieStorage
+      val storage = WebView2CookieManager
 
       // 走产品路径写 cookie（非 secure / 非 httpOnly，http 源才发得出来）。
-      storage.addCookie(
-        Url(pageUrl),
-        Cookie(
-          name = name,
-          value = value,
-          domain = "127.0.0.1",
-          path = "/",
-          secure = false,
-          httpOnly = false,
-        ),
-      )
+      storage.set(pageUrl, "$name=$value; Domain=127.0.0.1; Path=/")
 
       val seen =
         withTimeout(READ_BACK_TIMEOUT_MS) {
           pollUntil {
-            storage.get(Url(pageUrl)).any { it.name == name && it.value == value }
+            storage.get(pageUrl).contains("$name=$value")
           }
         }
       assertTrue(
         seen,
-        "addCookie 写的 cookie 应能被同一个 storage 读回来（add → get 往返）",
+        "set 写的 cookie 应能被同一个 storage 读回来（add → get 往返）",
       )
     }
 
   /**
-   * 经产品路径 [WebViewCookieStorage.addCookie] 写下的 cookie，被一个**全新的、独立的**
+   * 经产品路径 [WebView2CookieManager.set] 写下的 cookie，被一个**全新的、独立的**
    * webview 在加载页面时看到 —— 即「别的 webview 捕捉得到」。
    *
    * 先确认它落进了共享存储（AddOrUpdateCookie 异步提交），再用另一个 [Webview2Context] 真的
@@ -152,29 +140,19 @@ class WebViewCookieManagerTest {
       val name = "acg_xctx"
       val value = "captured"
 
-      val storage = WebViewCookieStorage
+      val storage = WebView2CookieManager
 
       // 走产品路径写 cookie（非 secure / 非 httpOnly，http 源才发得出来、document.cookie 才看得见）。
-      storage.addCookie(
-        Url(pageUrl),
-        Cookie(
-          name = name,
-          value = value,
-          domain = "127.0.0.1",
-          path = "/",
-          secure = false,
-          httpOnly = false,
-        ),
-      )
+      storage.set(pageUrl, "$name=$value; Domain=127.0.0.1; Path=/")
 
       // 先确认它落进了共享存储（AddOrUpdateCookie 异步提交）。
       val stored =
         withTimeout(READ_BACK_TIMEOUT_MS) {
           pollUntil {
-            storage.get(Url(pageUrl)).any { it.name == name && it.value == value }
+            storage.get(pageUrl).contains("$name=$value")
           }
         }
-      assertTrue(stored, "addCookie 写的 cookie 应先能在共享存储里读到")
+      assertTrue(stored, "set 写的 cookie 应先能在共享存储里读到")
 
       // 一个全新的、独立的 webview 导航到该 url，页面跑完后看 document.cookie。
       val ctx = Webview2Context()
@@ -188,7 +166,7 @@ class WebViewCookieManagerTest {
         val docCookies = ctx.evaluate("document.cookie")
         assertTrue(
           docCookies != null && docCookies.contains("$name=$value"),
-          "另一个 webview 加载该 url 后，document.cookie 应包含 addCookie 写的 cookie；实际=[$docCookies]",
+          "另一个 webview 加载该 url 后，document.cookie 应包含 set 写的 cookie；实际=[$docCookies]",
         )
       } finally {
         ctx.close()

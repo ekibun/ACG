@@ -20,7 +20,7 @@ import kotlin.test.assertTrue
  * 这里收的是「验平台这一侧自己的管道」的那几条 —— 冒烟（能建、能导航、事件通）与
  * `evaluate` 的收件人接上了。**任务级**的用例（拦截、cookie 跨任务共享、整轮放行）验的是
  * 驱动骨架，已随驱动搬去 `:shared` 的 `soko.ekibun.acg.engine.WebViewHostTest`：那边能直接用
- * `loadBackgroundWebView`，而 `:platform` 的测试不该反向依赖 `:shared`。
+ * `webviewAsync`，而 `:platform` 的测试不该反向依赖 `:shared`。
  *
  * **不自己调 [Webview2Context.prepareEnvironment]**：伴生对象的 `init` 已经用产品那套
  * （浏览器参数 + user data folder）备好了环境；再调一次 `prepareEnvironment(null, null)` 会把
@@ -134,7 +134,7 @@ class Webview2Test {
           "没有返回值的脚本应该给 JSON 的 null 字符串",
         )
       } finally {
-        ctx.dispose()
+        ctx.close()
       }
     }
 

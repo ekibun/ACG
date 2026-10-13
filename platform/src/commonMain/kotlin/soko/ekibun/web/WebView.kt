@@ -61,7 +61,7 @@ sealed interface WebViewLoadingState {
  * 平台 WebView 向 commonMain 报告的事件。平台回调（native 线程 / Android 主线程）
  * 只发事件，折算到 [WebViewState] 的代码在 [WebViewState.onWebViewEvent] 一处。
  *
- * 全部是**可见页语义**：后台任务（`soko.ekibun.acg.engine.loadBackgroundWebView`）
+ * 全部是**可见页语义**：后台任务（`soko.ekibun.acg.engine.webviewAsync`）
  * 只用其中的 [PageFinished] 与 [LoadFailed]，其余由它自己消费 —— 脚本结果与拦截命中
  * 走的是驱动自己的返回值通道，不再是平台事件。
  */
@@ -132,7 +132,7 @@ class WebViewConfig {
  * 两个槽位都是**创建之后、首次导航之前一次性设好**的（不是运行期反复改的状态），
  * 所以实现侧就是普通字段，不需要 `@Volatile` 之类的同步。
  */
-interface WebviewContext {
+interface WebviewContext : AutoCloseable {
   /**
    * 页面生命周期事件出口。创建后、导航前设好；null = 摘掉。
    */
@@ -182,9 +182,14 @@ interface WebviewContext {
 
   /**
    * 收尾：可见页组合退出时、后台任务 `finally` 里。必须幂等。
-   * 返回时销毁动作已在归属线程上发起（重复调用被静默忽略）。
+   *
+   * 非挂起：销毁动作交给底层 [Pointer] 自己派发到归属线程（[Pointer.close] 只把释放
+   * 投进队列就返回），调用方不必再包 `withContext(NonCancellable)`。重复调用被静默忽略。
+   *
+   * 即 [AutoCloseable.close]——`Webview2Context` 直接继承 [Pointer.close]，Android 侧
+   * `override fun close()` 把 `view.destroy()` 投递回主线程。
    */
-  suspend fun dispose()
+  override fun close()
 }
 
 /**
@@ -409,7 +414,7 @@ fun WebView(
       if (state.controller === c) state.controller = null
       // 组合退出的那一帧没有协程上下文，而 dispose 是挂起的 —— 丢到进程级 scope 上
       // （dispose 自己幂等，重复调用被静默忽略）。
-      disposeScope.launch { runCatching { c.dispose() } }
+      disposeScope.launch { runCatching { c.close() } }
     }
   }
 

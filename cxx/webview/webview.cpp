@@ -1155,6 +1155,21 @@ Java_soko_ekibun_web_Webview2Context_setCookie(
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_soko_ekibun_web_Webview2Context_clearAllCookies(JNIEnv* env, jclass,
+                                                     jlong pctx) {
+  if (pctx == 0) return;
+  WebviewContext* ctx = reinterpret_cast<WebviewContext*>(pctx);
+  ctx->post([](WebviewContext* ctx) {
+    auto* manager = ctx->cookieManager();
+    if (!manager) {
+      WV_LOG("setCookie: no cookie manager");
+      return;
+    }
+    manager->DeleteAllCookies();
+  });
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_soko_ekibun_web_Webview2Context_setUserAgent(JNIEnv* env, jclass,
                                                   jlong pctx, jstring ua) {
   if (pctx != 0) {

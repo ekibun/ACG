@@ -3,6 +3,8 @@ package soko.ekibun.web
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.Handler
+import android.os.Looper
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -252,13 +254,15 @@ internal class AndroidWebviewContext(
   override suspend fun openDevTools() = Unit
 
   /**
-   * 用完即弃。销毁动作归一回主线程（[withContext] 本身就是那次切换）；重复调用
-   * 被 [disposed] 挡住，无副作用。
+   * 用完即弃。非挂起：销毁动作投递回主线程（[Handler.post]），[view.destroy] 必须在主线程调，
+   * 投递本身立刻返回、不阻塞调用方 —— 与桌面端 [Pointer.close] 把释放派发到归属线程同构。
+   * 重复调用被 [disposed] 挡住，无副作用。
    */
-  override suspend fun dispose() =
-    withContext(Dispatchers.Main) {
-      if (!disposed) {
-        disposed = true
+  override fun close() {
+    if (!disposed) {
+      disposed = true
+      // 主线程投递：destroy() 必须跑在主线程；非挂起版本不 await，立刻返回。
+      Handler(Looper.getMainLooper()).post {
         runCatching {
           view.stopLoading()
           view.clearHistory()
@@ -269,6 +273,7 @@ internal class AndroidWebviewContext(
         }
       }
     }
+  }
 
   private fun syncHistory(web: WebView) {
     onEvent?.invoke(WebViewEvent.HistoryChanged(canGoBack = web.canGoBack(), canGoForward = web.canGoForward()))

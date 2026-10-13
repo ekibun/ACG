@@ -25,7 +25,7 @@ class FileIO(
   }
 
   /** 底层句柄；打开失败（路径不存在、没有权限）时为 null。 */
-  private val file = File.open(path)
+  private val file = File.open(path, "r")
 
   /** 逻辑读写位置，与底层文件指针保持同步。 */
   private var offset = 0L

@@ -56,21 +56,21 @@ class Webview2Context(
 
   override suspend fun evaluate(script: String): String? =
     withPtr { ptr ->
-      val result = CompletableDeferred<String>()
+      val ret = CompletableDeferred<String>()
       executeScript(
         ptr,
         script,
         object : ScriptCallback() {
           override fun onResult(
             ok: Boolean,
-            script: String,
+            result: String,
           ) {
-            if (!result.isActive) return
-            if (ok) result.complete(script) else result.cancel()
+            if (!ret.isActive) return
+            if (ok) ret.complete(result) else ret.completeExceptionally(RuntimeException(result))
           }
         },
       )
-      withTimeoutOrNull(SCRIPT_TIMEOUT_MS.milliseconds) { result.await() }
+      withTimeoutOrNull(SCRIPT_TIMEOUT_MS.milliseconds) { ret.await() }
     }
 
   override suspend fun reload() {
@@ -91,15 +91,6 @@ class Webview2Context(
 
   override suspend fun openDevTools() {
     withPtr { ptr -> openDevTools(ptr) }
-  }
-
-  /**
-   * 幂等：`Pointer.markClosed` 抢占，重复的 `close()` 只有第一次真的归还 ——
-   * 第二次进来时 [withPtr] 因 `isClosed` 直接抛，被 `runCatching` 吞掉。
-   */
-  override suspend fun dispose() {
-    // close() 必须落在归属线程上（markClosed + 投递 releaseImpl）；投递本身不阻塞。
-    runCatching { withPtr { close() } }
   }
 
   /**
@@ -147,6 +138,8 @@ class Webview2Context(
     )
   }
 
+  suspend fun clearAllCookies() = withPtr { ptr -> clearAllCookies(ptr) }
+
   // ---- 桌面私有能力：不上接口、不挂起（调用点在 AWT 回调里）----
 
   fun attach(view: Component) {
@@ -179,7 +172,36 @@ class Webview2Context(
     event: String,
     data: String,
   ) {
-    val e = translate(event, data) ?: return
+    val e =
+      when (event) {
+        "navigationStarting" -> WebViewEvent.PageStarted
+        "urlChanged" -> data.takeIf { it.isNotBlank() }?.let { WebViewEvent.UrlChanged(it) }
+        "documentLoaded" -> data.takeIf { it.isNotBlank() }?.let { WebViewEvent.DocumentLoaded(it) }
+        "historyChanged" -> {
+          // data 是 "canGoBack canGoForward"，两个都是 "1" / "0"。
+          val parts = data.split(' ')
+          WebViewEvent.HistoryChanged(
+            canGoBack = parts.getOrNull(0) == "1",
+            canGoForward = parts.getOrNull(1) == "1",
+          )
+        }
+        "navigationCompleted" -> WebViewEvent.PageFinished
+        "navigationFailed" -> {
+          val detail = data.takeIf { it.isNotBlank() }?.let { "：$it" } ?: ""
+          WebViewEvent.LoadFailed(detail)
+        }
+        "documentTitleChanged" -> data.takeIf { it.isNotBlank() }?.let { WebViewEvent.TitleChanged(it) }
+        "processFailed" -> {
+          val kind =
+            data.substringBefore(' ').toIntOrNull()
+          if (kind in setOf(2, 4, 5, 6)) {
+            null
+          } else {
+            WebViewEvent.LoadFailed(data)
+          }
+        }
+        else -> null
+      } ?: return
     onEvent?.invoke(e)
   }
 
@@ -196,7 +218,7 @@ class Webview2Context(
     @Keep
     abstract fun onResult(
       ok: Boolean,
-      script: String,
+      result: String,
     )
   }
 
@@ -371,7 +393,7 @@ class Webview2Context(
      * （自 Unix 纪元起的秒），否则会话 cookie。`sameSite`：0=NONE, 1=LAX, 2=STRICT。
      */
     @JvmStatic
-    external fun setCookie(
+    private external fun setCookie(
       ptr: Long,
       name: String,
       value: String,
@@ -382,6 +404,9 @@ class Webview2Context(
       isHttpOnly: Boolean,
       sameSite: Int,
     )
+
+    @JvmStatic
+    private external fun clearAllCookies(ptr: Long)
 
     /** `getCookie` 的结果收件人 —— 由 native 线程直接调进来，故 [Keep]。 */
     @Keep
@@ -394,82 +419,5 @@ class Webview2Context(
 
     /** cookie 读写的超时（比脚本短，读不到就当没有，别卡住请求）。 */
     internal const val COOKIE_TIMEOUT_MS = 5_000L
-  }
-}
-
-/**
- * 把 native 的事件字符串折成 [WebViewEvent]（折算规则只有 commonMain 一份，这里
- * 只做**名字 → 事件对象**的翻译）。认不出的名字返回 null（宿主以后新增事件时，
- * 未升级的这侧静默忽略，而不是崩）。
- *
- * 事件名与 data 的口径由 native 定：
- *
- * | 事件 | data | 时机 |
- * | --- | --- | --- |
- * | `urlChanged` | 目标地址 | 开始导航（失败那轮也给，完成时取不到） |
- * | `navigationStarting` | 空 | 紧接着 `urlChanged` |
- * | `documentLoaded` | 文档地址 | 导航**成功** |
- * | `historyChanged` | `"canGoBack canGoForward"`，各为 `1` / `0` | 导航成功 |
- * | `navigationCompleted` | 空 | 导航成功 |
- * | `navigationFailed` | 空 | 导航失败 |
- * | `documentTitleChanged` | 标题 | 标题变了 |
- * | `processFailed` | `"kind reason=… exit=…"` | 有子进程挂了；只有致命的 kind 才发出来，见 [NON_FATAL_PROCESS_KINDS] |
- *
- * `processFailed` 的 `kind` / `reason` / `exit` 都是 native 侧的枚举**数值**，
- * 没做名字映射 —— 要对上含义得查 `COREWEBVIEW2_PROCESS_FAILED_*`。
- */
-private fun translate(
-  event: String,
-  data: String,
-): WebViewEvent? =
-  when (event) {
-    "navigationStarting" -> WebViewEvent.PageStarted
-    "urlChanged" -> data.takeIf { it.isNotBlank() }?.let { WebViewEvent.UrlChanged(it) }
-    "documentLoaded" -> data.takeIf { it.isNotBlank() }?.let { WebViewEvent.DocumentLoaded(it) }
-    "historyChanged" -> {
-      // data 是 "canGoBack canGoForward"，两个都是 "1" / "0"。
-      val parts = data.split(' ')
-      WebViewEvent.HistoryChanged(
-        canGoBack = parts.getOrNull(0) == "1",
-        canGoForward = parts.getOrNull(1) == "1",
-      )
-    }
-
-    "navigationCompleted" -> WebViewEvent.PageFinished
-    "navigationFailed" -> {
-      val detail = data.takeIf { it.isNotBlank() }?.let { "：$it" } ?: ""
-      WebViewEvent.LoadFailed("页面加载失败$detail")
-    }
-
-    "documentTitleChanged" -> data.takeIf { it.isNotBlank() }?.let { WebViewEvent.TitleChanged(it) }
-    "processFailed" -> processFailedEvent(data)
-    else -> null
-  }
-
-/**
- * 不致命的 `processFailed` kind：`2 RENDER_UNRESPONSIVE` / `4 UTILITY` / `5 SANDBOX_HELPER` /
- * `6 GPU`。这些进程本来就会反复重启，把它们当失败会把一次进展正常的导航直接拆掉 ——
- * 本机带上 [Webview2Context] 的 `--disable-gpu-process-crash-limit` 之后，GPU 进程就是一路崩、
- * 页面照样加载。
- *
- * 致命的只有 `0 BROWSER_PROCESS_EXITED` / `1 RENDER_PROCESS_EXITED` /
- * `3 FRAME_RENDER_PROCESS_EXITED`（判据与实测见
- * `.agents/skills/webview2-windows/references/webview2-windows.md` §1）。
- */
-private val NON_FATAL_PROCESS_KINDS = setOf(2, 4, 5, 6)
-
-/**
- * 把 `processFailed` 的 data（`"kind reason=… exit=…"`）折成事件；不该上报的返回 null。
- *
- * 解析不出 kind 时**按致命处理** —— 那说明消息格式变了，宁可吵，别把真崩溃静默吞掉。
- */
-private fun processFailedEvent(data: String): WebViewEvent? {
-  val kind =
-    data.substringBefore(' ').toIntOrNull()
-      ?: return WebViewEvent.LoadFailed("WebView 进程崩溃（$data）")
-  return if (kind in NON_FATAL_PROCESS_KINDS) {
-    null
-  } else {
-    WebViewEvent.LoadFailed("WebView 进程崩溃（$data）")
   }
 }

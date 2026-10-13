@@ -1,8 +1,9 @@
 package soko.ekibun.web
 
-import io.ktor.client.plugins.cookies.CookiesStorage
-import io.ktor.http.Cookie
 import io.ktor.http.Url
+import io.ktor.http.parseServerSetCookieHeader
+
+actual fun getWebviewCookieManager(): WebviewCookieManager = WebView2CookieManager
 
 /**
  * ktor 的 cookie 仓库桥接到 WebView2 的 cookie 库：HTTP 请求（ktor）与 WebView
@@ -15,32 +16,24 @@ import io.ktor.http.Url
  * 跑，却不必每次建 / 销一整个 WebView2 上下文。所有上下文共用同一个 user data folder
  * 下的 cookie 库，无论谁落下的 cookie，可见页 / 后台页 / HTTP 层都能读到，登录态天然共享。
  *
- * 之所以必须桥一个自定义 [CookiesStorage] 而不是手动塞 `Cookie` 请求头：ktor 的
+ * 之所以必须桥一个自定义 CookiesStorage 而不是手动塞 `Cookie` 请求头：ktor 的
  * `HttpCookies.sendCookiesWith` 会**覆盖** `Cookie` 头（`headers[Cookie] =
  * cookieHeader`），手动种进去的头会被无声抹掉。所以登录态只能从存储这一侧喂给 ktor。
  */
-internal object WebViewCookieStorage : CookiesStorage {
+internal object WebView2CookieManager : WebviewCookieManager {
   private val lazyCtx = lazy { Webview2Context() }
   private val ctx by lazyCtx
 
-  override suspend fun get(requestUrl: Url): List<Cookie> {
-    val raw =
-      runCatching { ctx.getCookie(requestUrl.toString()) }.getOrNull()
-        ?: return emptyList()
-    if (raw.isEmpty()) return emptyList()
-    return raw.split("; ").mapNotNull { pair ->
-      val eq = pair.indexOf('=')
-      if (eq <= 0) null else Cookie(pair.substring(0, eq), pair.substring(eq + 1))
-    }
-  }
+  override suspend fun get(url: String): String = runCatching { ctx.getCookie(url) }.getOrNull() ?: ""
 
-  override suspend fun addCookie(
-    requestUrl: Url,
-    cookie: Cookie,
+  override suspend fun set(
+    url: String,
+    rawCookie: String,
   ) {
+    val cookie = parseServerSetCookieHeader(rawCookie)
     // 域 / 路径缺省按 url 推（去掉端口的 host / 根路径），与 Android CookieManager
     // 口径一致。ktor 的 domain 可能带前导点，WebView2 的 CreateCookie 不认，去掉。
-    val rawDomain = cookie.domain ?: requestUrl.host
+    val rawDomain = cookie.domain ?: Url(url).host
     val domain = if (rawDomain.startsWith(".")) rawDomain.substring(1) else rawDomain
     val path = cookie.path ?: "/"
     // 过期时间换算成「自 Unix 纪元起的秒」。Max-Age 优先于 Expires。
@@ -76,7 +69,5 @@ internal object WebViewCookieStorage : CookiesStorage {
     }
   }
 
-  override fun close() {
-    if (lazyCtx.isInitialized()) ctx.close()
-  }
+  override suspend fun clearAll() = ctx.clearAllCookies()
 }

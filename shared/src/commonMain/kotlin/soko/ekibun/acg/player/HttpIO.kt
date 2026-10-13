@@ -5,8 +5,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import soko.ekibun.common.Http
-import soko.ekibun.common.SOCKET_TIMEOUT_MS
+import soko.ekibun.acg.common.Http
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvIO
 import kotlin.time.Duration.Companion.milliseconds
@@ -247,7 +246,7 @@ class HttpIO(
           // 毒化成 EOF、播放静默「正常结束」，见 `http-streaming.md`）。间隔同样取
           // [SOCKET_TIMEOUT_MS]：刚踩完一个超时窗口就重连，换来的仍是死连接。
           // 上层另有时间闸（FFPlayer 的取包超时 → `FFPlayer.Event.ReadTimeout`），这里**只管一直读**。
-          delay(SOCKET_TIMEOUT_MS.milliseconds)
+          delay(Http.SOCKET_TIMEOUT_MS.milliseconds)
           rsp.close()
           if (cachedRsp === rsp) cachedRsp = null
           continue

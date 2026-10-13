@@ -1,9 +1,7 @@
 package soko.ekibun.web
 
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -14,7 +12,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  * 连 `about:blank` 都到不了完成事件。这种坏法下用例会卡满超时、再报一堆看不懂的断言失败，
  * 纯属噪声；体检一次、打印清楚原因、几个用例一起跳过，才对得起看构建的人。
  *
- * 之所以不走驱动（`loadBackgroundWebView`）：`:platform` 的测试**不该依赖 `:shared`**，
+ * 之所以不走驱动（`webviewAsync`）：`:platform` 的测试**不该依赖 `:shared`**，
  * 依赖方向反了。这里就用平台自己那套 —— 建上下文 → 给尺寸 → 挂 `onEvent` → 导航 → 等
  * `PageFinished` → `evaluate("1 + 1")` → 归还。
  *
@@ -45,9 +43,8 @@ internal fun webviewHostHealth(): String? =
         else -> "宿主异常：about:blank 健康检查返回 $json"
       }
     } finally {
-      // 超时那条路进来时协程已被 withTimeoutOrNull 取消，挂起的 dispose 会立刻抛 ——
-      // 不包 NonCancellable 就等于把整个上下文漏掉。
-      withContext(NonCancellable) { runCatching { ctx.dispose() } }
+      // dispose() 非挂起：底层 Pointer 自己把销毁派发到归属线程，调用方不必包 NonCancellable。
+      runCatching { ctx.close() }
     }
   }
 
