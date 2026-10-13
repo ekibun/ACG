@@ -26,10 +26,12 @@ import kotlin.test.assertTrue
  * 决定收益有多大（见 [HttpIO.skipThreshold]）。
  *
  * **不是回归测试**：不钉死某个绝对数值（网络时序 / 引擎块大小 / 平台差异都会让数字浮动），
- * 只钉「缓冲不大幅超过 ktor 的 1 MiB 硬上限」这条**结构**事实。真值打在 stdout 里。
+ * 只钉「缓冲不大幅超过 ktor 的 1 MiB 硬上限」这条**结构**事实 —— 上界是**单向**的（机器越忙
+ * 存量越小），不随负载翻面；下界（「铺开了多少」）恰恰随负载翻面（实测全量跑 40879 B、
+ * 单点跑 139183 B），**不要拿它当判据**。真值打在 stdout 里。
  *
  * **慢发那条的存量是竞态**（实测出现过 `[4096, 4096, 0, 0, ...]`，也出现过全 0，取决于第一读
- * 落在服务端第几次 write 之后）⇒ **不能**拿「缓冲非空」当断言。「缓冲能堆起来」由快发那条钉。
+ * 落在服务端第几次 write 之后）⇒ **不能**拿「缓冲非空」当断言；「能堆起来」也只从 stdout 读。
  */
 class HttpBufferedAmountProbeTest {
   @Test(timeout = 60_000)
@@ -66,7 +68,8 @@ class HttpBufferedAmountProbeTest {
 
         // **不**断言「缓冲非空」：慢发下存量是**竞态**（实测出现过 `[4096, 4096, 0, ...]`，
         // 也出现过全 0 —— 取决于第一读落在服务端第几次 write 之后）。拿它当断言会随机翻车。
-        // 「缓冲确实能堆起来」这个前提由 [fastServerAccumulatesMoreThanSlowServer] 钉。
+        // 「缓冲确实能堆起来」本类**不钉**（那需要下界判据，见类 KDoc 的负载敏感说明）；
+        // 快发那条只钉上界，能堆到多少只从它打印的 stdout 里读。
 
         // 上界：ktor 的硬上限 1 MiB（`CHANNEL_MAX_SIZE`，`internal const val`、编译期内联成
         // 1048576、运行时改不了）。写侧在 `flush()` 里挂起就不再续写 ⇒ 存量不可能超过它
@@ -92,10 +95,12 @@ class HttpBufferedAmountProbeTest {
    *
    * 生产侧全速时写侧会在 `flush()` 里挂起（`CHANNEL_MAX_SIZE` = 1 MiB，`internal const val`
    * 编译期内联、运行时改不了），所以存量**该在 1 MiB 附近饱和**而不是无限涨。
-   * 断言的是「**大于慢发时的量**」这条**相对**关系（跨用例稳定），不是某个绝对值。
+   *
+   * **只断言这条上界**（见类 KDoc）：它是单向的 —— 机器越忙存量越小，所以不会随负载翻面。
+   * 「快发能堆起来」那条**下界**不钉：同一个负载敏感会让它在阈值两侧跳。
    */
   @Test(timeout = 60_000)
-  fun fastServerAccumulatesMoreThanSlowServer() {
+  fun fastServerBufferedAmountStaysWithinChannelLimit() {
     val body = ByteArray(4 * 1024 * 1024) { (it % 251).toByte() }
     // 块间不睡：让服务端以本机速度灌满 TCP 缓冲，写侧放开跑。
     TestMediaServer(body, chunkSize = 64 * 1024).use { server ->
@@ -116,14 +121,7 @@ class HttpBufferedAmountProbeTest {
           "[probe-fast] 第一读拿到=$n B、读后存量=$afterRead B（约 ${afterRead / 1024.0} KiB）",
         )
 
-        // 生产侧全速 ⇒ 写侧一路挂起在 1 MiB 附近 ⇒ 第一读之后通道里就堆着**接近 1 MiB** 的存量。
-        // （慢发那条实测是 8192 然后归零；这里必须显著更多，否则说明「快发也没铺开」，
-        //    那么任何基于缓冲量的阈值讨论都失去前提。）
-        assertTrue(
-          afterRead > 64 * 1024,
-          "快发时第一读之后通道里应当已铺开大量数据，实际只有 $afterRead B",
-        )
-        // 上界实测：ktor 的硬上限是 1 MiB（`CHANNEL_MAX_SIZE`，`internal const val`、
+        // 只钉上界：ktor 的硬上限是 1 MiB（`CHANNEL_MAX_SIZE`，`internal const val`、
         // 编译期内联成 1048576、运行时改不了），最后一次 flush 之前写进 `_writeBuffer`
         // 的那个块不会被退回 ⇒ 存量可以略微超过 1 MiB，但不应超出一个引擎块的量级。
         assertTrue(

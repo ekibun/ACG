@@ -97,6 +97,8 @@ $ javap -p -classpath shared/build/classes/kotlin/jvm/main soko.ekibun.acg.engin
 **唯一**测试面 —— 那两个桩文件已删除。断言写在**真 JS 表达式**里（`encodeURIComponent` /
 `TextDecoder` / `console.log` / 真 `fetch` / 真 `webview` / 真 `FormData`）。
 `WebViewHostTest` 补另一半（WebView2 宿主本身的行为），它证明不了派发改对了。
+（2026-10-13 起驱动 `loadBackgroundWebView` / `WebViewTask` / `WebViewTaskResult` 已随接口重设计搬到
+**shared 的 `soko.ekibun.acg.engine`** 包，名字没变；拦截回调也从「返回请求对象」改成返回布尔。）
 
 ### 桩为什么必须删（不是「不优雅」，是**验错了东西**）
 
@@ -130,7 +132,7 @@ Kotlin 用手攥的 `CompletableDeferred` 决定何时放行」—— 那个闸�
 加上 `loadBackgroundWebView` 的 `outcome.complete` 幂等、**只取第一个终态**，
 所以「命中」与「放行」在真引擎里是**互斥的两种终局**，不存在「先命中再放行」的时序。
 真正的等价覆盖是 `WebViewHostTest.releasingEveryRequestLetsPageFinish`：
-**接了回调、每次都返回 null（一次都不命中）**，页面照样跑完、整轮以 `Scripted` 收场 ——
+**接了回调、每次都放行（一次都不命中）**，页面照样跑完、整轮以 `Scripted` 收场 ——
 这才是「放行」这一支的真能力。
 
 ⇒ 迁条目前先问「**真实现里这条时序存在吗**」，别因为桩里能造就假定能。

@@ -16,7 +16,6 @@ import androidx.compose.ui.tooling.preview.Preview
 import soko.ekibun.acg.ui.screen.CodeScreen
 import soko.ekibun.acg.ui.screen.PlayScreen
 import soko.ekibun.acg.ui.screen.WebScreen
-import soko.ekibun.web.BackgroundWebViewHost
 
 private enum class AppTab(
   val label: String,
@@ -35,10 +34,6 @@ private enum class AppTab(
 @Composable
 @Preview
 fun App() {
-  // 插件 JS 的「后台 WebView」的宿主钩子：Android 上顺手记下 Context，
-  // 桌面端预热 WebView 环境。挂在 App 上，两端入口都不用各自记着调。
-  BackgroundWebViewHost()
-
   MaterialTheme {
     var selected by remember { mutableIntStateOf(0) }
     val tabs = AppTab.entries

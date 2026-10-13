@@ -449,9 +449,9 @@ exit_thread:
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_soko_ekibun_web_WebviewContext_prepareEnvironment(JNIEnv* env, jclass,
-                                                       jstring args,
-                                                       jstring userDir) {
+Java_soko_ekibun_web_Webview2Context_prepareEnvironment(JNIEnv* env, jclass,
+                                                        jstring args,
+                                                        jstring userDir) {
   JavaVM* vm;
   env->GetJavaVM(&vm);
   WebviewEnviorment::instance().prepareEnvironment(vm, toWide(env, args),
@@ -459,7 +459,7 @@ Java_soko_ekibun_web_WebviewContext_prepareEnvironment(JNIEnv* env, jclass,
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_soko_ekibun_web_WebviewContext_releaseEnvironment(JNIEnv*, jclass) {
+Java_soko_ekibun_web_Webview2Context_releaseEnvironment(JNIEnv*, jclass) {
   WebviewEnviorment::instance().releaseEnvironment();
 }
 
@@ -975,8 +975,8 @@ class GetCookiesHandler final
 };
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_soko_ekibun_web_WebviewContext_initContext(JNIEnv* env, jclass,
-                                                jobject ctx) {
+Java_soko_ekibun_web_Webview2Context_initContext(JNIEnv* env, jclass,
+                                                 jobject ctx) {
   HANDLE init = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   WebviewContext* ptr = new WebviewContext(env, ctx, init);
   WaitForSingleObject(init, 10000);
@@ -990,8 +990,8 @@ Java_soko_ekibun_web_WebviewContext_initContext(JNIEnv* env, jclass,
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_soko_ekibun_web_WebviewContext_releaseContext(JNIEnv* env, jclass,
-                                                   jlong pctx) {
+Java_soko_ekibun_web_Webview2Context_releaseContext(JNIEnv* env, jclass,
+                                                    jlong pctx) {
   if (pctx != 0) {
     auto ptr = reinterpret_cast<WebviewContext*>(pctx);
     ptr->release(env);
@@ -999,7 +999,7 @@ Java_soko_ekibun_web_WebviewContext_releaseContext(JNIEnv* env, jclass,
   }
 }
 
-extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_web_WebviewContext_navigate(
+extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_web_Webview2Context_navigate(
     JNIEnv* env, jclass, jlong pctx, jstring url, jstring method,
     jobjectArray headers) {
   if (pctx != 0) {
@@ -1031,9 +1031,9 @@ extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_web_WebviewContext_navigate(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_soko_ekibun_web_WebviewContext_executeScript(JNIEnv* env, jclass,
-                                                  jlong pctx, jstring script,
-                                                  jobject callback) {
+Java_soko_ekibun_web_Webview2Context_executeScript(JNIEnv* env, jclass,
+                                                   jlong pctx, jstring script,
+                                                   jobject callback) {
   if (pctx != 0) {
     WebviewContext* ctx = reinterpret_cast<WebviewContext*>(pctx);
 
@@ -1065,8 +1065,9 @@ Java_soko_ekibun_web_WebviewContext_executeScript(JNIEnv* env, jclass,
  * 也给空串， 回调只来一次。任务投到宿主线程上跑（COM 调用要留在建 manager
  * 的那条 STA 线程上）。
  */
-extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_web_WebviewContext_getCookie(
-    JNIEnv* env, jclass, jlong pctx, jstring url, jobject callback) {
+extern "C" JNIEXPORT void JNICALL
+Java_soko_ekibun_web_Webview2Context_getCookie(JNIEnv* env, jclass, jlong pctx,
+                                               jstring url, jobject callback) {
   if (pctx == 0) return;
   WebviewContext* ctx = reinterpret_cast<WebviewContext*>(pctx);
   jclass cls = env->GetObjectClass(callback);
@@ -1096,7 +1097,8 @@ extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_web_WebviewContext_getCookie(
  * 1=LAX, 2=STRICT。 空 name 在投递前就拦掉（fail
  * fast，不占宿主线程）。任务投到宿主线程上跑。
  */
-extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_web_WebviewContext_setCookie(
+extern "C" JNIEXPORT void JNICALL
+Java_soko_ekibun_web_Webview2Context_setCookie(
     JNIEnv* env, jclass, jlong pctx, jstring name, jstring value,
     jstring domain, jstring path, jdouble expiresEpochSeconds,
     jboolean isSecure, jboolean isHttpOnly, jint sameSite) {
@@ -1151,8 +1153,8 @@ extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_web_WebviewContext_setCookie(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_soko_ekibun_web_WebviewContext_setUserAgent(JNIEnv* env, jclass,
-                                                 jlong pctx, jstring ua) {
+Java_soko_ekibun_web_Webview2Context_setUserAgent(JNIEnv* env, jclass,
+                                                  jlong pctx, jstring ua) {
   if (pctx != 0) {
     WebviewContext* ctx = reinterpret_cast<WebviewContext*>(pctx);
     std::wstring ua_ = toWide(env, ua);
@@ -1171,8 +1173,8 @@ Java_soko_ekibun_web_WebviewContext_setUserAgent(JNIEnv* env, jclass,
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_soko_ekibun_web_WebviewContext_attach(JNIEnv* env, jclass, jlong pctx,
-                                           jobject view) {
+Java_soko_ekibun_web_Webview2Context_attach(JNIEnv* env, jclass, jlong pctx,
+                                            jobject view) {
   if (pctx != 0) {
     WebviewContext* ctx = reinterpret_cast<WebviewContext*>(pctx);
     // 取 HWND 这一步留在调用线程上做（组件 peer 归属 AWT 的 EDT），之后动窗口的
@@ -1188,7 +1190,7 @@ Java_soko_ekibun_web_WebviewContext_attach(JNIEnv* env, jclass, jlong pctx,
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_soko_ekibun_web_WebviewContext_detach(JNIEnv* env, jclass, jlong pctx) {
+Java_soko_ekibun_web_Webview2Context_detach(JNIEnv* env, jclass, jlong pctx) {
   if (pctx != 0) {
     WebviewContext* ctx = reinterpret_cast<WebviewContext*>(pctx);
     ctx->post([](WebviewContext* ctx) { ctx->detach(); });
@@ -1196,7 +1198,7 @@ Java_soko_ekibun_web_WebviewContext_detach(JNIEnv* env, jclass, jlong pctx) {
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_soko_ekibun_web_WebviewContext_focus(JNIEnv*, jclass, jlong pctx) {
+Java_soko_ekibun_web_Webview2Context_focus(JNIEnv*, jclass, jlong pctx) {
   if (pctx != 0) {
     WebviewContext* ctx = reinterpret_cast<WebviewContext*>(pctx);
     ctx->post([](WebviewContext* ctx) { ctx->focus(); });
@@ -1205,15 +1207,16 @@ Java_soko_ekibun_web_WebviewContext_focus(JNIEnv*, jclass, jlong pctx) {
 
 // 尺寸：组件大小变了重新贴合；没挂到组件上的用法给一个显式视口。
 extern "C" JNIEXPORT void JNICALL
-Java_soko_ekibun_web_WebviewContext_fitToParent(JNIEnv*, jclass, jlong pctx) {
+Java_soko_ekibun_web_Webview2Context_fitToParent(JNIEnv*, jclass, jlong pctx) {
   if (pctx != 0) {
     WebviewContext* ctx = reinterpret_cast<WebviewContext*>(pctx);
     ctx->post([](WebviewContext* ctx) { ctx->fitToParent(); });
   }
 }
 
-extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_web_WebviewContext_setBounds(
-    JNIEnv*, jclass, jlong pctx, jint width, jint height) {
+extern "C" JNIEXPORT void JNICALL
+Java_soko_ekibun_web_Webview2Context_setBounds(JNIEnv*, jclass, jlong pctx,
+                                               jint width, jint height) {
   if (pctx != 0) {
     WebviewContext* ctx = reinterpret_cast<WebviewContext*>(pctx);
     ctx->post([width, height](WebviewContext* ctx) {
@@ -1222,18 +1225,18 @@ extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_web_WebviewContext_setBounds(
   }
 }
 
-#define JNI_WEBVIEW_METHOD(method_name, body)                        \
-  extern "C" JNIEXPORT void JNICALL                                  \
-  Java_soko_ekibun_web_WebviewContext_##method_name(JNIEnv*, jclass, \
-                                                    jlong pctx) {    \
-    if (pctx != 0) {                                                 \
-      WebviewContext* ctx = reinterpret_cast<WebviewContext*>(pctx); \
-      ctx->post([](WebviewContext* ctx) {                            \
-        auto webview = ctx->webview();                               \
-        if (!webview) return;                                        \
-        body;                                                        \
-      });                                                            \
-    }                                                                \
+#define JNI_WEBVIEW_METHOD(method_name, body)                         \
+  extern "C" JNIEXPORT void JNICALL                                   \
+  Java_soko_ekibun_web_Webview2Context_##method_name(JNIEnv*, jclass, \
+                                                     jlong pctx) {    \
+    if (pctx != 0) {                                                  \
+      WebviewContext* ctx = reinterpret_cast<WebviewContext*>(pctx);  \
+      ctx->post([](WebviewContext* ctx) {                             \
+        auto webview = ctx->webview();                                \
+        if (!webview) return;                                         \
+        body;                                                         \
+      });                                                             \
+    }                                                                 \
   }
 JNI_WEBVIEW_METHOD(reload, webview->Reload())
 JNI_WEBVIEW_METHOD(stop, webview->Stop())

@@ -8,17 +8,12 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.SwingPanel
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
 import java.awt.Canvas
 import java.awt.Color
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 
-// 桌面端的 WebView 平台层：控制器工厂（可见）+ 原生视图挂载面。
+// 桌面端的 WebView 平台层：上下文工厂 + 原生视图挂载面。
 //
 // 宿主方式是最朴素的 Win32 那套，**不依赖任何 UI 框架的原生互操作层**：
 //
@@ -37,47 +32,24 @@ import java.awt.event.ComponentEvent
 //
 // 状态折算、假进度插值、生命周期兜底都在 commonMain；这里只发 [WebViewEvent]。
 
-/** 桌面端（Windows / WebView2）的 [createWebViewController] 实现。 */
-internal actual suspend fun createWebViewController(
-  headless: Boolean,
-  config: WebViewConfig,
-  initialUrl: String,
-  initialHeaders: Map<String, String>,
-  script: String?,
-  onRequest: ((WebViewRequest) -> WebViewInterception?)?,
-  onEvent: (WebViewEvent) -> Unit,
-): WebViewController {
-  if (headless) {
-    return createDesktopHeadlessController(initialUrl, initialHeaders, script, onRequest, onEvent)
-  }
-  val ctx = WebviewContext()
-  // 监听要挂在 `start()` 之前：那之后宿主线程随时可能把事件打过来。
-  ctx.listener = DesktopEventListener(onEvent)
-  try {
-//    ctx.start()
-  } catch (t: Throwable) {
-    closeContext(ctx)
-    throw t
-  }
-  // 用户代理是「建一次」的配置，控制器就绪之后才设得进去。可见页不拦请求，
-  // 所以 [onRequest] 在这里用不上。
-  config.userAgent?.let { ctx.setUserAgent(it) }
-  val controller = DesktopWebViewController(ctx)
-  // 可见视图的初始导航不带自定义头：带头那条路是控制器就绪之后的 `loadUrl`。
-  controller.loadUrl(initialUrl, emptyMap())
-  return controller
-}
+/**
+ * 桌面端（Windows / WebView2）的 [createWebviewContext] 实现。
+ *
+ * 建的时候只挑视口尺寸（[isHeadless] 走 1×1）：User-Agent 这些配置由调用方拿到上下文
+ * 之后经接口上的 setter 设，首屏地址由调用方自己发 `navigate`。
+ */
+actual suspend fun createWebviewContext(isHeadless: Boolean): WebviewContext = Webview2Context(isHeadless)
 
 /** 桌面端的可见视图挂载面：`SwingPanel { Canvas() }`，原生窗口经 JAWT `SetParent` 上来。 */
 @Composable
 internal actual fun WebViewSurface(
-  controller: WebViewController,
+  controller: WebviewContext,
   modifier: Modifier,
   content: @Composable () -> Unit,
 ) {
-  val impl = controller as DesktopWebViewController
+  val impl = controller as Webview2Context
   // 一个上下文一个宿主组件 —— AWT 组件没法「换一个原生窗口」，上下文换了就换组件。
-  val canvas = remember(impl) { WebViewCanvas(impl.context) }
+  val canvas = remember(impl) { WebViewCanvas(impl) }
 
   DisposableEffect(impl, canvas) {
     canvas.startTracking()
@@ -109,7 +81,7 @@ internal actual fun WebViewSurface(
  * `componentShown` / `componentResized` 再试。attach 是幂等的，多来几次无妨。
  */
 private class WebViewCanvas(
-  private val context: WebviewContext,
+  private val context: Webview2Context,
 ) : Canvas() {
   init {
     // 不透明底色：attach 之前（以及原生窗口还没跟上尺寸的那一两帧）不会露出
@@ -142,103 +114,3 @@ private class WebViewCanvas(
     context.attach(this)
   }
 }
-
-/**
- * [WebViewController] 的桌面实现 —— [WebviewContext] 的一层薄包装。
- *
- * 命令直通上下文；宿主事件由 [DesktopEventListener] 折成 [WebViewEvent]。挂载与
- * 尺寸由 [WebViewCanvas] 管（attach + fitToParent）。后台任务的控制器
- * （`BackgroundWebView.jvm.kt`）按对象委托复用它，所以是 `internal` 而不是 `private`。
- */
-internal class DesktopWebViewController(
-  internal val context: WebviewContext,
-) : WebViewController {
-  /** 那些**非挂起**签名（`loadUrl`）发起的挂起动作挂这里；[dispose] 一并取消。 */
-  private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-
-  override fun loadUrl(
-    url: String,
-    headers: Map<String, String>,
-  ) {
-    scope.launch { runCatching { context.navigate(url, "GET", headers) } }
-  }
-
-  override fun reload() = context.reload()
-
-  override fun stop() = context.stop()
-
-  override fun goBack() = context.goBack()
-
-  override fun goForward() = context.goForward()
-
-  override fun openDevTools() = context.openDevTools()
-
-  /**
-   * 在**用户正在看的这一页**上执行脚本并拿回结果。
-   *
-   * 后台任务（`webview(url, {}, script)`）能取数靠的是同一个 `ExecuteScript`，
-   * 但它是另开一个隐藏窗口把页面重抓一遍 —— 这里不用：直接在当前这页上跑，
-   * 既省一次网络请求，也能拿到只有交互之后才存在的东西（滚动位置、展开的节点、
-   * 临时登录态）。
-   *
-   * 结果语义与后台任务一致：没有返回值或失败都是 `null`。
-   */
-  override suspend fun evaluate(script: String): String? = context.executeScript(script)
-
-  /** 幂等：`Pointer.markClosed` 抢占，重复的 `close()` 只有第一次真的归还。 */
-  override fun dispose() {
-    scope.cancel()
-    closeContext(context)
-  }
-}
-
-/**
- * 把 native 的事件字符串折成 [WebViewEvent]（折算规则只有 commonMain 一份，这里
- * 只做**名字 → 事件对象**的翻译）。
- */
-private class DesktopEventListener(
-  private val onEvent: (WebViewEvent) -> Unit,
-) : WebviewContext.Listener {
-  override fun onEvent(
-    event: String,
-    data: String,
-  ) {
-    when (event) {
-      "navigationStarting" -> onEvent(WebViewEvent.PageStarted)
-      "urlChanged" -> data.takeIf { it.isNotBlank() }?.let { onEvent(WebViewEvent.UrlChanged(it)) }
-      "documentLoaded" -> data.takeIf { it.isNotBlank() }?.let { onEvent(WebViewEvent.DocumentLoaded(it)) }
-      "historyChanged" -> {
-        // data 是 "canGoBack canGoForward"，两个都是 "1" / "0"。
-        val parts = data.split(' ')
-        onEvent(
-          WebViewEvent.HistoryChanged(
-            canGoBack = parts.getOrNull(0) == "1",
-            canGoForward = parts.getOrNull(1) == "1",
-          ),
-        )
-      }
-
-      "navigationCompleted" -> onEvent(WebViewEvent.PageFinished)
-      "navigationFailed" -> {
-        val detail = data.takeIf { it.isNotBlank() }?.let { "：$it" } ?: ""
-        onEvent(WebViewEvent.LoadFailed("页面加载失败$detail"))
-      }
-      "documentTitleChanged" -> data.takeIf { it.isNotBlank() }?.let { onEvent(WebViewEvent.TitleChanged(it)) }
-      "processFailed" -> onEvent(WebViewEvent.LoadFailed("WebView 进程崩溃（$data）"))
-    }
-  }
-}
-
-/**
- * 归还上下文 —— 一律丢到 IO 上做。
- *
- * `releaseContext` 里有几件会阻塞的事（等 controller 拆掉、清 native 侧的待办队列），
- * 而调用点多半在 AWT 的 EDT / 组合线程上（`onDispose`、后台任务的 `finally`），
- * 不能钉住。丢到 IO 上之后它与「下一个上下文建起来」是并发的，所以 native 侧的
- * 析构得自己把顺序理对（见 `cxx/webview/webview.cpp` 的 `~WebviewContext`）。
- */
-internal fun closeContext(ctx: WebviewContext) {
-  disposeScope.launch { runCatching { ctx.close() } }
-}
-
-private val disposeScope = CoroutineScope(Dispatchers.IO + SupervisorJob())

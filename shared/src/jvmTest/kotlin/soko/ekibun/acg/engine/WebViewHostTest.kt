@@ -1,7 +1,6 @@
-package soko.ekibun.web
+package soko.ekibun.acg.engine
 
 import com.sun.net.httpserver.HttpServer
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -19,6 +18,17 @@ import kotlin.test.assertTrue
 import kotlin.test.fail
 
 /**
+ * 拦截回调里记下一次请求 —— `onInterceptRequest` 的四个入参全留：
+ * `headers.isNotEmpty()` 那条断言要它，`isForMainFrame` / `method` 各自有一条。
+ */
+private data class SeenRequest(
+  val url: String,
+  val headers: Map<String, String>,
+  val method: String,
+  val isForMainFrame: Boolean,
+)
+
+/**
  * 自研 WebView2 宿主（`cxx/webview/webview.cpp`）的**端到端**回归测试。
  *
  * 本类**不走** `_binding`：直接构造 [WebViewTask] 调 [loadBackgroundWebView]，
@@ -30,11 +40,10 @@ import kotlin.test.fail
  * 2. **脚本注入拿得回结果**，且 DOM 里确实有子资源产生的副作用。
  * 3. **cookie 在不同任务之间是共享的** —— 两次任务走的是同一个 user data folder
  *    （可见页与后台页共用同一份存储靠的就是这个机制）。
- * 4. **可见视图的 `evaluate` 拿得回结果** —— `ExecuteScript` 那条管道的收件人接上了。
- * 5. **拦截回调全程放行也能把页面跑完** —— 回调在每个请求上都被调了不止一次，
+ * 4. **拦截回调全程放行也能把页面跑完** —— 回调在每个请求上都被调了不止一次，
  *    一次都不命中时整轮仍以「脚本跑完」收场。（注意别写成「命中 → 放行」：
  *    命中即 `Stop()`，整轮加载当场中止，那条时序不可达 —— 见
- *    `releasingEveryRequestLetsPageFinish`。）
+ *    [releasingEveryRequestLetsPageFinish]。）
  *
  * 环境不满足时这几个用例都跳过：这测的是集成，不是环境。跳过前会先跑一次
  * [checkHost] 体检（真导航一个 `about:blank`），并把原因打到 stdout ——
@@ -44,8 +53,13 @@ import kotlin.test.fail
  * 这里外面再套一层 60s 的护栏，免得真出问题把构建挂死。
  *
  * 正因为不走 `_binding`，本类证明不了 `JsEngine` 的 `when` 派发改对了 ——
- * 那一路由 [soko.ekibun.acg.engine.JsEngineDispatchTest] 管（零桩、真 `JsEngine`）。
- * 两类合起来才覆盖两端：本类验宿主，那个验能力桥的派发形状。
+ * 那一路由同包的 [JsEngineDispatchTest] 管（零桩、真 `JsEngine`）。两类合起来才
+ * 覆盖两端：本类验宿主，那个验能力桥的派发形状。
+ *
+ * 驱动（[WebViewTask] / [WebViewTaskResult] / [loadBackgroundWebView]）随 2026-10-13 的
+ * 接口重设计搬进了本包，所以本类从 `:platform` 的 jvmTest 迁到这里。留在 `:platform`
+ * 的是另一种东西：**直接构平台类**验 `Webview2Context` 自己的 `evaluate` 管道
+ * （`platform/jvmTest/.../web/Webview2Test.kt`、`WebViewCookieManagerTest.kt`）。
  */
 class WebViewHostTest {
   private lateinit var server: HttpServer
@@ -100,20 +114,16 @@ class WebViewHostTest {
     runBlocking {
       if (!webViewReady()) return@runBlocking
 
-      val seen = Collections.synchronizedList(mutableListOf<WebViewRequest>())
+      val seen = Collections.synchronizedList(mutableListOf<SeenRequest>())
       val result =
         guarded {
           loadBackgroundWebView(
             WebViewTask(
               url = url("/page.html"),
-              onInterceptRequest = { request ->
-                seen += request
+              onInterceptRequest = { url, headers, method, isForMainFrame ->
+                seen += SeenRequest(url, headers, method, isForMainFrame)
                 // 只在子资源上命中：主框架要放行，页面才有机会去请求子资源。
-                if (request.url.endsWith("/sub.js")) {
-                  WebViewInterception(request.url, request.headers)
-                } else {
-                  null
-                }
+                url.endsWith("/sub.js")
               },
             ),
           )
@@ -125,12 +135,12 @@ class WebViewHostTest {
           "子资源 /sub.js 没被拦下来（结果是 $result）。看到的请求：${seen.map { it.url }}",
         )
       assertTrue(
-        hit.interception.url.endsWith("/sub.js"),
-        "命中的应该是子资源：${hit.interception.url}",
+        hit.url.endsWith("/sub.js"),
+        "命中的应该是子资源：${hit.url}",
       )
 
       val main = seen.firstOrNull { it.url.endsWith("/page.html") }
-      assertTrue(main != null, "main-frame navigation should be visible; seen: ${seen.map { it.url} }")
+      assertTrue(main != null, "main-frame navigation should be visible; seen: ${seen.map { it.url }}")
       assertTrue(main.isForMainFrame, "main-frame navigation must have isForMainFrame == true")
 
       val sub = seen.first { it.url.endsWith("/sub.js") }
@@ -170,7 +180,7 @@ class WebViewHostTest {
    * 拦截回调**全程放行**（一次都不命中）之后，加载能自己跑完。
    *
    * 这条验的是「放行」这个结局本身 —— 也就是 [WebViewTask.onInterceptRequest]
-   * 摆在脚本面前的那个选择里，`null` 这一支到底通不通。
+   * 摆在脚本面前的那个选择里，返回 falsy 这一支到底通不通。
    *
    * **别把它写成「命中 → 放行」**：那条时序在真引擎里**不可达**。
    * `cxx/webview/webview.cpp` 的 `WebResourceRequested` 回调里，一旦 JVM 侧返回
@@ -185,16 +195,16 @@ class WebViewHostTest {
     runBlocking {
       if (!webViewReady()) return@runBlocking
 
-      val seen = Collections.synchronizedList(mutableListOf<WebViewRequest>())
+      val seen = Collections.synchronizedList(mutableListOf<SeenRequest>())
       val result =
         guarded {
           loadBackgroundWebView(
             WebViewTask(
               url = url("/page.html"),
-              // 一次都不命中：只记录，不给答复。
-              onInterceptRequest = { request ->
-                seen += request
-                null
+              // 一次都不命中：只记录，一律放行。
+              onInterceptRequest = { url, headers, method, isForMainFrame ->
+                seen += SeenRequest(url, headers, method, isForMainFrame)
+                false
               },
               script = "({ sub: !!window.__subLoaded, imgs: document.images.length })",
             ),
@@ -214,7 +224,7 @@ class WebViewHostTest {
       val scripted =
         assertIs<WebViewTaskResult.Scripted>(
           result,
-          "全程返回 null（放行）不该产生 Intercepted：实际是 $result",
+          "全程不命中（放行）不该产生 Intercepted：实际是 $result",
         )
       val json = scripted.json ?: fail("json must not be null when the script returns a value")
       assertTrue(
@@ -282,65 +292,6 @@ class WebViewHostTest {
       )
     }
 
-  /**
-   * 可见视图上的 `evaluate` —— 和后台任务同一个 `ExecuteScript`，只是收件人换成了
-   * [WebviewContext.executeScript] 挂的那个 `CompletableDeferred`。**这条管道以前
-   * 没有收件人**（结果回到 native 就掉地上了），所以这条用例锁的就是「接上了」。
-   *
-   * **不 attach 也能测**，这也是它能在 jvmTest 里跑的原因：
-   *
-   * - 上下文建出来就是隐藏的顶层窗口，父子关系要等 [WebviewContext.attach]（经
-   *   JAWT 取 AWT 组件的 HWND）才建立 —— 测试里没有 AWT 组件，它就一直是个没有
-   *   父窗口的隐藏窗口，**附到桌面上**；
-   * - `ExecuteScript` 既不要求窗口可见，也不要求它有父窗口。
-   *
-   * 所以这里完全不碰 AWT，只验「建上下文 → 导航 → 执行脚本 → 拿回值」。
-   * 反过来，涉及 attach / 尺寸跟随 / 焦点的部分**在 jvmTest 里测不了**，那需要真的
-   * 组合树和窗口（得起 Compose 窗口，会真弹出来）。
-   */
-  @Test
-  fun visibleViewEvaluateReturnsScriptResult() =
-    runBlocking {
-      if (!webViewReady()) return@runBlocking
-
-      val ctx = WebviewContext()
-      val loaded = CompletableDeferred<Unit>()
-      ctx.listener =
-        object : WebviewContext.Listener {
-          override fun onEvent(
-            event: String,
-            data: String,
-          ) {
-            if (event == "navigationCompleted") loaded.complete(Unit)
-          }
-        }
-      try {
-//        guarded { ctx.start() }
-        // 没 attach 的上下文没有「父窗口客户区」可用，尺寸得自己给；否则 controller
-        // 一直是 0×0，页面未必会真的排版。
-        ctx.setBounds(800, 600)
-        ctx.navigate(url("/page.html"))
-        guarded { loaded.await() }
-
-        val json =
-          ctx.executeScript("({ sub: !!window.__subLoaded, imgs: document.images.length })")
-        assertTrue(json != null, "evaluate must return a result, got null (timeout or script failure)")
-        assertTrue(json.contains("\"sub\":true"), "the external script should have run: $json")
-        assertTrue(json.contains("\"imgs\":1"), "the image subresource should be in the DOM: $json")
-
-        // 「没有返回值」的实际形态是**字符串 `"null"`**（WebView2 把 `undefined` 序列化成 JSON null），
-        // 不是 Kotlin 的 null —— 后者只表示**失败**。已知不一致：后台链路的 `init.js` 没判 `"null"`，
-        // 故后台脚本没返回值时拿到 `null` 而非 `undefined`（要不要对齐取决于插件有没有依赖它）。
-        assertEquals(
-          "null",
-          ctx.executeScript("undefined"),
-          "没有返回值的脚本应该给 JSON 的 null 字符串",
-        )
-      } finally {
-        ctx.close()
-      }
-    }
-
   private fun com.sun.net.httpserver.HttpExchange.respond(
     contentType: String,
     body: ByteArray,
@@ -366,10 +317,16 @@ class WebViewHostTest {
      * 宿主可用性体检。
      *
      * **为什么要真跑一次导航**：只判断「环境起没起来」是不够的。这台机器上实测到过
-     * 一种坏法：环境建得成、控制器建得成、`Navigate` 也返回 S_OK，但**引擎完全不动**
-     * ——连 `about:blank` 都到不了 `NavigationCompleted`，GPU 子进程退出码 1、渲染进程
-     * 根本不创建。同一台机器上 `msedge.exe`（同一个 Chromium 版本）无头模式跑得好好的，
-     * 所以这是 **WebView2 运行时自己坏了**，不是我们的宿主。
+     * **两种**坏法，都长得很像「代码没写对」：
+     *
+     * 1. **引擎完全不动** —— 环境建得成、控制器建得成、`Navigate` 也返回 S_OK，但连
+     *    `about:blank` 都到不了 `NavigationCompleted`，GPU 子进程退出码 1、渲染进程根本不创建；
+     * 2. **子进程崩了**（2026-10-13 实测）—— `processFailed` 直接报
+     *    `kind=6/4 reason=3 exit=7`（GPU / utility 子进程 CRASHED），连 `about:blank` 都过不去；
+     *    宿主 JVM 随后还会随机死在 `0xC0000005` / `0x80000003`。
+     *
+     * 两种情况里同一台机器上的 `msedge.exe`（同一个 Chromium 版本）无头模式都跑得好好的，
+     * 所以是 **WebView2 运行时自己坏了**，不是我们的宿主（重装 Evergreen Runtime 通常能好）。
      *
      * 这种坏法下这几个用例都会卡满 30s 再报一堆看不懂的断言失败，纯属噪声；
      * 体检一次、打印清楚原因、这几个一起跳过，才对得起看构建的人。

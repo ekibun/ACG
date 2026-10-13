@@ -17,10 +17,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import soko.ekibun.web.WebView
 import soko.ekibun.web.WebViewLoadingState
 import soko.ekibun.web.WebViewState
@@ -54,8 +56,6 @@ fun WebScreen(
     rememberWebViewState(WEBVIEW_HOME_URL) {
       // F12 开发者工具，调试页面时很有用；发布可关掉。
       enableDevtools = true
-      // 页面自己弹新窗口会另开一个原生窗口，这个页面就不受控了。
-      allowNewWindow = false
     }
 
   Surface(modifier = modifier.fillMaxSize()) {
@@ -90,6 +90,9 @@ fun WebScreen(
 
 @Composable
 private fun WebToolbar(state: WebViewState) {
+  // 命令都是挂起的（要落到归属线程上执行完才返回），点击回调得自带协程上下文。
+  val scope = rememberCoroutineScope()
+
   Row(
     modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
     verticalAlignment = Alignment.CenterVertically,
@@ -97,22 +100,22 @@ private fun WebToolbar(state: WebViewState) {
   ) {
     TextButton(
       enabled = state.canGoBack,
-      onClick = { state.navigateBack() },
+      onClick = { scope.launch { state.navigateBack() } },
     ) {
       Text("<")
     }
     TextButton(
       enabled = state.canGoForward,
-      onClick = { state.navigateForward() },
+      onClick = { scope.launch { state.navigateForward() } },
     ) {
       Text(">")
     }
     if (state.isLoading) {
-      TextButton(onClick = { state.stopLoading() }) {
+      TextButton(onClick = { scope.launch { state.stopLoading() } }) {
         Text("stop")
       }
     } else {
-      TextButton(onClick = { state.reload() }) {
+      TextButton(onClick = { scope.launch { state.reload() } }) {
         Text("reload")
       }
     }

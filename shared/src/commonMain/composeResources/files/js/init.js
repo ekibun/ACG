@@ -180,9 +180,11 @@ async (_binding) => {
    *
    * 用法（位置参数与 http.js 完全一致）：
    *
-   *   // 1) 拦一个请求：命中即中止加载，把 url+headers 交回脚本自己去 fetch
-   *   const req = await webview(url, { "User-Agent": ua }, null, (request) =>
-   *     request.headers.Range ? { url: request.url, headers: request.headers } : null);
+   *   // 1) 拦一个请求：命中即中止加载，把**被拦下那个请求**的 url+headers 交回脚本
+   *   //    自己去 fetch。回调只当布尔用：返回真值即命中，返回 falsy 则放行 ——
+   *   //    回调收到的对象是 { url, headers, method, isForMainFrame } 四个字段。
+   *   const req = await webview(url, { "User-Agent": ua }, null,
+   *     (request) => !!request.headers.Range);
    *   const buf = await (await fetch(req.url, { headers: req.headers })).arrayBuffer();
    *
    *   // 2) 跑页面 JS 取值：script 的返回值（JSON）解析后交回

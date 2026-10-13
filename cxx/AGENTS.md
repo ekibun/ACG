@@ -63,13 +63,13 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
 
 ## JNI
 
-- 符号是**不带签名的名称导出**：`Java_soko_ekibun_web_WebviewContext_<name>`。
+- 符号是**不带签名的名称导出**：`Java_soko_ekibun_web_Webview2Context_<name>`。
   改了 Kotlin 侧的方法签名却用着旧 dll，**不会报错**，只会参数错位 ——
   改签名后第一件事是确认 dll 真的刷新到了运行位置。
 - 绑定收在 `:platform` 模块：`platform/src/{commonMain,jvmMain,androidMain}/kotlin/soko/ekibun/jni.kt`
   与 `soko.ekibun.{quickjs, ffmpeg, web}`。webview 整层（JNI 面
-  `platform/src/jvmMain/kotlin/soko/ekibun/web/WebviewContext.kt` 与控制器
-  `WebView.jvm.kt` / `BackgroundWebView.jvm.kt`）都在这个模块。
+  `platform/src/jvmMain/kotlin/soko/ekibun/web/Webview2Context.kt` 与控制器
+  `WebView.jvm.kt`）都在这个模块。
   （2026-10-02 拍板把整个 web 文件夹移出 `acg`，JNI 符号随之从 `_acg_web_` 变 `_web_`）——
   包名别再动：那会又改 JNI 导出名，连带重编 dll。
 - **加载方式三个库统一**：都走 `loadLibrary()`，它优先加载**应用资源目录 / classpath 资源目录
@@ -81,7 +81,7 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
   JDK 都只给 dll，`.lib` 要么在 NuGet 里、要么是 MSVC 的 COFF 归档 GNU ld 读不了）。
   ⚠️ 后果是解析失败发生在**映射那一刻**，表现为 `System.load` 抛
   `UnsatisfiedLinkError`、**整个 JVM 起不来**，native 侧没有机会报错。
-  `WebviewContext.kt` 伴生对象的 `init` 因此**先加载两个依赖再加载 webview**
+  `Webview2Context.kt` 伴生对象的 `init` 因此**先加载两个依赖再加载 webview**
   （已加载模块排在搜索路径之前，`jawt.dll` 靠 `java.library.path` = `java.home\bin` 那一档
   命中）—— **顺序反了就不成立**，别把这三行调换。
 - native 调用都要回 `dispatcher` 线程（`QuickJS.kt` 里的做法照抄）。

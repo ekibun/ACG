@@ -15,6 +15,11 @@ agent_created: true
 完整排查手册在 [`references/webview2-windows.md`](./references/webview2-windows.md)，**按现象查对应小节，
 不要整篇读进来**。
 
+WebView 接口重设计的**设计规格与决策记录**（不是排查手册，是「为什么长成这样」的正本）在
+[`references/webview-context-redesign.md`](./references/webview-context-redesign.md)：接口形状、工厂签名、
+后台驱动归属、`onEvent` / `onInterceptor` 形态、拦截回调四参签名、D1–D10 裁定与实现顺序。动 webview
+契约层之前先读它，避免把已裁定的设计重新打开。
+
 三条先记住的硬边界（改之前不知道就会踩）：
 
 - `initScript` / 文档级前置脚本**已整体删除**，`webview.cpp` 里没有任何脚本注入。

@@ -6,8 +6,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
-import soko.ekibun.common.closeWebViewCookieStorage
-import soko.ekibun.web.WebviewContext
 import java.awt.Dimension
 
 /**
@@ -21,8 +19,7 @@ import java.awt.Dimension
  *
  * 插件 JS 的「后台 WebView」**不需要额外窗口**：自研的 `cxx/webview` 宿主自己建
  * 隐藏窗口 + 自己的消息泵，调用时才创建（宿主线程与 environment 进程内共享，
- * 每个上下文只开自己的窗口），
- * 所以 `App()` 里的 `BackgroundWebViewHost()` 在桌面端是个空实现。
+ * 每个上下文只开自己的窗口）。
  *
  * user data folder（cookie / 登录态落在哪）由 web 组件自己按回退链定
  * （`Webview2Context.defaultUserDataDir`），App 层不必再指定 —— 可见页与后台页都是
@@ -42,6 +39,4 @@ fun main(args: Array<String>) {
       App()
     }
   }
-  closeWebViewCookieStorage()
-  WebviewContext.releaseEnvironment()
 }

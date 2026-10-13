@@ -3,15 +3,13 @@ package soko.ekibun.web
 import io.ktor.client.plugins.cookies.CookiesStorage
 import io.ktor.http.Cookie
 import io.ktor.http.Url
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.Job
 
 /**
  * ktor 的 cookie 仓库桥接到 WebView2 的 cookie 库：HTTP 请求（ktor）与 WebView
  * 页面共享同一套登录态。
  *
- * 取 / 写都走 [WebviewContext.getCookie] / [WebviewContext.setCookie] —— 底层是本类
- * **惰性缓存的一个 [WebviewContext]**（第一次用时才建，之后所有读写都复用它）连同它自己
+ * 取 / 写都走 [Webview2Context.getCookie] / [Webview2Context.setCookie] —— 底层是本对象
+ * **惰性缓存的一个 [Webview2Context]**（第一次用时才建，之后所有读写都复用它）连同它自己
  * 的 `ICoreWebView2CookieManager`（controller 就绪时在 native 侧一次取好缓存；manager
  * 属于 profile，跨上下文共享同一套 cookie 库）。于是 cookie 读写投到 WebView 宿主线程上
  * 跑，却不必每次建 / 销一整个 WebView2 上下文。所有上下文共用同一个 user data folder
@@ -21,8 +19,8 @@ import kotlinx.coroutines.Job
  * `HttpCookies.sendCookiesWith` 会**覆盖** `Cookie` 头（`headers[Cookie] =
  * cookieHeader`），手动种进去的头会被无声抹掉。所以登录态只能从存储这一侧喂给 ktor。
  */
-internal class WebViewCookieStorage : CookiesStorage {
-  private val lazyCtx = lazy { WebviewContext() }
+internal object WebViewCookieStorage : CookiesStorage {
+  private val lazyCtx = lazy { Webview2Context() }
   private val ctx by lazyCtx
 
   override suspend fun get(requestUrl: Url): List<Cookie> {
@@ -80,16 +78,5 @@ internal class WebViewCookieStorage : CookiesStorage {
 
   override fun close() {
     if (lazyCtx.isInitialized()) ctx.close()
-  }
-
-  /**
-   * [close] 的可等待版本：返回的 [Job] 完成时，缓存上下文已经真正销毁 ——
-   * native 侧控制器已关、宿主窗口已拆（见 [Pointer.closeDeferred]）。
-   * 退出路径必须等它：不等的话紧随其后的 releaseEnvironment 会把 STA 线程
-   * 先拆掉，销毁活儿就没了落点。上下文从未建过时返回已完成的 Job。
-   */
-  fun closeDeferred(): Job {
-    if (!lazyCtx.isInitialized()) return CompletableDeferred(Unit)
-    return ctx.closeDeferred()
   }
 }

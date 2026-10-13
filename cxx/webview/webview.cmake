@@ -70,7 +70,7 @@ target_link_libraries(webview PRIVATE
 
 # WebView2Loader.dll 必须与 webview.dll 同级：隐式导入是 WebView2 自己按导入表
 # 解析的，而 JNI 库由 System.load 从资源目录拉起，那段目录不在默认搜索路径里。
-# jawt.dll 不必同级 —— `WebviewContext.kt` 会先用 `System.loadLibrary` 加载它
+# jawt.dll 不必同级 —— `Webview2Context.kt` 会先用 `System.loadLibrary` 加载它
 # （`java.library.path` 默认就是 `java.home\bin`），「已加载模块」优先于搜索路径。
 add_custom_command(TARGET webview POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different

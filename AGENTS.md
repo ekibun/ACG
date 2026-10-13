@@ -143,8 +143,16 @@ animeko 2913 个 kt/kts、60866 行注释里含 emoji 的只有 30 行（0.05%�
   （Android 用 `ENCODING_PCM_8BIT` 是有意为之）。改这里之前先确认方向。
   **视频没有这个自由度**：转码目标在 native 侧写死 `AV_PIX_FMT_RGBA`，Kotlin 侧已无像素格式
   常量与 `videoFormat` 参数（见 [cxx/AGENTS.md](./cxx/AGENTS.md) 的 ffmpeg 一节）。
-- WebView 契约在 `soko.ekibun.web`（Android 用 `android.webkit.WebView`，桌面走自研宿主）。
-  **不要引入第三方 KMP WebView 库**，理由见 [cxx/AGENTS.md](./cxx/AGENTS.md)。
+  - WebView 契约在 `soko.ekibun.web`（Android 用 `android.webkit.WebView`，桌面走自研宿主）。
+    **不要引入第三方 KMP WebView 库**，理由见 [cxx/AGENTS.md](./cxx/AGENTS.md)。
+  - **WebView 进程级收尾只由 `Webview2Context` 负责**：`releaseEnvironment()` 的**唯一**调用点是
+    `Webview2Context` 伴生 `init` 注册的 **JVM shutdown hook**，**`:platform` 库自己收尾、产品层不要调**。
+    `desktopApp/src/main/kotlin/soko/ekibun/acg/main.kt` 不要再显式调 `Webview2Context.releaseEnvironment()`
+    —— 收尾交给 hook（应用退出即 JVM 关闭、hook 自动跑），重复调用只会多一次无界 `thread.join()` 的等待；
+    测试进程没有 `main.kt`，正靠这个 hook 收场。
+  - **`WebViewCookieStorage` 是 `object` 单例，不是 `class`**：桌面端 ktor↔WebView2 的 cookie 桥
+    共享同一个惰性缓存的 `Webview2Context`，与 Android 侧 `AndroidWebViewCookieStorage` 的 `object`
+    口径对齐；其内部上下文惰性创建，不要为「显式控制生命周期」改回 `class` + 外部 `lazy` 构造。
   后台页 JS 契约（对齐 BangumiPlugin `assets/modules/http.js`）：
 
   ```js

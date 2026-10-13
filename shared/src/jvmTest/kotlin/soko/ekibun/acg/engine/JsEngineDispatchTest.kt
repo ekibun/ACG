@@ -6,9 +6,6 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
-import soko.ekibun.web.WebViewTask
-import soko.ekibun.web.WebViewTaskResult
-import soko.ekibun.web.loadBackgroundWebView
 import java.net.InetSocketAddress
 import java.util.Base64
 import java.util.Collections
@@ -29,7 +26,7 @@ import kotlin.test.assertTrue
  * **参数形状**：`args[0]` 是什么、`args[1]` 是什么。
  * 判据与踩坑取证见 `.agents/skills/quickjs-ownership/references/ability-bridge.md`。
  *
- * [soko.ekibun.web.WebViewHostTest] 补的是另一半：它直接构造 [WebViewTask]
+ * [WebViewHostTest] 补的是另一半：它直接构造 [WebViewTask]
  * 调 [loadBackgroundWebView]、绕开 JS 桥，验 WebView2 宿主本身的行为。
  * **它证明不了派发改对了** —— `args` 的下标写错时它照样全绿。
  *
@@ -237,6 +234,10 @@ class JsEngineDispatchTest {
    * 所以**这条不是靠「不报错」活着的**（那 4 行下标写错都会当场抛），它真正锁的是
    * **实参有没有真的按位送到** —— 所以除了解禁结果，还断言 `User-Agent` 真到了页面
    * （`pageRequests` 里查）：这一条对「header 被换成别的东西」敏感。
+   *
+   * 回调仍按**老口径**返回对象（`{ url, headers }`）—— D10 之后返回值只当布尔用，对象也是真值 ⇒
+   * 老脚本照样命中；但回传的 url / headers 取的是**被拦下请求自己**那份，不是返回对象里那份
+   * （断言里那条 `no-range` 钉的就是这个）。
    */
   @Test
   fun webviewBranchIsReachable() {
@@ -255,12 +256,18 @@ class JsEngineDispatchTest {
           (request) => request.url.endsWith("/sub.js")
             ? { url: request.url, headers: { "Range": "bytes=0-" } }
             : null);
-        return req ? req.url + "|" + req.headers.Range : "missed";
+        const hs = Object.keys(req.headers || {});
+        return req.url + "|" + (hs.length > 0 ? "headers-ok" : "no-headers") +
+          "|" + (hs.indexOf("Range") < 0 ? "no-range" : "has-range");
         """.trimIndent(),
         timeoutMs = 60_000,
       )
 
-    assertEquals("${url("/sub.js")}|bytes=0-", out, "命中拦截的应是子资源并带回 Range")
+    assertEquals(
+      "${url("/sub.js")}|headers-ok|no-range",
+      out,
+      "命中的应是子资源、带回它自己的头；返回对象里的 Range 按 D10 不该被采用",
+    )
 
     // args[1]（header）真的送到了 —— 下标 1↔2 串位时这条会红，而上面那条不会。
     val ua = pageRequests.firstOrNull()?.get("User-agent")?.firstOrNull()
@@ -435,7 +442,7 @@ class JsEngineDispatchTest {
   /**
    * 宿主体检：真导航一次 `about:blank`。
    *
-   * 与 [soko.ekibun.web.WebViewHostTest] 的 `checkHost` 同一套理由（那边有完整
+   * 与 [WebViewHostTest] 的 `checkHost` 同一套理由（那边有完整
    * 说明）：环境建得成但**引擎完全不动**是一种真实坏法 —— 连 `about:blank` 都到不了
    * `NavigationCompleted`。不体检就 skip 会让人误以为验过了，不体检就直跑则 30s
    * 超时加一堆看不懂的断言失败，纯属噪声。

@@ -280,7 +280,7 @@
 - **落地顺序**（architecture.md §5）：`epochTimeMs()` 墙钟原语 + kotlinx-serialization 依赖  
   （**改依赖需用户确认**）→ `acg.model` 领域类型 → `acg.catalog.bgm`（DTO + mapper + 限流退避）  
   → 持久化分片 + 收藏/历史仓库 → `HtmlParser` 宿主原语 + JS 数据源契约（含 B23 流式 response）+ Line 绑定 →  
-  业务四页 → WebView 投前台（悬浮按钮方案，先 Android 验证、桌面动 C++ 摘 `background` 标志）  
+  业务四页 → WebView 接口重设计（设计定稿于 [.agents/skills/webview2-windows/references/webview-context-redesign.md](.agents/skills/webview2-windows/references/webview-context-redesign.md)，已实现）→ WebView 投前台（悬浮按钮方案，先 Android 验证、桌面动 C++ 摘 `background` 标志）  
   → P2：AniList mapper / per-episode 精确进度 / animeko 订阅兼容解释器 / 边播边缓存 / torrent。
 - **完成判据**：按 §5 分条验收，每条落地后回来更新本条状态；全部落地后删条目  
   （设计文档随实现修订，不删）。
