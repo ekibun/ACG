@@ -2,7 +2,7 @@
 
 只讲 `cxx/` 下的原生构建、JNI 桥与各库的硬约束。项目整体约定见 [../AGENTS.md](../AGENTS.md)；构建 / 测试见 skill `build-and-test`；
 WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills/) 下对应的技能里；通用做法（最小实现、外科手术式改动）见
-根 [../AGENTS.md](../AGENTS.md) §1。
+根 [../AGENTS.md](../AGENTS.md) §2。
 
 产物是三个共享库，各自被同名 `.cmake` 引入，源码在 `cxx/{webview,quickjs,ffmpeg}/`：
 
@@ -132,7 +132,7 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
   - `tag = -1` 是**正常的对象**（`JS_TAG_OBJECT = -1`），不是异常。
 - **`import()` / `require()` 一律不许用**：本桥的模块加载路径会把进程 `abort()`（见
   [`../.agents/skills/project-traps/references/silent-failures.md`](../.agents/skills/project-traps/references/silent-failures.md)）。
-  能力全部内联进 `init.js`（脚本位置见 [../AGENTS.md](../AGENTS.md) §3）。
+  能力全部内联进 `init.js`（脚本位置见 [../AGENTS.md](../AGENTS.md) §2.5）。
 
 ## ffmpeg
 
@@ -155,7 +155,7 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
   上下文被重建的次数** —— 日志里刷出几千条时先查上下文缓存，别去查颜色空间
   （2026-09-22：这条线索把 `_srcVideoFormat` 漏回写钉了出来）。
 - 音频不一样：`AvSurfaceContext.audioFormat` 仍是平台**要求** native 输出什么采样格式，
-  语义见 [../AGENTS.md](../AGENTS.md) §4。
+  语义见 [../AGENTS.md](../AGENTS.md) §2.5。
 - 自定义 AVIO 下的 seek 能力由 `HttpIO.seek` 的模拟质量决定（`aviobuf.c` 会因 seek 回调非空
   判为 `AVIO_SEEKABLE_NORMAL`）；语义有专属用例 `HttpSeekSemanticsTest` /
   `SeekWindowSemanticsTest`，动这块必须让它们保持绿。

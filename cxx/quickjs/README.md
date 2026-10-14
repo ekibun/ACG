@@ -12,7 +12,7 @@
 `import()` / `require()` 被禁用（能力内联进 `init.js`），且引用计数规则由专设的 skill 接管。
 
 > 所有权模型是显式引用计数，完整规则见
-> [`../.agents/skills/quickjs-ownership/references/quickjs-reference-ownership.md`](../.agents/skills/quickjs-ownership/references/quickjs-reference-ownership.md)
+> [`../../.agents/skills/quickjs-ownership/references/quickjs-reference-ownership.md`](../../.agents/skills/quickjs-ownership/references/quickjs-reference-ownership.md)
 > （或触发 skill `quickjs-ownership`）。动 `JS_FreeValue` / `JS_DupValue` / `definePropertyValue` 之前先读它。
 > 本文只讲架构与时序，不堆规则清单。
 
@@ -119,9 +119,9 @@ sequenceDiagram
 
 ## 相关文档
 
-- 引用计数完整规则（消费/持票/防环/线程归属）：[`../.agents/skills/quickjs-ownership/references/quickjs-reference-ownership.md`](../.agents/skills/quickjs-ownership/references/quickjs-reference-ownership.md)
-- 能力桥（`JavaObject` / `jsWrapObject` 析构回收）：`[../.agents/skills/quickjs-ownership/references/ability-bridge.md](../.agents/skills/quickjs-ownership/references/ability-bridge.md)`
-- `import()` / `require()` 禁用与 `init.js` 内联：`[../.agents/skills/project-traps/references/silent-failures.md](../.agents/skills/project-traps/references/silent-failures.md)`
+- 引用计数完整规则（消费/持票/防环/线程归属）：[`../../.agents/skills/quickjs-ownership/references/quickjs-reference-ownership.md`](../../.agents/skills/quickjs-ownership/references/quickjs-reference-ownership.md)
+- 能力桥（`JavaObject` / `jsWrapObject` 析构回收）：`[../../.agents/skills/quickjs-ownership/references/ability-bridge.md](../../.agents/skills/quickjs-ownership/references/ability-bridge.md)`
+- `import()` / `require()` 禁用与 `init.js` 内联：`[../../.agents/skills/project-traps/references/silent-failures.md](../../.agents/skills/project-traps/references/silent-failures.md)`
 - QuickJS 硬约束（tag、`@JvmStatic` 与 `thiz`、包名即符号）：[`../AGENTS.md`](../AGENTS.md) 的 quickjs 一节
 - 原生构建 / `buildJni` / dll 落位：`[../AGENTS.md](../AGENTS.md)` 的「原生构建」一节
 - 上游设计参照：[`flutter_qjs`](https://github.com/ekibun/flutter_qjs)

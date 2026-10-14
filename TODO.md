@@ -143,10 +143,11 @@
 
 ### C2. 桌面安装包命令与产物路径
 
-- **现状**：**待补**，还没真实打过一次。任务确实存在  
-  （`:desktopApp:tasks --all` 里有 `package` / `packageMsi` / `packageDeb` / `packageDmg` /  
+- **现状**：**待补**，还没真实打过一次。`targetFormats` 只留 `Msi`（`Dmg` / `Deb` 已从
+  `desktopApp/build.gradle.kts` 移除，桌面端只按 Windows），任务确实存在  
+  （`:desktopApp:tasks --all` 里有 `package` / `packageMsi` /  
   `packageDistributionForCurrentOS` / `packageRelease*` / `createDistributable` /  
-  `runDistributable` / `packageUberJarForCurrentOS` / `notarizeDmg`）。
+  `runDistributable` / `packageUberJarForCurrentOS`）。
 - **完成判据**：至少跑通 Windows 侧的打包，把命令与产物位置写进 skill `build-and-test`。
 
 ### C3. 热重载到底能不能用
@@ -178,7 +179,7 @@
 
 ### D4. 注释的长度与符号（规则已入 `AGENTS.md`，剩下分期改）
 
-- **已落地**（2026-10-04）：三条写法规则进了根 `AGENTS.md` §1 —— ①注释讲现状不讲历程、  
+- **已落地**（2026-10-04）：三条写法规则进了根 `AGENTS.md` §2.5 —— ①注释讲现状不讲历程、  
   ②用 import 不写全限定名、③源码正文不用 emoji 符号（附 animeko 的实测依据与例外边界）。  
   根 `build.gradle.kts` 那处全限定名（规则②的现行反例）已改；本次改动涉及的 10 个文件里  
   30 处 ⚠️ 已删（符号去、句子留）。
@@ -209,12 +210,12 @@
   - `FFPlayer` 类 KDoc / `takeOverPlayback` / `resume` 各压一轮 —— 这份文件的注释**基本都是  
     真约束**（是「该留」的好样板），再压就要删判据了。
 - **复述是独立于长度的另一维**（2026-10-05 补，§四那条重话原先只在 `comments.md` 正文里，  
-  `AGENTS.md` §1 竟没有）。压长度时**漏了 4 处**：`AvSurfaceContext` 的「写播放倍速。」配  
+  `AGENTS.md` 竟没有）。压长度时**漏了 4 处**：`AvSurfaceContext` 的「写播放倍速。」配  
   `fun setSpeedRatio`、「读播放倍速。」的前半句；`VideoSurface` 的「平台相关的视频输出区域。」  
   配 `expect fun VideoSurface`；`SurfaceContext` 类 KDoc 后半句「音频/视频输出由各平台子类实现」  
   （`abstract class` + 同目录两个 `Playback.*.kt` 已经说明）。⇒ 判据改成**两步**：  
   **先剔复述**（删掉这行注释，理解有没有变化？没变化就删），**再问约束还是机制**。  
-  写进 `comments.md` 第六节与 `AGENTS.md` §1。
+  写进 `comments.md` 第六节与 `AGENTS.md` §2.5。
 - **长度基线：三层，建议性**（2026-10-05 实测 animeko 2913 个 kt/kts 后补进 `comments.md` 第六节）。  
   中位 / p90：类 KDoc 3/9、函数 KDoc 3/7、属性 KDoc 3/5、**函数体内 `//` 1/2**  
   （animeko 那 4779 组行内注释里 83% 是单行、93% ≤ 2 行）。建议上限取 p90 向上取整：  
@@ -257,7 +258,7 @@
   animeko 那种「改子系统前先读它的文档」的入口——FFPlayer 帧队列、web 包两端的窗口挂接链  
   这类知识散在文件头注释里，质量高但没有代码地图，也没有稳定的阅读入口。
 - **完成判据**：为 player、web 两个最常动的子系统各出一页代码地图（术语 + 类职责 +  
-  关键链路），放对应 skill 的 `references/` 下，`AGENTS.md` §7 索引表加指针。
+  关键链路），放对应 skill 的 `references/` 下，`.agents/README.md` 的「技能索引」表加指针。
 
 ## E. 结构性改进（需要先决策）
 

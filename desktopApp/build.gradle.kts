@@ -126,7 +126,7 @@ compose.desktop {
     mainClass = "soko.ekibun.acg.MainKt"
 
     nativeDistributions {
-      targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
+      targetFormats(TargetFormat.Msi)
       packageName = "soko.ekibun.acg"
       packageVersion = "1.0.0"
       // 原生库作为应用资源随包走（见上面 syncNativeResources）。

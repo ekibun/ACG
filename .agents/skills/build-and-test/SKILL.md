@@ -27,4 +27,4 @@ agent_created: true
 
 一条最容易白干一轮的：**验收只过定点 `jvmTest`**，四条编译闸门、全量 `:shared:jvmTest` /
 `:platform:jvmTest` 与 lint
-（`ktlintCheck` / `clang-format`）默认都不跑 —— 见根 [`AGENTS.md`](../../AGENTS.md) §5。
+（`ktlintCheck` / `clang-format`）默认都不跑 —— 见根 [`AGENTS.md`](../../../AGENTS.md) §2.5。

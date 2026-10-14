@@ -6,6 +6,6 @@ package soko.ekibun.common
  * 别拿它表达日历时间。
  *
  * 与 `soko.ekibun.common.openFileHandle` 同一条 expect/actual 路子：
- * `commonMain` 不出现平台符号，平台能力以最小原语交进来（根 AGENTS.md §4）。
+ * `commonMain` 不出现平台符号，平台能力以最小原语交进来（根 AGENTS.md §2.5）。
  */
 expect fun monoTimeMs(): Long

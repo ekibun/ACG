@@ -13,8 +13,8 @@
 
 > 硬约束、构建坑、字节级实测全在 [`../AGENTS.md`](../AGENTS.md) 的 ffmpeg 一节；不报错只失效的
 > 几类（两轮播放串帧、缓冲未回写、pb 二次关闭、读轮与销毁 UAF）逐项在
-> [`../.agents/skills/project-traps/references/silent-failures.md`](../.agents/skills/project-traps/references/silent-failures.md)
-> 与 [`http-streaming.md`](../.agents/skills/project-traps/references/http-streaming.md)。
+> [`../../.agents/skills/project-traps/references/silent-failures.md`](../../.agents/skills/project-traps/references/silent-failures.md)
+> 与 [`http-streaming.md`](../../.agents/skills/project-traps/references/http-streaming.md)。
 > 本文只讲架构与时序，不堆缺陷清单。
 
 ## 架构
@@ -126,7 +126,7 @@ sequenceDiagram
 ## 相关文档
 
 - ffmpeg 硬约束（RGBA 钉死、asm 差异、缓冲缓存键回写、pb 账本、AvIO 禁忌、EAGAIN/drain）：[`../AGENTS.md`](../AGENTS.md) 的 ffmpeg 一节
-- 不报错只失效逐项：`[../.agents/skills/project-traps/references/silent-failures.md](../.agents/skills/project-traps/references/silent-failures.md)`
-- 自定义 AVIO 与读轮作废顺序：`[../.agents/skills/project-traps/references/http-streaming.md](../.agents/skills/project-traps/references/http-streaming.md)`
+- 不报错只失效逐项：`[../../.agents/skills/project-traps/references/silent-failures.md](../../.agents/skills/project-traps/references/silent-failures.md)`
+- 自定义 AVIO 与读轮作废顺序：`[../../.agents/skills/project-traps/references/http-streaming.md](../../.agents/skills/project-traps/references/http-streaming.md)`
 - 原生构建 / `buildJni` / dll 落位：`[../AGENTS.md](../AGENTS.md)` 的「原生构建」一节
 - 上游设计参照：[`flutter_ffplay`](https://github.com/ekibun/flutter_ffplay)

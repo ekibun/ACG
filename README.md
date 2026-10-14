@@ -1,9 +1,12 @@
 This is a Kotlin Multiplatform project targeting Android and Desktop (JVM).
 
-* [/shared](./shared/src) holds everything shared by the two applications.
-  - [commonMain](./shared/src/commonMain/kotlin) is platform-independent.
-  - [androidMain](./shared/src/androidMain/kotlin) and [jvmMain](./shared/src/jvmMain/kotlin) hold the
+* [/platform](./platform/src) holds the platform layer — the JNI bindings, the WebView contract and
+  its two implementations, the player views and the IO primitives.
+  - [commonMain](./platform/src/commonMain/kotlin) is platform-independent.
+  - [androidMain](./platform/src/androidMain/kotlin) and [jvmMain](./platform/src/jvmMain/kotlin) hold the
     platform-specific implementations of the `expect` declarations in `commonMain`.
+* [/shared](./shared/src) holds the shared business layer.
+  - [commonMain](./shared/src/commonMain/kotlin) is the only production source set.
 * [/androidApp](./androidApp) is the Android application module.
 * [/desktopApp](./desktopApp) is the desktop (JVM) application module.
 * [/cxx](./cxx) contains the native libraries — a WebView2 host, a QuickJS bridge and FFmpeg.

@@ -18,7 +18,7 @@ object File {
 /**
  * 本地文件的随机访问句柄。
  *
- * `commonMain` 不许出现平台符号（根 AGENTS.md §4），文件能力只能这样 expect 出来；
+ * `commonMain` 不许出现平台符号（根 AGENTS.md §2.5），文件能力只能这样 expect 出来；
  * 两端 actual 都只是包一层 `RandomAccessFile`。
  */
 interface FileHandle {

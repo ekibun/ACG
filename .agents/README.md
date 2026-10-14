@@ -24,8 +24,7 @@
 - **改文档同样不许引入未核实的事实**：删改时不得凭印象补技术断言（本项目为此返工过一次）。
   不确定就先去读调用点，或跑一遍。
 - **删旧清单前，先逐条建"它在新的落点对照"**：确认每一条都有地方接手再删，别整段凭印象砍掉。
-- **同一个事实只留一个正本**：别处已有就在此处只写指针。**索引集中在 `AGENTS.md` §7**，
-  本目录与各 `SKILL.md` 都不再重复一份。
+- **同一个事实只留一个正本**：别处已有就在此处只写指针。**技能索引集中在本文下方的「技能索引」表**（`AGENTS.md` 严格贴合范本、只放规则与陷阱，不含索引表）；各 `SKILL.md` 都不再重复一份。
 - **改节号 = 一次全仓引用清扫**：`AGENTS.md` 的节号被 `cxx/AGENTS.md`、`.agents/**`、`TODO.md`
   以裸 `§N` 的形式引用着。改完必须全仓搜一遍 `§` 逐条改对 —— 历史上留下过两条指错节号的死引用。
 
@@ -41,8 +40,7 @@
         └── references/        # 按需加载的详细资料，SKILL.md 只做路由
 ```
 
-**技能清单不在这里重复** —— 每个技能"什么时候看"+ 路径都在 [`../AGENTS.md`](../AGENTS.md) §7 的表格里，
-那是唯一的索引。
+**技能清单不在别处重复** —— 每个技能"什么时候看"+ 路径都集中在本文下方的「技能索引」表，那是唯一的索引（`AGENTS.md` §2.5 只放规则，技能指针见其「项目关键规则」）。
 
 ## 接线：这些技能怎么被读到
 
@@ -50,7 +48,7 @@
 的目录联接，2026-09-16 已按用户要求删除：它不入库、每台机器都得重建，收益只是"宿主可能自动登记技能"，
 而"宿主扫描器是否跟随联接"始终没验证过 —— 不如把路径写清楚。现在靠**显式路径**，不需要额外步骤：
 
-1. **首入口是 `AGENTS.md` §7 的表格** —— `AGENTS.md` 自动加载，所以触发条件始终在上下文里。
+1. **首入口是本文的「技能索引」表** —— `AGENTS.md` 自动加载、其 §2.5 指向本文，所以触发条件始终在上下文里。
 2. 要用了就直接读 `.agents/skills/<name>/SKILL.md`，再按它自己的路由去读 `references/`。
 
 宿主若自己认出了同名技能（把 `SKILL.md` 的 `description` 当触发条件），用技能名触发即可；
@@ -79,7 +77,7 @@
 4. 详细内容放 `references/*.md`。**同一个事实只允许有一个正本** —— 如果别处已有，这里只留指针。
 5. 技能数量保持少而精。每多一个技能，它的 name + description 就多占一份上下文，
    描述之间还容易互相干扰。
-6. **顺手在 `AGENTS.md` §7 的索引表里加一行**（主题 / 什么时候看 / 路径）——
+6. **顺手在本文「技能索引」表里加一行**（主题 / 什么时候看 / 路径）——
    那是唯一索引，漏了就等于这个技能不存在。
 
 ## 不要做
@@ -88,3 +86,35 @@
 - **不要把技能复制到 `<workspace>/.workbuddy/skills/`**（理由见上面"接线"）：那是本机的缓存目录、
   且不入库，复制出来的第二份一定会漂移。
 - **不要把一个技能写成操作手册**。模型自己会判断步骤，过细的流程反而是干扰。
+
+## 索引
+
+`AGENTS.md` 严格贴合范本、只放规则与陷阱，不含索引表；本目录是参考层，集中放两类查表。
+
+### 技能索引（唯一正本）
+
+参考资料与技能都在 [`.agents/`](./) 下，**按需读，不要预先全读**；目录分工、文档体例、与宿主的接线方式、怎么加新技能，见本文。下表是**唯一的技能索引**。
+
+| 主题 | 什么时候看 | 去哪 |
+|---|---|---|
+| 未完成的工作、已知缺口 | 想动手修东西之前 | [TODO.md](../TODO.md) |
+| 跑构建 / 打包 / 测试、判断"做完没有" | 改完代码要验收、或要跑起来时 | skill `build-and-test` → [`.agents/skills/build-and-test/SKILL.md`](./skills/build-and-test/SKILL.md) |
+| native 重编与 dll 落位 | 改过 `cxx/` 之后 | [`../cxx/AGENTS.md`](../cxx/AGENTS.md) 的「原生构建」 |
+| Kotlin / Compose / C++ / Gradle 的写法 | 新增或改动上述代码时 | skill `coding-style` → [`.agents/skills/coding-style/SKILL.md`](./skills/coding-style/SKILL.md) |
+| 原生构建细节、JNI 约定、各库硬约束 | 改 `cxx/` 或 native 绑定、native 行为不对时 | [../cxx/AGENTS.md](../cxx/AGENTS.md) |
+| WebView2 / Win32 窗口 / 键盘焦点 / 白屏与 GPU 崩溃循环 | 桌面端渲染、焦点、崩溃 | skill `webview2-windows` → [`.agents/skills/webview2-windows/SKILL.md`](./skills/webview2-windows/SKILL.md) |
+| QuickJS 引用计数与所有权 | 动 `JS_FreeValue` / `JS_DupValue` 之前 | skill `quickjs-ownership` → [`.agents/skills/quickjs-ownership/SKILL.md`](./skills/quickjs-ownership/SKILL.md) |
+| 历史踩坑清单、"不报错只失效"的那一类 | 动不熟悉的模块前扫一眼 | skill `project-traps` → [`.agents/skills/project-traps/SKILL.md`](./skills/project-traps/SKILL.md) |
+| 调试（崩溃 / 挂死 / 开日志） | 出了问题在排查时 | skill `debugging` → [`.agents/skills/debugging/SKILL.md`](./skills/debugging/SKILL.md) |
+| 产品概述 | 想先了解这个项目是干什么的 | [../README.md](../README.md) |
+
+### 代码入口位置
+
+| 找什么 | 去哪 |
+|---|---|
+| Android 入口 | `androidApp/src/main/kotlin/soko/ekibun/acg/MainActivity.kt` |
+| 桌面入口 | `desktopApp/src/main/kotlin/soko/ekibun/acg/main.kt`（`mainClass = soko.ekibun.acg.MainKt`） |
+| 共享 UI 入口 | `shared/src/commonMain/kotlin/soko/ekibun/acg/App.kt` |
+| JS 引导脚本与模块 | `shared/src/commonMain/composeResources/files/js/` |
+| 原生源码 | `cxx/{webview,quickjs,ffmpeg}/` |
+| 平台层 | `platform/src/**` |
