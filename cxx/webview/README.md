@@ -1,4 +1,4 @@
-# cxx/webview — WebView2 原生宿主
+﻿# cxx/webview — WebView2 原生宿主
 
 桌面端（Windows）的 WebView2 原生宿主，用 C++ 实现 Kotlin 侧 `soko.ekibun.web.Webview2Context`
 与 WebView2 / COM 之间的 JNI 桥。整个模块只有一个翻译单元 `webview.cpp`：它既承载环境单例
@@ -6,7 +6,7 @@
 （`Java_soko_ekibun_web_Webview2Context_*`）与 STA 消息泵。
 
 > 并发、锁序与已知坑的逐条分析见
-> [`.agents/skills/webview2-windows/references/webviewcpp-concurrency.md`](../../.agents/skills/webview2-windows/references/webviewcpp-concurrency.md)。
+> [`docs/design/webviewcpp-concurrency.md`](../../docs/design/webviewcpp-concurrency.md)。
 > 本文只讲架构与时序，不堆缺陷清单。
 
 ## 架构
@@ -135,6 +135,6 @@ sequenceDiagram
 
 ## 相关文档
 
-- 并发 / 锁序 / 已知坑（A、B、C）的逐条分析：`.agents/skills/webview2-windows/references/webviewcpp-concurrency.md`
-- WebView 接口设计规格与决策记录：`.agents/skills/webview2-windows/references/webview-context-redesign.md`
-- Windows 上 WebView2 的故障排查：`.agents/skills/webview2-windows/references/webview2-windows.md`
+- 并发 / 锁序 / 已知坑（A、B、C）的逐条分析：`docs/design/webviewcpp-concurrency.md`
+- WebView 接口设计规格与决策记录：`docs/design/webview-context-redesign.md`
+- Windows 上 WebView2 的故障排查：`.agents/skills/troubleshooting/references/webview2-windows.md`

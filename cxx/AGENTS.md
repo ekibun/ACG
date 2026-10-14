@@ -39,10 +39,11 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
 **不用你准备任何 JDK**。唯一还要的本机私有值是环境变量 **`MSYS2_BIN`**
 （`cxx/exec.cmd` 靠它进 MSYS2 的 bash；没设的话 exec.cmd 直接退出 1）。
 
-- cmake 在 **configure 期**读这份 JDK 的 `$JAVA_HOME/include` 与 `include/win32`（jni.h）。
-  Gradle 给的那份是**带 `include/` 的完整 JDK**（`gradle/gradle-daemon-jvm.properties` 钉的那份，
-  本地没有 Gradle 会自己下），所以 jni.h 自动可得。**注意**：只有 `bin/` 没有 `include/` 的 JDK
-  （比如 Android Studio 自带的 jbr）拿去当 `JAVA_HOME` 会直接 `jni.h: No such file`。
+- cmake 在 **configure 期**读 `$ENV{JAVA_HOME}/include` 与 `include/win32`（jni.h）。
+  `:desktopApp:buildJni` 调 `cxx/build.jni.sh` 时，**Gradle 会把 `JAVA_HOME` 覆盖成它自己备好的
+  toolchain JDK**（`gradle/gradle-daemon-jvm.properties` 钉的那份 Azul 21，本地没有自动下，
+  **带 `include/`**）—— 所以 jni.h 自动可得，你**不用、也不该**自己准备 / 指定任何 JDK。
+  全局 `JAVA_HOME`（如 Android Studio 的 jbr）在这里不参与，native 不会去读它。
 - **走 MSYS2 自己的 login shell 时工具链是自足的**：`MSYSTEM` / `/mingw64/bin` / `/usr/bin`
   （`make` / `cmake` 在这里）/ 临时目录已就绪，无需补丁。坑在**非 login shell**
   （Git Bash、`bash -c`）：`MSYSTEM` 缺失、`c++.exe` 找不到自己的 DLL 以 `0xC0000135` **静默**死、
@@ -117,21 +118,29 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
 - `WebView2.h` 在 MinGW 下能编，但 SDK 的 C++ 辅助类（如 `WebView2EnvironmentOptions.h`）
   依赖 MSVC 专有的 `Microsoft::WRL::RuntimeClass`，MinGW 的 WRL 只移植了 `ComPtr` —— 别去引那些头。
 - **页面脚本注入为零**：`initScript` 已整体删除，`put_IsWebMessageEnabled` 恒 `FALSE`。
-- 崩溃 / 白屏 / 焦点问题，**先读** [`../.agents/skills/webview2-windows/references/webview2-windows.md`](../.agents/skills/webview2-windows/references/webview2-windows.md)（或触发 skill `webview2-windows`），
+- 崩溃 / 白屏 / 焦点问题，**先读** [`../.agents/skills/troubleshooting/references/webview2-windows.md`](../.agents/skills/troubleshooting/references/webview2-windows.md)，
   不要重新发明排查路径。
 
 ## quickjs
 
-- 所有权模型是显式引用计数，完整规则见
-  [`../.agents/skills/quickjs-ownership/references/quickjs-reference-ownership.md`](../.agents/skills/quickjs-ownership/references/quickjs-reference-ownership.md)
-  （或触发 skill `quickjs-ownership`）。动 `JS_FreeValue` / `JS_DupValue` 之前先读它。
-- 三条最容易踩死的（漏了会改错）：
-  - `JS_DefinePropertyValue` 内部**无条件**消费 `val` 的引用，调用方不要再减一次；
+- 所有权模型是**显式引用计数**：每造一个跨 JNI 的句柄就是一票，`dup` 加票、归还减票，
+  销毁 runtime 时必须**没有残留**（`JS_FreeRuntime` 会 `assert(list_empty(&rt->gc_obj_list))`，
+  漏任何一票就是整个进程 `abort()`，Gradle 只报一句结果、`failures=0`，极具欺骗性）。
+  规则已由代码结构保证 —— **`Pointer` 基类 + `QuickJS.releaseImpl` 的清算就是正本**，照着改：
+  - `JS_DefinePropertyValue` 内部**无条件**消费 `val` 的引用，调用方**不要**再减一次
+    （`quickjs.cpp` 把 `jsReleaseValue` / `jsDestroyHandle` 拆成两个粒度就是为它，注释里有说）。
   - `jsToJava` 是**唯一**的对象/标量分发点，递归点必须走它（历史上把对象分支移出去过一次，
-    症状是"数组元素全是 null"、"promise 没有 then"）；
-  - `tag = -1` 是**正常的对象**（`JS_TAG_OBJECT = -1`），不是异常。
+    症状是「数组元素全是 null」「promise 没有 then」）。
+  - **引用必须在 runtime 销毁之前归还，且归还路径不能经过 `isClosed` 门**：`releaseRef`
+    别包进 `withPtrSync`（包了 `collectLeaks()` 那轮清算就被挡掉 → 残留撑到 `JS_FreeRuntime` → abort），
+    也别把归还 `submit` 到 `releaseImpl`（销毁）之后（那就是对着已销毁 runtime 释放 → use-after-free）。
+  - **native 访问只能在归属线程**：`Pointer.withPtr` / `withPtrSync` 会自动投递到 dispatcher
+    （已在归属线程则就地执行）—— **不要绕过它裸读 `ptr`**，新建 `Pointer` 子类也别漏传 dispatcher。
+  - **tag 别写死数值**：Kotlin 侧的 `JS_TAG_OBJECT` 是 **5**（C 侧反向映射后的返回值，
+    QuickJS 原始 tag 不出 native）。`-1` 是 C 头文件里的值，**Kotlin 侧根本看不到** ——
+    照 `-1` 判断会漏判对象。要判类型走 `jsGetTag` 的分派器。
 - **`import()` / `require()` 一律不许用**：本桥的模块加载路径会把进程 `abort()`（见
-  [`../.agents/skills/project-traps/references/silent-failures.md`](../.agents/skills/project-traps/references/silent-failures.md)）。
+  [`../.agents/skills/troubleshooting/references/silent-failures.md`](../.agents/skills/troubleshooting/references/silent-failures.md)）。
   能力全部内联进 `init.js`（脚本位置见 [../AGENTS.md](../AGENTS.md) §2.5）。
 
 ## ffmpeg

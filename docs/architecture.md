@@ -1,4 +1,4 @@
-# 架构设计（草案）
+﻿# 架构设计（草案）
 
 > 依据 2026-10-02 调研（Bangumi v0 / AniList / animeko / nezumi），完整记录见
 > [research-2026-10-02.md](./research-2026-10-02.md)。未落地，仅设计。
@@ -97,7 +97,7 @@ resolveEpisode(line, episode)     → { url, headers? }            // sort + lin
 桌面原生那两条已随重写后的 `cxx/webview/webview.cpp` 一并落地：`attach`/`focus` 里已有
 `put_IsVisible` 与 `MoveFocus`，也没有 `View.background` 那个标志。
 原先记的「后台控制器是 `by` 委托对象、强转会 ClassCastException」**已随 2026-10-13 的接口重设计消失**
-（见 `../.agents/skills/webview2-windows/references/webview-context-redesign.md`）：可见页与后台任务现在是同一个 `WebviewContext`
+（见 `../docs/design/webview-context-redesign.md`）：可见页与后台任务现在是同一个 `WebviewContext`
 实现类，没有委托对象，也没有强转。
 纯登录墙可不投前台（cookie 已共享）。
 

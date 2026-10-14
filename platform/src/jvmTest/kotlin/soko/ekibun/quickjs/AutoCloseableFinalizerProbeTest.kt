@@ -1,4 +1,4 @@
-package soko.ekibun.quickjs
+﻿package soko.ekibun.quickjs
 
 import kotlinx.coroutines.runBlocking
 import java.util.concurrent.atomic.AtomicInteger
@@ -40,7 +40,7 @@ import kotlin.test.assertTrue
  * **别把那个 `FALSE` 当成「关 runtime 不跑 finalizer」的判据。**
  *
  * finalizer 也可能**更早**跑：引用归零之后 quickjs 内部任何一次分配都可能顺带触发
- * `js_trigger_gc`（阈值机制见 skill `quickjs-ownership` 规则 5.0）。所以本探针只断言
+ * `js_trigger_gc`（阈值机制见 `cxx/AGENTS.md` 的 quickjs 节）。所以本探针只断言
  * 「关掉之后一定被 close」，不断言「还活着时没被 close」。
  *
  * ## 判据的反向验证

@@ -160,14 +160,14 @@
 
 ### D1. 禁区清单逐条重新核定
 
-- **在哪**：`.agents/skills/project-traps/references/forbidden-zones.md`。
+- **在哪**：`.agents/skills/troubleshooting/references/forbidden-zones.md`。
 - **现状**：条目来自历史踩坑记录，依赖当时实现细节，可能已随代码演进失效（文件头已标）。
 - **完成判据**：每条对照当前代码 + 实跑核定。**失效的删、与 `AGENTS.md` / `cxx/AGENTS.md` 重复的删**  
   （现在重复度较高），核完把文件头的「待重新核定」去掉。
 
 ### D2. 调试手册逐条重新核定
 
-- **在哪**：`.agents/skills/debugging/references/debugging.md`。
+- **在哪**：`.agents/skills/troubleshooting/references/debugging.md`（已并入 skill `troubleshooting`）。
 - **现状**：同上，排查步骤的命令 / 路径可能已变。
 - **完成判据**：同上，核完去掉文件头的「待重新核定」。
 
@@ -185,13 +185,13 @@
   30 处 ⚠️ 已删（符号去、句子留）。
 - **长度：判据改成「按语义搬，不按数字卡」**（同日复核后调整）。原先落的是  
   **注释/代码 ≤ 35%、单块 ≤ 25 行**两个数字，还写了个量测脚本挂进 `.githooks/pre-commit`；  
-  **2026-10-04 复核后全部撤掉**（脚本已删，hook / `AGENTS.md` / `SKILL.md` / `comments.md`  
+  **2026-10-04 复核后全部撤掉**（脚本已删，hook / `AGENTS.md` / 技能 `coding-style`  
   的引用一并清干净）。**撤的理由**：「注释行 / 代码行」的分母是代码行 ⇒ 文件越短密度越容易冲高，  
   那是算术必然。实测 animeko 485 个主源码 `.kt`：**代码行 < 30 的文件里 92% 超 35%**，  
   中位密度 90%——拿 35% 当普适阈值是把「只在长文件上成立的观察」当成了规则。  
   （顺带修正两个错数：animeko 全量是 **14.5%** 不是 23.3%；代码行 ≥ 60 的文件上中位 10.5%、  
   p90 35.7%，35% 只是那里的上界。）  
-  ⇒ 现行判据写在 `comments.md` 第六节：**带实测数据或「为什么长成这样」的段落搬进  
+  ⇒ 现行判据写在技能 `coding-style`：**带实测数据或「为什么长成这样」的段落搬进  
   `.agents/` 下对应 `references/`，正文留一句裸约束 + 指向；约束本身一个字都不能少。**
 - **已压掉的**（搬出去的内容都有落点，信息一条没丢）：
   - `Http.kt` 的 `availableForRead` 36 行实测数据 → `http-streaming.md` 第六节；
@@ -209,14 +209,14 @@
     各压到 2～3 行，死锁推导只留 `http-streaming.md` 第四节的指针；
   - `FFPlayer` 类 KDoc / `takeOverPlayback` / `resume` 各压一轮 —— 这份文件的注释**基本都是  
     真约束**（是「该留」的好样板），再压就要删判据了。
-- **复述是独立于长度的另一维**（2026-10-05 补，§四那条重话原先只在 `comments.md` 正文里，  
+- **复述是独立于长度的另一维**（2026-10-05 补，§四那条重话原先只在 `comments.md` 正文（现技能 `coding-style`）里，  
   `AGENTS.md` 竟没有）。压长度时**漏了 4 处**：`AvSurfaceContext` 的「写播放倍速。」配  
   `fun setSpeedRatio`、「读播放倍速。」的前半句；`VideoSurface` 的「平台相关的视频输出区域。」  
   配 `expect fun VideoSurface`；`SurfaceContext` 类 KDoc 后半句「音频/视频输出由各平台子类实现」  
   （`abstract class` + 同目录两个 `Playback.*.kt` 已经说明）。⇒ 判据改成**两步**：  
   **先剔复述**（删掉这行注释，理解有没有变化？没变化就删），**再问约束还是机制**。  
-  写进 `comments.md` 第六节与 `AGENTS.md` §2.5。
-- **长度基线：三层，建议性**（2026-10-05 实测 animeko 2913 个 kt/kts 后补进 `comments.md` 第六节）。  
+  写进技能 `coding-style` 与 `AGENTS.md` §2.5。
+- **长度基线：三层，建议性**（2026-10-05 实测 animeko 2913 个 kt/kts 后补进技能 `coding-style`）。  
   中位 / p90：类 KDoc 3/9、函数 KDoc 3/7、属性 KDoc 3/5、**函数体内 `//` 1/2**  
   （animeko 那 4779 组行内注释里 83% 是单行、93% ≤ 2 行）。建议上限取 p90 向上取整：  
   **类 8 / 函数 6 / 属性 5 / 函数体内 2**。⚠️ 与「别拿注释行 ÷ 代码行当判据」不冲突 ——  
@@ -234,7 +234,7 @@
   - `player/Playback.kt`：另 4 行是短契约句与 `updateAspectRatio` 那个「避免每帧写快照」的  
     判据；
   - `ui/comp/VideoSurface.kt`（原 `ui/screen/`，随组件迁移）：三条回调的时机与 null 语义是  
-    **对外契约**，内容留；形式已由 `@param` 改成正文 + `[onPlayback]` 链接（`comments.md` §三 禁标签）。
+    **对外契约**，内容留；形式已由 `@param` 改成正文 + `[onPlayback]` 链接（技能 `coding-style` 的注释形式节禁标签）。
 - **剩下的存量**（按「动到哪个改哪个」分期）。**扫描口径**：按注释块分组数行数，KDoc 比上表上限、  
   行内注释 ≥ 3 行即算越界（复算脚本是会话里的临时产物，不在仓库里）。  
   2026-10-05 复算：
@@ -246,19 +246,19 @@
     「哪一步必须同步」，搬走就丢「在哪个函数上」⇒ **留在原地压短**。
   - **符号**：**27 处 / 5 个文件** —— `jni.kt` 19、`QuickJS.kt` 4、`AvFrame.kt` 2、  
     `AvStream.kt` 1、`jvmTest/.../PointerTest.kt` 1。删符号、句子照留；`jni.kt` / `QuickJS.kt`  
-    与 skill `quickjs-ownership` 的 `ability-bridge.md` 有交叉，删之前先确认那句约束在文档侧有落点。
+    与 `docs/design/quickjs-ability-bridge.md` 有交叉，删之前先确认那句约束在文档侧有落点。
 - **完成判据**：`shared/src/**/*.kt` 与 `*.kts` 的注释里 `⚠` 命中数为 0，  
   **复述已剔净**（逐条问「删掉后理解有无变化」，无变化就删），  
-  且 `jni.kt` 那 147 行块压到只剩裸约束句（`→` 不计入，它是 `comments.md` §五点名允许的  
+  且 `jni.kt` 那 147 行块压到只剩裸约束句（`→` 不计入，它是 ASCII 示意图）。
   ASCII 示意图）。
 
 ### D5. 子系统代码地图（学 animeko `docs/contributing/code/`）
 
-- **现状**（2026-10-02 评估）：`.agents/skills/` 覆盖了构建 / 风格 / 陷阱 / 调试，但缺  
+- **现状**（2026-10-02 评估）：`.agents/skills/` 覆盖构建 / 风格 / 排查，但缺
   animeko 那种「改子系统前先读它的文档」的入口——FFPlayer 帧队列、web 包两端的窗口挂接链  
   这类知识散在文件头注释里，质量高但没有代码地图，也没有稳定的阅读入口。
 - **完成判据**：为 player、web 两个最常动的子系统各出一页代码地图（术语 + 类职责 +  
-  关键链路），放对应 skill 的 `references/` 下，`.agents/README.md` 的「技能索引」表加指针。
+  关键链路），放对应 skill 的 `references/` 下（技能由 `SKILL.md` 的 description 触发，无独立索引）。
 
 ## E. 结构性改进（需要先决策）
 
@@ -281,7 +281,7 @@
 - **落地顺序**（architecture.md §5）：`epochTimeMs()` 墙钟原语 + kotlinx-serialization 依赖  
   （**改依赖需用户确认**）→ `acg.model` 领域类型 → `acg.catalog.bgm`（DTO + mapper + 限流退避）  
   → 持久化分片 + 收藏/历史仓库 → `HtmlParser` 宿主原语 + JS 数据源契约（含 B23 流式 response）+ Line 绑定 →  
-  业务四页 → WebView 接口重设计（设计定稿于 [.agents/skills/webview2-windows/references/webview-context-redesign.md](.agents/skills/webview2-windows/references/webview-context-redesign.md)，已实现）→ WebView 投前台（悬浮按钮方案，先 Android 验证、桌面动 C++ 摘 `background` 标志）  
+  业务四页 → WebView 接口重设计（设计定稿于 [docs/design/webview-context-redesign.md](docs/design/webview-context-redesign.md)，已实现）→ WebView 投前台（悬浮按钮方案，先 Android 验证、桌面动 C++ 摘 `background` 标志）  
   → P2：AniList mapper / per-episode 精确进度 / animeko 订阅兼容解释器 / 边播边缓存 / torrent。
 - **完成判据**：按 §5 分条验收，每条落地后回来更新本条状态；全部落地后删条目  
   （设计文档随实现修订，不删）。

@@ -1,4 +1,4 @@
-package soko.ekibun.web
+﻿package soko.ekibun.web
 
 import androidx.annotation.Keep
 import kotlinx.coroutines.CompletableDeferred
@@ -239,7 +239,7 @@ class Webview2Context(
      *
      * ⚠️ 别往这里加 `--no-sandbox` / `--disable-gpu-sandbox` —— 那是安全降级，只在诊断时用环境
      * 变量 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 按需开（它会**追加**到本参数之后）。
-     * 依据与对照实测见 `.agents/skills/webview2-windows/references/webview2-windows.md` §3。
+     * 依据与对照实测见 `.agents/skills/troubleshooting/references/webview2-windows.md` §3。
      */
     private const val BROWSER_ARGUMENTS = "--disable-gpu-process-crash-limit"
 

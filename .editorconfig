@@ -1,12 +1,11 @@
-# 全仓格式化契约（唯一正本）。
+﻿# 全仓格式化契约（唯一正本）。
 #
 # 谁读它：
 #   - ktlint（`*.kt` / `*.kts`）—— 缩进、续行、行尾都从这里取
 #   - 编辑器（IntelliJ / Android Studio / VS Code）原生支持 EditorConfig
 #   - **clang-format 不读本文件**，C++ 的规则在根 `.clang-format`；两边的取值必须一致
 #
-# 口径出处：`.agents/skills/coding-style/SKILL.md`「缩进」一节 +
-# `references/kotlin.md` / `references/cpp.md` 的细则。
+# 口径背书：缩进与行长的进一步说明见 `.agents/skills/coding-style/SKILL.md` 标注的配置项。
 root = true
 
 [*]
@@ -23,9 +22,9 @@ max_line_length = off
 indent_size = 2
 continuation_indent_size = 4
 insert_final_newline = true
-# kotlin.md：行长取「软上限 120 字符」（2026-09-17 拍板）。
-# 写成具体数字会让 ktlint 的标准规则 `standard:max-line-length` 真正生效；
-# 写成 `off` 等于关掉这条规则 —— 两者是互斥的，别改成 off。
+# 行长软上限 120。必须写成具体数字：写成 `off` 会关掉 `standard:max-line-length`，
+# 而且这个开关会连带激活 ktlint 一整套换行类规则——改前先看
+# `docs/development/format-config-rationale.md` 的「Kotlin 行长」一节。
 max_line_length = 120
 
 # `@Composable` 函数按 Compose 指南用 PascalCase，让标准 function-naming 跳过它们。
@@ -33,8 +32,7 @@ max_line_length = 120
 ktlint_function_naming_ignore_when_annotated_with = Composable
 
 # 项目故意用 `main.kt` / `jni.kt` / `X.android.kt` / `X.jvm.kt` 这类文件名，
-# 不是「文件名必须与类名一致」（口径见 `.agents/skills/coding-style/references/kotlin.md`
-# 「本项目」一节）。
+# 不是「文件名必须与类名一致」。
 ktlint_standard_filename = disabled
 
 [*.{c,cc,cpp,cxx,h,hpp}]
@@ -47,7 +45,7 @@ max_line_length = 80
 #
 # 上面那段是按 glob 全仓生效的，会罩到下面三类路径。把它们设成 `unset`（EditorConfig 规范里
 # 表示「撤销上层的值」）之后，编辑器就回落到自己的默认 —— 于是 IDE 的「Reformat Code」
-# 不会按本项目口径去动别人的代码，与 skill `coding-style` 那句「不要顺手格式化」对上。
+# 不会按本项目口径去动别人的代码。
 #
 # 只 unset **风格**相关的几项；`[*]` 里的 `charset` / `end_of_line` / `insert_final_newline` /
 # `trim_trailing_whitespace` 是防「行尾漂移」的通用底线，留着。

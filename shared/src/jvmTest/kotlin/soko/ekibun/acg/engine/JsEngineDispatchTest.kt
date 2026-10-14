@@ -1,4 +1,4 @@
-package soko.ekibun.acg.engine
+﻿package soko.ekibun.acg.engine
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
@@ -23,7 +23,7 @@ import kotlin.test.assertTrue
  * 本文件是 `init.js` 那条 JS 桥的**唯一**测试面 —— 桩顶替 `_binding` 的测法验不到
  * 派发形状（桩用 `getOrNull(i)` + 静默默认值，形状错了不响），所以这里逐个分支锁住
  * **参数形状**：`args[0]` 是什么、`args[1]` 是什么。
- * 判据与踩坑取证见 `.agents/skills/quickjs-ownership/references/ability-bridge.md`。
+ * 判据与踩坑取证见 `docs/design/quickjs-ability-bridge.md`。
  *
  * [WebViewHostTest] 补的是另一半：它直接调同包的 [webviewAsync] 驱动、
  * 绕开 JS 桥，验 WebView2 宿主本身的行为。

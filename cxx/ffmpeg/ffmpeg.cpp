@@ -582,7 +582,7 @@ Java_soko_ekibun_ffmpeg_AvSurfaceContext_postFrameNative(
 // 侧按流类型 留着复用），对不上才新建 —— 视频 3.67 MB/帧、约 60
 // 帧/s，每帧新建会把 Java 堆顶在 -Xmx 上。走 byte[] 而不是
 // DirectByteBuffer，是不让 commonMain 出现 java.nio.ByteBuffer （根 AGENTS.md
-// §4：commonMain 不许有平台符号）。
+// §2.5：commonMain 不许有平台符号）。
 //
 // 返回 nullptr = 本轮没有缓冲，调用方据此早退。
 // ⚠️ 调用方必须同步消费这块内存、不能留存引用：

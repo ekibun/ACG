@@ -1,4 +1,4 @@
-import org.gradle.internal.os.OperatingSystem
+﻿import org.gradle.internal.os.OperatingSystem
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
 plugins {
@@ -32,6 +32,35 @@ val buildJni =
       commandLine("cmd", "/c", "exec ./build.jni.sh \"$javaHome\"")
     } else {
       commandLine("./build.jni.sh", javaHome)
+    }
+  }
+
+// clang-format 闸门：复用 exec.cmd 进 MSYS2，跑 cxx/format.jni.sh。
+// 与 buildJni 同机制，只校验 / 格式化 cxx/ 三个顶层 C++ 文件（范围同 pre-commit hook）。
+// 命名对齐 ktlint：`clangCheck`（校验）/ `clangFormat`（重写）。
+//   ./gradlew clangCheck   —— 校验（--dry-run --Werror，不齐则失败，像 ktlintCheck）
+//   ./gradlew clangFormat  —— 就地 -i 重写（像 ktlintFormat）
+val clangCheck =
+  tasks.register<Exec>("clangCheck") {
+    description = "Check cxx/ C++ files are clang-format clean (mingw64 clang 22.1.8)"
+    group = "verification"
+    workingDir = rootDir.resolve("cxx")
+    if (OperatingSystem.current().isWindows) {
+      commandLine("cmd", "/c", "exec ./format.jni.sh check")
+    } else {
+      commandLine("./format.jni.sh", "check")
+    }
+  }
+
+val clangFormat =
+  tasks.register<Exec>("clangFormat") {
+    description = "Format cxx/ C++ files in place with clang-format (mingw64 clang 22.1.8)"
+    group = "formatting"
+    workingDir = rootDir.resolve("cxx")
+    if (OperatingSystem.current().isWindows) {
+      commandLine("cmd", "/c", "exec ./format.jni.sh fix")
+    } else {
+      commandLine("./format.jni.sh", "fix")
     }
   }
 
@@ -86,7 +115,7 @@ tasks.matching { it.name == "createDistributable" }.configureEach {
 // 显式透传一次，否则 `buildJni` 里的 `exec.cmd` 找不到 MSYS2 的 bash。
 //
 // （`cxx/webview/webview.cpp` 的原生日志一律走 stderr，没有开关；想看 Chromium 自己的
-// 日志，见 `.agents/skills/debugging/references/debugging.md`。）
+// 日志，见 `.agents/skills/troubleshooting/references/debugging.md`。）
 tasks.withType<JavaExec>().configureEach {
   providers.environmentVariable("MSYS2_BIN").orNull?.let { environment("MSYS2_BIN", it) }
 }

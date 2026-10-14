@@ -1,4 +1,4 @@
-package soko.ekibun.quickjs
+﻿package soko.ekibun.quickjs
 
 import androidx.annotation.Keep
 import kotlinx.coroutines.CompletableDeferred
@@ -418,11 +418,10 @@ class QuickJS(
    *
    * 对象分支放在**这里**而不是各个调用点，是有原因的：递归转换（数组元素、promise
    * 的 `then`）必须一律走本函数 —— 绕开它走只认标量的辅助函数时，顺着手碰到的
-   * 对象会悄悄变成 null（取证见 `quickjs-reference-ownership.md` 规则 3）。
+   * 对象会悄悄变成 null（这条约束现在收在 `cxx/AGENTS.md` 的 quickjs 节）。
    *
    * `cache` 整棵对象图共用同一张表（[ptr] 逐层递下去），键是 [jsValueGetPtr]。
-   * 三条登记规则，对齐上游 `_jsToDart`（取证见 `quickjs-reference-ownership.md`
-   * 规则 4）：
+   * 三条登记规则，对齐上游 `_jsToDart`（现收在 `cxx/AGENTS.md` 的 quickjs 节）：
    * 1. **每次顶层调用新建**一张，只在一次遍历内有效；
    * 2. 容器（数组 / 普通对象 / Promise）在**填之前**登记 —— 递归回自身时拿到的
    *    正是那个还在填的容器，`a['a'] === a` 天然成立，共享子对象也不会被转成
@@ -437,7 +436,7 @@ class QuickJS(
    *
    * 必须与调用同块落在 JS 线程上（[withPtr] / [withPtrSync] 块内）：转换的每一步
    * 都在碰 runtime，挪到调用方线程就是「调用 → 转换」与 executePendingJob / GC
-   * 并发，偶发崩溃（`quickjs-reference-ownership.md` 规则 7）。
+   * 并发，偶发崩溃（线程归属现由 `Pointer` 的 dispatcher 保证，见 `cxx/AGENTS.md`）。
    */
   private fun jsToJava(
     ptr: Long,
