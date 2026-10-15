@@ -1,6 +1,6 @@
 # 编译闸门：四条（提交前跑，验收不跑）
 
-> 四条闸门的**何时跑**以根 [`AGENTS.md`](../../../../AGENTS.md) §5 为正本：验收阶段不跑，只在**用户确认提交时**跑一次。本文件只给任务名与覆盖面。
+> 四条闸门的**何时跑**以根 [`AGENTS.md`](../../../../AGENTS.md) §2.5 为正本：验收阶段不跑，只在**用户确认提交时**跑一次。本文件只给任务名与覆盖面。
 
 ```bash
 ./gradlew :shared:compileAndroidMain :shared:compileKotlinJvm \

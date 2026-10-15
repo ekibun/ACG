@@ -812,9 +812,6 @@ class WebviewContext
     return S_OK;
   }
   // ui
-  void focus() {
-    if (hwnd_) SetFocus(hwnd_);
-  }
   void attachThreadInput(HWND parent) {
     const DWORD selfTid = GetCurrentThreadId();
     const HWND root = GetAncestor(parent, GA_ROOT);
@@ -1211,14 +1208,6 @@ Java_soko_ekibun_web_Webview2Context_detach(JNIEnv* env, jclass, jlong pctx) {
   if (pctx != 0) {
     WebviewContext* ctx = reinterpret_cast<WebviewContext*>(pctx);
     ctx->post([](WebviewContext* ctx) { ctx->detach(); });
-  }
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_soko_ekibun_web_Webview2Context_focus(JNIEnv*, jclass, jlong pctx) {
-  if (pctx != 0) {
-    WebviewContext* ctx = reinterpret_cast<WebviewContext*>(pctx);
-    ctx->post([](WebviewContext* ctx) { ctx->focus(); });
   }
 }
 

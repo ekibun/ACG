@@ -12,8 +12,8 @@ import kotlin.test.assertTrue
  *
  * 判据用「第一次读的耗时 vs 整包下发时长」比：服务端把 body 分若干块下发、块间固定间隔，整包要约
  * 「块数 × 每块间隔」ms；第一次读只要**远早于**它（< 一半）就说明没在等整包。ktor 的便捷入口
- * 内部有一句 `call.save()` 会先整包缓冲，`Http.request` 没有那句（实测见 `silent-failures.md`
- * 的「整包缓冲」一节）。
+ * 内部有一句 `call.save()` 会先整包缓冲，`Http.request` 没有那句（实测见
+ * `docs/development/playback-invariants.md` 的「ktor 流式读取」一节）。
  */
 class HttpStreamingTest {
   /**

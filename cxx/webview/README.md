@@ -137,4 +137,4 @@ sequenceDiagram
 
 - 并发 / 锁序 / 已知坑（A、B、C）的逐条分析：`docs/design/webviewcpp-concurrency.md`
 - WebView 接口设计规格与决策记录：`docs/design/webview-context-redesign.md`
-- Windows 上 WebView2 的故障排查：`.agents/skills/troubleshooting/references/webview2-windows.md`
+- Windows 上 WebView2 的故障排查：`docs/development/webview2-windows.md`

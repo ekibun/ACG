@@ -19,7 +19,7 @@ import kotlin.time.Duration.Companion.milliseconds
  * **seek 一定会回到关键帧** —— 容器索引的物理限制，不是靠调 `min_ts`/`max_ts` 窗口能绕开的
  * （`SeekWindowSemanticsTest` 钉着）。所以「平滑」要分两步（照 ffplay 的做法），**两者缺一不可**：
  * 落关键帧后立刻把主时钟拨到目标（`PTS(relate = ts)`），**再丢掉**关键帧→目标之间的帧
- * （[resumeImpl] 的 `resyncTo`）。逐项对照见 `silent-failures.md`。
+ * （[resumeImpl] 的 `resyncTo`）。判据与依据见 `docs/development/playback-invariants.md`。
  *
  * 播放入口只能在 [playerDispatcher] 上调：读 [pts] 与随后的检查必须落在同一段不被打断的序列里
  * （见那条字段的文档）。
@@ -95,7 +95,7 @@ class FFPlayer(
    * 开一轮独占播放：先把上一轮作废、等它收干净，再让自己这一轮开跑。
    *
    * 硬约束是 native 侧**每种流只有一块输出缓冲**（`SWContext::videoBuffer`）⇒ 同一时刻只允许
-   * 一轮在飞（取舍与踩坑见 `silent-failures.md` 的「两轮播放同时在飞会串帧」段）。
+   * 一轮在飞（外部依据与判据见 `docs/development/playback-invariants.md` 第二节「同一时刻只允许一轮播放在飞」）。
    *
    * 语义是**后到者顶掉先到者**：[pause] 把上一轮标记作废并 join 到它真的收干净；这段时间里若有更晚的
    * 调用进来会换上自己的 [PTS] 对象，本次醒来发现对象变了就放弃 —— 「本轮还作不作数」**只看对象身份**。
@@ -337,13 +337,15 @@ class FFPlayer(
                 val muted = stepMode && codecType == AVMediaType.AUDIO
                 // **先等上一帧送显完，再写这一帧** —— 顺序不能反。native 每种流只有**一块**输出缓冲
                 // （`SWContext::videoBuffer`），`postFrame` 整体改写它、`flushFrame` 才是抄走的那一步。
-                // 顺序反了就是**上一帧显示成本帧的像素**（实测：204 帧里 180 帧不符，见 silent-failures.md）。
+                // 顺序反了就是**上一帧显示成本帧的像素**（实测：204 帧里 180 帧不符，见
+                // docs/development/playback-invariants.md 第二节「同一轮内相邻两帧必须先等上一帧送显完」）。
                 lastUpdate?.join()
                 if (!isPlaying()) return@updateJob
                 if (!muted) surfaceContext?.postFrame(codecType, frame)
                 // seek 后的丢帧收敛（ffplay frame_drops_early）：`diff = dpts - master_clock`，主时钟 ==
                 // resyncTo，`|diff| < AV_NOSYNC_THRESHOLD && diff < 0` ⇒ 解码后立刻丢。**必须排在送显之前、
-                // 且音频也要丢**（落点是容器级的）—— 两条约束与实测见 `silent-failures.md`。
+                // 且音频也要丢**（落点是容器级的）—— 判据与依据见
+                // docs/development/playback-invariants.md 第二节「送显时机与丢帧收敛的先后」。
                 if (resyncTo != null &&
                   frame.timeStamp < resyncTo &&
                   resyncTo - frame.timeStamp < maxResyncDropDistance

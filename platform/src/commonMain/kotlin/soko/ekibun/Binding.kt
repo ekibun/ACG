@@ -1,4 +1,4 @@
-﻿package soko.ekibun
+package soko.ekibun
 
 import kotlinx.coroutines.CloseableCoroutineDispatcher
 import kotlinx.coroutines.CompletableDeferred
@@ -110,9 +110,9 @@ abstract class ThreadDispatcher(
    * 关掉归属线程：**不等待**在途任务（已提交的会跑完、线程随后退出）。
    *
    * **关掉之后再投递拿不到「投递被拒」这个异常** —— kotlinx 会兜住它并把块**静默改投到
-   * `Dispatchers.IO`**（三种调用形态的实测表现见 skill `troubleshooting` 的 `silent-failures.md`
-   * 「以为调度器关掉之后投递会抛 `RejectedExecutionException`」那条），于是「归属线程」这个
-   * 承诺被悄悄打破。所以本类在 [dispatch] 上自己拦了一手。
+   * `Dispatchers.IO`**（kotlinx 的 `ExecutorCoroutineDispatcherImpl.dispatch` 会
+   * `cancelJobOnRejection` 再改投 IO —— 静默改投破坏了「归属线程」这个承诺）。所以本类在
+   * [dispatch] 上自己拦了一手。
    *
    * **只有独占者才该调**：`QuickJS.sharedDispatcher` / `AvFormat` 的伴生实例是全进程共享的，
    * 关它等于给后面所有调用者埋雷。拦一手只是把「埋雷」换成「当场炸」—— 炸点离肇事点仍然远，

@@ -158,16 +158,9 @@
 
 ## D. 文档债
 
-### D1. 禁区清单逐条重新核定
-
-- **在哪**：`.agents/skills/troubleshooting/references/forbidden-zones.md`。
-- **现状**：条目来自历史踩坑记录，依赖当时实现细节，可能已随代码演进失效（文件头已标）。
-- **完成判据**：每条对照当前代码 + 实跑核定。**失效的删、与 `AGENTS.md` / `cxx/AGENTS.md` 重复的删**  
-  （现在重复度较高），核完把文件头的「待重新核定」去掉。
-
 ### D2. 调试手册逐条重新核定
 
-- **在哪**：`.agents/skills/troubleshooting/references/debugging.md`（已并入 skill `troubleshooting`）。
+- **在哪**：`docs/development/debugging.md`。
 - **现状**：同上，排查步骤的命令 / 路径可能已变。
 - **完成判据**：同上，核完去掉文件头的「待重新核定」。
 
@@ -175,7 +168,7 @@
 
 - **现状**：`AGENTS.md` 曾有一个「术语（待补）」空节，属未兑现的承诺，已随瘦身删除。
 - **完成判据**：整理出项目专有名词表，或明确决定不维护。**若整理，不要放回 `AGENTS.md`**  
-  —— 它是"要查的时候才看"的资料，放 `.agents/` 下；`AGENTS.md` 只留一行指针。
+  —— 它是"要查的时候才看"的资料，放 `docs/` 下；`AGENTS.md` 只留一行指针。
 
 ### D4. 注释的长度与符号（规则已入 `AGENTS.md`，剩下分期改）
 
@@ -191,22 +184,22 @@
   中位密度 90%——拿 35% 当普适阈值是把「只在长文件上成立的观察」当成了规则。  
   （顺带修正两个错数：animeko 全量是 **14.5%** 不是 23.3%；代码行 ≥ 60 的文件上中位 10.5%、  
   p90 35.7%，35% 只是那里的上界。）  
-  ⇒ 现行判据写在技能 `coding-style`：**带实测数据或「为什么长成这样」的段落搬进  
-  `.agents/` 下对应 `references/`，正文留一句裸约束 + 指向；约束本身一个字都不能少。**
+  ⇒ 现行判据写在根 `AGENTS.md` §2.5：**带实测数据或「为什么长成这样」的段落搬进  
+  `docs/` 下对应正本，正文留一句裸约束 + 指向；约束本身一个字都不能少。**
 - **已压掉的**（搬出去的内容都有落点，信息一条没丢）：
-  - `Http.kt` 的 `availableForRead` 36 行实测数据 → `http-streaming.md` 第六节；
-  - `AvFormat.resetChannel` **57 行 → 17 行**：归属线程的论证 `http-streaming.md` 第二节  
+  - `Http.kt` 的 `availableForRead` 36 行实测数据 → `playback-invariants.md` 第五节（通道存量）；
+  - `AvFormat.resetChannel` **57 行 → 17 行**：归属线程的论证 `playback-invariants.md` 第五节（私有作废信号）  
     已有，`packetChannel` / `readerJob` **不加 `@Volatile`** 那 22 行（含访问点表与  
-    「拆掉 `FFPlayer.pause` 的 join 就变真竞态」）搬进 `silent-failures.md`；
+    「拆掉 `FFPlayer.pause` 的 join 就变真竞态」）搬进 `playback-invariants.md`；
   - `AvIO.getBufferSize` 的 ffmpeg 常量来由（`aviobuf.c:36` / `:43` + 官方注释）→  
     `cxx/AGENTS.md` 的 ffmpeg 一节；
   - `AvPlayback.isReadTimeOut` **29 行 → 14 行**：耗时特性（pause 的 join 上界 = 一个轮次、  
-    实测 7～108 ms）搬进 `debugging.md`；
-  - `HttpIO.skipThreshold` **16 行 → 9 行**：判据论证 `http-streaming.md` 第五节已有全文；
+    实测 7～108 ms）搬进 `docs/development/debugging.md`；
+  - `HttpIO.skipThreshold` **16 行 → 9 行**：判据论证 `playback-invariants.md` 第五节（白读推进）已有全文；
   - `FileIO` 类 KDoc **14 行 → 10 行**：wav / pcm 在文件尾 **100% CPU 空转**的实测与  
-    `aviobuf.c:551-558` 的判据搬进 `silent-failures.md`；
+    `aviobuf.c:551-558` 的判据搬进 `playback-invariants.md`；
   - `Http.requestStreaming` 内 5 组行内注释（done/ready、session scope、catch、await、finally）  
-    各压到 2～3 行，死锁推导只留 `http-streaming.md` 第四节的指针；
+    各压到 2～3 行，死锁推导只留 `playback-invariants.md` 第五节（会话 scope）的指针；
   - `FFPlayer` 类 KDoc / `takeOverPlayback` / `resume` 各压一轮 —— 这份文件的注释**基本都是  
     真约束**（是「该留」的好样板），再压就要删判据了。
 - **复述是独立于长度的另一维**（2026-10-05 补，§四那条重话原先只在 `comments.md` 正文（现技能 `coding-style`）里，  
@@ -221,7 +214,7 @@
   （animeko 那 4779 组行内注释里 83% 是单行、93% ≤ 2 行）。建议上限取 p90 向上取整：  
   **类 8 / 函数 6 / 属性 5 / 函数体内 2**。⚠️ 与「别拿注释行 ÷ 代码行当判据」不冲突 ——  
   那条反对的是比例（分母随文件大小漂移、算术必然），这里量的是**单个注释块的行数**（与文件大小无关）。  
-  超了按两步走：先剔复述，再把机制搬进 `references/`；剔完还超，问一句「这段是不是**数据**  
+  超了按两步走：先剔复述，再把机制搬进 `docs/` 下对应正本；剔完还超，问一句「这段是不是**数据**  
   （规则表、样例、状态机）」—— 数据长是应该的。
 - **长度已收的**（2026-10-05）：
   - `Http.kt` **全篇 9 处**：类 KDoc 去掉与 `delegate` 重复的参数段、`contentLength` 7→4、  
@@ -258,7 +251,7 @@
   animeko 那种「改子系统前先读它的文档」的入口——FFPlayer 帧队列、web 包两端的窗口挂接链  
   这类知识散在文件头注释里，质量高但没有代码地图，也没有稳定的阅读入口。
 - **完成判据**：为 player、web 两个最常动的子系统各出一页代码地图（术语 + 类职责 +  
-  关键链路），放对应 skill 的 `references/` 下（技能由 `SKILL.md` 的 description 触发，无独立索引）。
+  关键链路），放 `docs/development/` 下（无独立索引，由 `AGENTS.md` 指入）。
 
 ## E. 结构性改进（需要先决策）
 

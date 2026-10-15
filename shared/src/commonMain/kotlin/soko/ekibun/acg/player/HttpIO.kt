@@ -12,13 +12,13 @@ import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * HTTP 上的 [AvIO]：一条**活着的**会话，响应体边到边读（走 [Http.request] —— 它**不缓冲**，
- * 见 `silent-failures.md` 的「整包缓冲」一节）。
+ * 见 `docs/development/playback-invariants.md` 的「ktor 流式读取」一节）。
  *
  * 读与 seek 只在一条线程上（native 的 avio 回调单线程串行），所以本类不加锁。[read] 是**唯一**的
  * `runBlocking`（native 回调要同步签名），进门就把活交给挂起主体。
  *
  * 数据没到时**在 IO 层等**，而那次读卡在 `av_read_frame` 里、协程取消够不到 ⇒
- * [AvIO.Handler.abort] 从另一条线程叫醒它（**只叫醒、不掀会话**，推演见 `http-streaming.md`）。
+ * [AvIO.Handler.abort] 从另一条线程叫醒它（**只叫醒、不掀会话**，推演见 `playback-invariants.md` 第五节）。
  */
 class HttpIO(
   val options: Map<String, Any>,
@@ -70,7 +70,7 @@ class HttpIO(
    * 比阈值时**要减掉通道里已有的部分**（[Http.Response.availableForRead]）：那部分白读是纯内存
    * memcpy、零网络成本。**别改成「把阈值调大来代替扣减」**（阈值是常量，扣减按实际缓冲量算）。
    * 与 ffmpeg 官方判据（`aviobuf.c:279`，`offset1 <= buffer_size + short_seek_threshold`）的
-   * 对照、以及「缓冲量极度依赖服务端发得多快」的实测，都见 `http-streaming.md` 第五节。
+   * 对照、以及「缓冲量极度依赖服务端发得多快」的实测，都见 `playback-invariants.md` 第五节（白读推进）。
    */
   private val skipThreshold: Int get() = getBufferSize().toInt()
 
@@ -112,7 +112,7 @@ class HttpIO(
       // 往前跳得远 —— 远到**扣掉通道里已有的那些**之后仍超过一个 avio 缓冲：剩下的部分还得从网络上
       // 取，与其白读白丢，不如换一条**真落在 offset 上**的。服务端给不出这种响应时保留手上这条。
       // 扣减量在本分支里可信（进来的是复用的缓存会话，通道必定已建立），推导见
-      // `http-streaming.md` 第五节。
+      // `playback-invariants.md` 第五节（白读推进）。
       val newRsp = getRange(offset)
       if (newRsp.offset == offset) {
         rsp.close()
@@ -122,7 +122,7 @@ class HttpIO(
       }
     }
     // 这里**必须阻塞**推进，不能退回「缓冲没到就返回 0 让上层重试」：aviobuf 没有「稍后重试」这种
-    // 语义（`fill_buffer` 对两种返回值的后果见 `http-streaming.md` 第一节）。
+    // 语义（`fill_buffer` 对两种返回值的后果见 `playback-invariants.md` 第五节「必须在 IO 层阻塞等」）。
     val want = offset - rsp.offset
     // 这条 rsp 是**新建立**的还是**复用的缓存会话**：[getResponseBlocking] 开头
     // `rsp = cachedRsp` 取出来的就是复用的。抛出时两者的收场不同—— 复用那条的存亡归 [close] /
@@ -174,7 +174,7 @@ class HttpIO(
         val job = async { readSuspend(buf) }
         // **旁路哨兵**：等信号，一醒来就 `cancel` 掉 `job` ⇒「叫醒」不依赖下面任何一层知道 signal 的
         // 存在，取消顺着协程树走。哨兵**只能 `cancel`、不能 `throw`** —— 抛异常会 `parentCancelled`
-        // 向上取消整个 `runBlocking`（`http-streaming.md` 第二节）。
+        // 向上取消整个 `runBlocking`（`playback-invariants.md` 第六节「async 拆父 scope」）。
         val abort =
           async {
             signal.await()
@@ -189,7 +189,7 @@ class HttpIO(
           // 哨兵叫醒的收场：`job.cancel()` 让这里抛 `CancellationException`，即「本轮作废」。
           // 必须返回正数 `buf.size`（谎报读满 —— 字节并没有，但那条包必然被丢），不是任何错误码：
           // 翻错误码会让 demuxer 再读一轮、重开 range 会话干等超时，`closeAsync` 被拖到 8s 量级。
-          // 逐档推演见 `http-streaming.md` 第二节。
+          // 逐档推演见 `playback-invariants.md` 第五节（私有作废信号）。
           buf.size
         } catch (e: Throwable) {
           // 真故障才出声。被作废叫醒的读走上面那条，落不到这里 —— 不必再查旗标。
@@ -210,7 +210,7 @@ class HttpIO(
   /**
    * 「作废」信号：**一次性事件**，投一次就够。**只在 [read] 里声明、只在 [read] 里消费** —— 不往任何
    * 下层传（取消走协程树，见类文档）。用 `CompletableDeferred` 而不是 `StateFlow` / `Channel`
-   * 的三条理由见 `http-streaming.md` 第二节。
+   * 的三条理由见 `playback-invariants.md` 第五节（私有作废信号）。
    */
   private class AbortSignal {
     private val raised = CompletableDeferred<Unit>()
@@ -243,7 +243,7 @@ class HttpIO(
           rsp.read(buf)
         } catch (e: Http.IdleTimeoutException) {
           // 闲置超时：这条会话多半死了 ⇒ 丢掉、按同样间隔换一条，**不限次数**（抛上去会被 aviobuf
-          // 毒化成 EOF、播放静默「正常结束」，见 `http-streaming.md`）。间隔同样取
+          // 毒化成 EOF、播放静默「正常结束」，见 `playback-invariants.md` 第五节）。间隔同样取
           // [SOCKET_TIMEOUT_MS]：刚踩完一个超时窗口就重连，换来的仍是死连接。
           // 上层另有时间闸（FFPlayer 的取包超时 → `FFPlayer.Event.ReadTimeout`），这里**只管一直读**。
           delay(Http.SOCKET_TIMEOUT_MS.milliseconds)

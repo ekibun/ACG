@@ -1,7 +1,8 @@
 # cxx/AGENTS.md
 
 只讲 `cxx/` 下的原生构建、JNI 桥与各库的硬约束。项目整体约定见 [../AGENTS.md](../AGENTS.md)；构建 / 测试见 skill `build-and-test`；
-WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills/) 下对应的技能里；通用做法（最小实现、外科手术式改动）见
+WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/development/webview2-windows.md)；QuickJS 能力桥的设计正本见
+[../docs/design/quickjs-ability-bridge.md](../docs/design/quickjs-ability-bridge.md)；通用做法（最小实现、外科手术式改动）见
 根 [../AGENTS.md](../AGENTS.md) §2。
 
 产物是三个共享库，各自被同名 `.cmake` 引入，源码在 `cxx/{webview,quickjs,ffmpeg}/`：
@@ -118,7 +119,7 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
 - `WebView2.h` 在 MinGW 下能编，但 SDK 的 C++ 辅助类（如 `WebView2EnvironmentOptions.h`）
   依赖 MSVC 专有的 `Microsoft::WRL::RuntimeClass`，MinGW 的 WRL 只移植了 `ComPtr` —— 别去引那些头。
 - **页面脚本注入为零**：`initScript` 已整体删除，`put_IsWebMessageEnabled` 恒 `FALSE`。
-- 崩溃 / 白屏 / 焦点问题，**先读** [`../.agents/skills/troubleshooting/references/webview2-windows.md`](../.agents/skills/troubleshooting/references/webview2-windows.md)，
+- 崩溃 / 白屏 / 焦点问题，**先读** [`../docs/development/webview2-windows.md`](../docs/development/webview2-windows.md)，
   不要重新发明排查路径。
 
 ## quickjs
@@ -140,7 +141,7 @@ WebView2 与 QuickJS 的深水手册在 [`../.agents/skills/`](../.agents/skills
     QuickJS 原始 tag 不出 native）。`-1` 是 C 头文件里的值，**Kotlin 侧根本看不到** ——
     照 `-1` 判断会漏判对象。要判类型走 `jsGetTag` 的分派器。
 - **`import()` / `require()` 一律不许用**：本桥的模块加载路径会把进程 `abort()`（见
-  [`../.agents/skills/troubleshooting/references/silent-failures.md`](../.agents/skills/troubleshooting/references/silent-failures.md)）。
+  [`../docs/development/playback-invariants.md`](../docs/development/playback-invariants.md) 的 quickjs 桥一节）。
   能力全部内联进 `init.js`（脚本位置见 [../AGENTS.md](../AGENTS.md) §2.5）。
 
 ## ffmpeg

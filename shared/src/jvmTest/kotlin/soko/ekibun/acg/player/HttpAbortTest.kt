@@ -20,7 +20,7 @@ import kotlin.test.assertTrue
  * `AvIO.Handler.abort()` 的契约：**把正在等数据的那次读叫醒，而且下一次读能恢复**。为什么需要它：
  * `HttpIO.read` 等数据时卡在 native 的 `av_read_frame` 里面 —— **协程取消够不到它**（取消是协作式的，阻塞的
  * JNI 调用里没有挂起点）。于是「这一轮不要了」（seek / close，见 [AvFormat.resetChannel]）只能由另一条线程
- * 叫醒它（机制见 `http-streaming.md` 第二节）。
+ * 叫醒它（机制见 `playback-invariants.md` 第五节「私有作废信号」）。
  *
  * 这条用例压两个行为：① **叫醒要快** —— 信号一投，读当场以「读满 `buf.size`」收场；② **恢复要
  * 走重连** —— abort 不掀会话，下一次读面对的还是这条停住的会话，闲置超时（[SOCKET_TIMEOUT_MS]）后自己

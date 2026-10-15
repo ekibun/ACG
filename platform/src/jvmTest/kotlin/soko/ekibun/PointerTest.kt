@@ -236,8 +236,8 @@ class PointerTest {
    *
    * 共享实例（`QuickJS.sharedDispatcher`、`AvFormat` 的伴生对象）全靠这条默认值活下来 ——
    * 只要有一个关掉的对象顺手把它关了，全进程往后的投递都会被 `ThreadDispatcher.dispatch`
-   * 拦下抛 `IllegalStateException`（拦不住的话见其 KDoc 里那张表：静默改投 IO / 伪装成
-   * `CancellationException`）。
+   * 拦下抛 `IllegalStateException`（拦不住的话见 [ThreadDispatcher.dispatch] 与 [ThreadDispatcher.close]
+   * 的 KDoc：静默改投 IO / 伪装成 `CancellationException`）。
    */
   @Test
   fun sharedDispatcherOutlivesCloseWithoutOwnershipFlag() {

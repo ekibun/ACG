@@ -1,7 +1,8 @@
-﻿# 排查取证（崩溃 / 挂死 / 日志）
+# 排查取证（崩溃 / 挂死 / 日志）
 
 出问题、**症状还没对上已知坑**时，用这篇取证据。已知答案的条目在
-[`silent-failures.md`](./silent-failures.md)（它们大多是"症状指纹 → 根因"），先去那边对。
+[`playback-invariants.md`](./playback-invariants.md)（外部库行为依据与判据），
+先去那边对。
 
 > **DO：** 命令、路径与数值以当前代码 + 实跑为准。
 > **DO：** 结果**落盘再读** —— Windows 上 JVM 按控制台代码页编解码，中文日志直接读会乱码；
@@ -34,7 +35,8 @@ Get-CimInstance Win32_Process -Filter "Name='java.exe'" |
 - **对端空转**（park 在 `LinkedBlockingQueue.take` 这类地方、队列里没任务）→ 对端**闲着**，
   说明主线程在等一个**永远不会完成**的通知：`Deferred` / `CompletableDeferred` 没人 complete，
   或 `await` 的目标调度早已结束。**别据此误判成 native 卡死。**
-  已知成因之一见 [`silent-failures.md`](./silent-failures.md) 第 27 条（`CompletableDeferred(null)` 的重载解析）。
+  已知成因之一见 [`playback-invariants.md`](./playback-invariants.md) 第六节
+  （`CompletableDeferred(null)` 的重载解析）。
 
 ### 分步打点：一次把范围缩到**具体语句**
 
@@ -69,7 +71,7 @@ close2 -> null          ← 隔了 5s ⇒ 这次超时了，问题在第二条
 - ⇒ 落在哪一格取决于探测那一刻，所以**是个跨度不是定值**。
 
 判据：**几十毫秒量级是正常的**，要怀疑挂死得看到**秒级**（`closeAsync` 那种 5 s 超时才对应自锁，
-成因见 [`silent-failures.md`](./silent-failures.md) 的「`close` 路径的 `resetChannel`」那条）。
+成因见 [`playback-invariants.md`](./playback-invariants.md) 第六节「作废预读通道用 `cancel()`」）。
 
 ### 数用例数别信控制台
 
@@ -84,7 +86,7 @@ close2 -> null          ← 隔了 5s ⇒ 这次超时了，问题在第二条
 `./gradlew :desktopApp:run` 的控制台上。
 
 唯一被透传给跑起来的 App 的环境变量是 `MSYS2_BIN`，那是**构建期** `buildJni`→`exec.cmd`
-桥要用的，**不是日志开关**，见 [`cxx/AGENTS.md`](../../../../cxx/AGENTS.md) 的「原生构建」。
+桥要用的，**不是日志开关**，见 [`cxx/AGENTS.md`](../../cxx/AGENTS.md) 的「原生构建」。
 
 ## Chromium 日志
 

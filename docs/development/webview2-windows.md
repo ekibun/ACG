@@ -1,4 +1,4 @@
-﻿# WebView2（Windows）排查手册
+# WebView2（Windows）排查手册
 
 本工程桌面端的可见页与后台页都跑在**自研 C++ 宿主**（`cxx/webview/webview.cpp`）上，
 共享同一个 `ICoreWebView2Environment` → 同一份 user data folder → 同一套 cookie。
@@ -6,7 +6,7 @@
 WebView2 通过 API 几乎不报告任何有用信息，下面每个症状都长得像"我们的代码错了"，
 实际多半是引擎或浏览器参数的问题。**按顺序排查**，从最便宜、最能定性的开始。
 
-> 相关入口：[`cxx/AGENTS.md`](../../../../cxx/AGENTS.md)（构建与 JNI、QuickJS 所有权硬约束）。
+> 相关入口：[`cxx/AGENTS.md`](../../cxx/AGENTS.md)（构建与 JNI、QuickJS 所有权硬约束）。
 
 ---
 
@@ -185,6 +185,8 @@ WebView2 支持两种方式，且会**合并**：环境变量 / 注册表的值�
 
 **symptom**：点得动、渲染正常，键盘死。根因永远同一个：**焦点落到宿主 HWND 不会自动传进 WebView2，而 WebView2 从不自己抢焦点。** 鼠标消息按位置投递、不需要焦点——这正是"点得动但键盘死"的原因。
 
+> **2026-10-15 更新**：本节原先教的是「`AttachThreadInput` + `MoveFocus(PROGRAMMATIC)` + 120 ms 重试」三板斧，并称 `MoveFocus` 是"全部机制"。**实测结论相反：一次长期的 `AttachThreadInput` 就足以把跨线程焦点连起来，不需要 `MoveFocus`。** 宿主重写（`c3d50cf`）据此把整套焦点转发删掉了，只留 `attach()` 里那一次长期接续（`webview.cpp` 的 `attachThreadInput`：接 `GetAncestor(parent, GA_ROOT)` 的线程、接上不摘）；`Webview2Context.focus()`（裸 `SetFocus(host)`）也已删除。**下面关于 `MoveFocus` / 幂等闸门 / 重试定时器的段落全部作废**，保留它们是为了记录"曾经以为需要"的推理过程；窗口树与消息路由那半仍然有效，仍是判断"哪些办法不可能"的唯一依据。
+
 ### 先 dump 窗口树，因为它决定了哪些办法不可能
 
 从宿主遍历子窗口，逐层打印 `GetWindowThreadProcessId` 和 `GetWindowLongPtr(GWLP_WNDPROC)`。
@@ -211,81 +213,42 @@ host                            （你的进程 / 你的线程）
 
 所以**不存在**"用户点了页面"的 Win32 触发点。但这**不**意味着必须去问页面。
 
-### 真修法：把输入队列早早接上，然后让激活去干活
+### 真修法：把输入队列早早接上
 
 点击本身不需要传到你这里；真正要紧的是随后发生的激活把焦点交回宿主：
-`点击 → 系统激活顶层祖先（SunAwtFrame）→ AWT 激活处理把焦点给 Canvas → 宿主收到 WM_SETFOCUS → 焦点转发器 → MoveFocus`。
+`点击 → 系统激活顶层祖先（SunAwtFrame）→ AWT 激活处理把焦点给 Canvas → 宿主收到 WM_SETFOCUS`。
+焦点能不能真的落进 WebView2，取决于点击发生时**两条输入队列是否已经合并** —— 所以要在
+**重挂进 AWT 窗口的那一刻**（`SetParent` + `SetWindowPos(..., SWP_FRAMECHANGED)`）就调
+`AttachThreadInput`，而不是从焦点处理函数里接。**这一条就是全部修复**，不需要
+`MoveFocus`、不需要重试定时器、不需要任何脚本注入（2026-10-15 实测，见下文）。
 
-这条链只有在点击发生时**两个输入队列已经合并**才成立，所以要在**重挂进 AWT 窗口的那一刻**
-（`SetParent` + `SetWindowPos(..., SWP_FRAMECHANGED)`）就调 `AttachThreadInput`，而不是从焦点处理函数里接。
-这样宿主上一个 `WM_SETFOCUS` 就够了，**完全不需要任何脚本注入**。
+### `MoveFocus` 不是必需的（2026-10-15 实测结论，推翻本节原判）
 
-### `MoveFocus` 就是全部机制
+本节原先写的是「`MoveFocus(PROGRAMMATIC)` 就是全部机制」，并配套 120 ms 重试定时器与
+「绝不在 `MoveFocus` 之后 `SetFocus` 宿主」的次序纪律。**实测结论：那些都不需要** ——
+一次长期的 `AttachThreadInput` 就足以把跨线程的焦点连起来，键盘直接进页面。
 
-从宿主线程调 `ICoreWebView2Controller::MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)` 就够
-（调用后 `GetFocus()` 变 `Chrome_WidgetWin_1`，页面 `document.hasFocus()` 从 `0 → 1`）。
+因此宿主重写（`c3d50cf`）把整套焦点转发删干净了，只留 `attach()` 里那一次长期接续
+（`webview.cpp` 的 `attachThreadInput`：接 `GetAncestor(parent, GA_ROOT)` 的线程、接上不摘）。
+`Webview2Context.focus()`（裸 `SetFocus(host)`）也一并删除 —— 全仓再无焦点转发调用点。
 
-**fix（DO/DON'T）**：
-- **DO / DON'T**：**绝不要在 `MoveFocus` 之后** `SetFocus` / `SetForegroundWindow` 宿主——会把焦点拽出 WebView。顺序必须是"先把顶层顶成前台，**再** `MoveFocus`"。
-- **DO**：验证从 `GetFocus()` 沿 `GetParent` 往上走确认走到宿主；走不到就退到
-  `SetFocus(GetWindow(host, GW_CHILD)` 的第一个可见子窗口 `+ GW_HWNDNEXT)`，再退到 `SetFocus(host)`。
-- **DO**：装一个约 120 ms 的一次性重试（`SetTimer`）再跑一两次 `MoveFocus`——AWT / Compose 可能在你 `MoveFocus` 之后 `SetFocus` 自己的组件，导致第一次点击看似死的。用"是否已在我们的子树里"幂等判据保护，否则第二次 `WM_SETFOCUS` 在已聚焦时会拉锯。
-- **DO**：记住 `GetFocus()` 按消息队列、非全局。从宿主自己的线程调用、焦点归另一线程队列时它返回 `NULL`——当"不在子树里"处理。`SetFocus` 只作用于调用线程队列上的窗口，WebView2 子窗口正是宿主的子窗口。
+**给后来者的三条**：
 
-### 9b. 更深根因：按键按**前台线程**的队列路由
+- **DO**：键盘不通时，先确认 `attachThreadInput` 那一步真的跑了（native 日志有
+  「输入队列已接到 AWT 线程」一行；没有就是 `attach` 没走到）。
+- **DON'T**：再加 `MoveFocus` / 重试定时器 / DOM 焦点桥 —— 三条都试过，都不必要，
+  而 `MoveFocus` 每次调用都会重置 Chromium 的 IME 组合状态（候选窗收起、拼音丢弃），
+  非但不能修键盘，反而会弄坏输入法。
+- **DON'T**：别把 `AttachThreadInput` 改成作用域式（接 → `SetFocus` → 析构里摘）——
+  那条路径连「自己的 `GetFocus()` 读起来正确」都做不到，更别说前台队列。
 
-上面成立，但宿主活在**自己线程**（非 EDT 的 native 消息循环）时还不够。规则：
+### 9b 的原始推理（已作废，仅存档）
 
-> **按键投递给 `GetGUIThreadInfo(GetForegroundWindow() 的线程).hwndFocus`，而不是你自己线程的 `GetFocus()`。**
-
-这解释了"点得动打不了字、一改窗口大小就好了"：resize 让 AWT 重跑激活/焦点记账，把**前台队列的** `hwndFocus` 挪对——这正是修复必须主动做的。
-
-宿主在 B 线程（WebView 线程）、顶层 AWT frame 在 A 线程（EDT）时：
-
-| 队列 | "成功聚焦页面"之后的 `hwndFocus` |
-|---|---|
-| 线程 A（前台 `SunAwtFrame` 的属主） | `SunAwtFrame` —— **按键落在这里被吞掉** |
-| 线程 B（你的宿主） | `Chrome_WidgetWin_1` —— 看起来对，但什么也没改变 |
-
-此时从 B 线程 `SetFocus` 被**静默拒绝**（只作用于调用线程队列上的窗口），页面收到零个 `keydown`。
-
-### 修法：对**根窗口**线程做一次**长期** `AttachThreadInput`
-
-```cpp
-const HWND root   = GetAncestor(host, GA_ROOT);              // SunAwtFrame
-const DWORD rootTid = GetWindowThreadProcessId(root, nullptr);
-if (rootTid && rootTid != hostTid && view->attachedTid != rootTid) {
-    if (view->attachedTid) AttachThreadInput(hostTid, view->attachedTid, FALSE);
-    if (AttachThreadInput(hostTid, rootTid, TRUE)) view->attachedTid = rootTid;
-}
-```
-
-- **DO**：每个视图接一次并保持住（把 tid 缓存在 view 上，只在 `WM_DESTROY` 里摘）。
-- **DON'T**：临时 / 作用域式的接法（接 → `SetFocus` → 析构里摘）**不管用**：它只能让你自己的 `GetFocus()` 读起来正确，移不动前台队列的 `hwndFocus`。不要把它改回作用域接。
-- **DO**：接**根**窗口的线程（`GA_ROOT`），不要接 `GetForegroundWindow()` 的线程。
-- **DON'T**：不要留关掉它的环境变量开关——症状已经定位清楚（前台队列的 `hwndFocus` 没跟着走），开关只是排查期的对照手段。
-
-**为什么某些库不需要这些**：它们从 AWT 线程用 `CreateWindowExW(WS_CHILD, parent_hwnd)` 建宿主，父子同线程，焦点链天然连通；代价是 WebView2 消息泵跑在 AWT/EDT 线程上。本工程保留独立的非 EDT 线程以保持 UI 响应，所以 `AttachThreadInput` 是等价物——不能照抄。
-
-### 焦点转发器必须**幂等**，否则会弄坏输入法
-
-每次 `MoveFocus` / `SetFocus` 都是一次新焦点变更，Chromium 会在每次变更时重置 IME 组合状态（候选窗收起、拼音丢弃）。
-调用点不少（激活驱动的 `WM_SETFOCUS`、AWT 的 `focusGained`、重试定时器），所以闸门要留着。
-
-**DO**：每个调用点过同一个判据：
-
-```cpp
-if (GetForegroundWindow() != GetAncestor(host, GA_ROOT)) return false;  // 队列值已过期
-HWND f = GetFocus();                                    // 我们跑在宿主的线程上
-return f && f != host                                   // 宿主自己不算
-    && isSelfOrDescendant(f, host)
-    && GetParent(f) != host;                            // Chrome_WidgetWin_0 不算
-```
-
-- **DO**：问**宿主所在线程**，不是前台线程。焦点真进页面后，**前台**（AWT）队列的 `hwndFocus` 是**空的**——拿它当判据会永远 false，IME 的 bug 就回来。
-- **DO**：宿主自身、直接子窗口 `Chrome_WidgetWin_0`，**都不算**"已聚焦"——只有 `Chrome_WidgetWin_1` / `Chrome_RenderWidgetHostHWND` 算。
-- **DON'T**：不用任何页面侧的东西当闸门（`document.hasFocus()` 在 AWT 嵌入宿主里是 `true`，而键盘焦点还在 `SunAwtFrame` 上，拿它当守卫会废掉桥）。
-- **DO**：日志把**前台队列的** `hwndFocus` 和你自己的 `focus=` 并排打印，不一致时一行看出队列断开。
+> 原判据：按键投递给 `GetGUIThreadInfo(GetForegroundWindow() 的线程).hwndFocus`，而不是
+> 宿主自己线程的 `GetFocus()`。据此推论宿主在 B 线程、AWT 根窗口在 A 线程时，前台队列的
+> `hwndFocus` 仍是 `SunAwtFrame`、按键被吞，`SetFocus` 则因只作用于调用线程队列而被静默拒绝。
+> **该推论已被实测推翻**：`AttachThreadInput` 合并两条输入队列之后，前台队列的焦点记账
+> 会跟着走，不需要额外推一把。留存只为记录"曾经以为需要"的推理链，避免重复走上。
 
 ### 不要在别人的进程里留下一个 attach
 
@@ -347,7 +310,7 @@ return f && f != host                                   // 宿主自己不算
 `-Dcompose.layers.type=WINDOW` + `Popup(...)` 即可不写任何 native 代码，在 web view 之上得到一层浮动 Compose。实测属性：
 
 - `layerWindow.setSize(drawBounds)` —— popup 窗被裁到**你实际画出来的范围**，没画到的区域对页面保持点击穿透。所以 `fillMaxSize` 覆盖层会挡掉页面**每一次**点击，小徽标不会。
-- `PopupProperties.focusable` 映射到 `JWindow.focusableWindowState`。默认 `false` 让键盘留在页面；设 `true` 会从 WebView 夺走焦点——覆盖层关闭时记得用 `MoveFocus` 还回去。
+- `PopupProperties.focusable` 映射到 `JWindow.focusableWindowState`。默认 `false` 让键盘留在页面；设 `true` 会从 WebView 夺走焦点——覆盖层关闭时把焦点还回去（宿主已无 `MoveFocus` 转发，让 AWT 自己重新激活宿主即可）。
 - `dismissOnClickOutside` 默认 **true**，常驻覆盖层必须设 `false`。
 - 这是**全进程**开关，JetBrains 源码注释列了已知问题：显示闪一下（#4475）、父窗口 resize 时对话框被裁（#4484）、Linux 渲染 bug（#4437）。
 - `compose.interop.blending=true` 是另一个"把 Compose 画到 interop 之上"的开关，但其文档说它无法在 DirectX 之上叠另一个 DirectX 组件——WebView2 正好就是那个，别指望它。
@@ -407,15 +370,9 @@ AWT/Compose 做不了逐像素点击穿透；唯一办法是在覆盖层 HWND �
 8. 点得动打不了字 → **先 dump 窗口树**。看到
    `host → Chrome_WidgetWin_0 → Chrome_WidgetWin_1(浏览器进程)`，
    就知道 `WM_PARENTNOTIFY` / `WM_MOUSEACTIVATE` 永远到不了你，任何建立在它们之上的代码都是死的。
-   然后**按这个顺序**：
-   1. 宿主在自己的线程上？→ 在 **`SetParent` 时**就对 `GetAncestor(host, GA_ROOT)` 的线程做
-      **长期** `AttachThreadInput`（见 9b），并让所有焦点调用过幂等判据，否则 IME 会坏。
-      通常这一步就是全部修复 —— 打字再也不需要任何注入。
-   2. 还是死的？**然后**才加 DOM 桥（`mousedown` → `postMessage` +
-      `put_IsWebMessageEnabled(TRUE)` + `add_WebMessageReceived`）作为**兜底**。
-   3. 每条路径都走 `MoveFocus(PROGRAMMATIC)`；**绝不在 `MoveFocus` 之后** `SetFocus` 宿主；
-      装一个约 120 ms 的一次性重试，因为 AWT/Compose 可能把焦点抢回去。
-   "改窗口大小就能打字"是"点击发生时队列没合并"的标志性症状。
+   然后在 **`SetParent` 时**对 `GetAncestor(host, GA_ROOT)` 的线程做一次**长期**
+   `AttachThreadInput`，接上不摘 —— 这一步就是全部修复（实测结论，见 §9 开头），不需要
+   `MoveFocus`、不需要重试定时器、不需要任何脚本注入。
 9. 从应用**外部**验证焦点，不装任何页面钩子：找到宿主的 `Chrome_WidgetWin_0`，
    在它屏幕中心 `SendInput` 一次真点击，然后对窗口树里每个线程调 `GetGUIThreadInfo(tid)` 读
    `hwndFocus`。是 `Chrome_WidgetWin_1` 说明键盘去了页面。

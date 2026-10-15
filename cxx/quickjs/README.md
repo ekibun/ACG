@@ -1,4 +1,4 @@
-﻿# cxx/quickjs — QuickJS 引擎桥
+# cxx/quickjs — QuickJS 引擎桥
 
 桌面端（Windows）与 Android 共用的 QuickJS 原生桥，用 C++ 实现 Kotlin 侧 `soko.ekibun.quickjs`
 各类的 JNI 入口（`QuickJS` / `JSRef` / `JSFunction` / `JSError`）。整个模块只有一个翻译单元
@@ -121,7 +121,7 @@ sequenceDiagram
 
 - 引用计数完整规则（消费/持票/防环/线程归属）：[`../../cxx/AGENTS.md`](../../cxx/AGENTS.md)
 - 能力桥（`JavaObject` / `jsWrapObject` 析构回收）：`[../../docs/design/quickjs-ability-bridge.md](../../docs/design/quickjs-ability-bridge.md)`
-- `import()` / `require()` 禁用与 `init.js` 内联：`[../../.agents/skills/troubleshooting/references/silent-failures.md](../../.agents/skills/troubleshooting/references/silent-failures.md)`
+- `import()` / `require()` 禁用与 `init.js` 内联：[`../../docs/development/playback-invariants.md`](../../docs/development/playback-invariants.md) 的 QuickJS 桥一节
 - QuickJS 硬约束（tag、`@JvmStatic` 与 `thiz`、包名即符号）：[`../AGENTS.md`](../AGENTS.md) 的 quickjs 一节
 - 原生构建 / `buildJni` / dll 落位：`[../AGENTS.md](../AGENTS.md)` 的「原生构建」一节
 - 上游设计参照：[`flutter_qjs`](https://github.com/ekibun/flutter_qjs)

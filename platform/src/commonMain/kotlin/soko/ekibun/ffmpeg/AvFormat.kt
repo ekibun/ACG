@@ -150,19 +150,20 @@ open class AvFormat(
   /**
    * 作废当前读轮：唤醒卡在读里的读作业、掀掉预读通道、**等它收尾**。三步顺序固定，换序即死等 ——
    * `abort` → `cancel` 通道 → `join` [readerJob]。**必须 `cancel()`、不能 `close()`**（队列已丢弃，
-   * 两个后果见 `silent-failures.md`）。
+   * 两个后果见 `docs/development/playback-invariants.md` 第六节「作废预读通道用 `cancel()`，收场才用 `close()`」）。
    *
    * **必须在归属线程（[dispatcher]）之外调**，否则 `io.abort()` 排在它要叫醒的读作业后面、
    * 永远跑不到 ⇒ join 永久挂起（实测 `closeAsync` 冻住 5 s 超时）。唯一合法例外是 [seekTo]：
    * 它在 [withPtr] 块内调，而 `withPtr` 认得自己已在归属线程、派发过去就地执行、不排队。
-   * 推导与实测见 `http-streaming.md` 第二节。
+   * 推导与实测见 `playback-invariants.md` 第五节（私有作废信号）。
    *
    * 通道是**粘住**的（之后 [getPacket] 立刻拿到 null = EOF），所以置空。不需要「清旗标」：
    * 作废是**一次性事件**、绑在这条 IO 自己那次读的私有信号上，新轮 = 新 IO = 新信号。**幂等**。
    *
    * [packetChannel] / [readerJob] 跨线程读写但**刻意不加 `@Volatile`**（没有数据竞争，可见性靠
    * `FFPlayer.pause` 那个 join 与 `withPtr` 的恢复边）。那条不变量**不局部**，拆它得换
-   * `kotlin.concurrent.atomics.AtomicReference` —— 访问点表与理由见 `silent-failures.md`。
+   * `kotlin.concurrent.atomics.AtomicReference` —— 访问点表与理由见
+   * `docs/development/playback-invariants.md` 第六节（`packetChannel` / `readerJob` 不加 `@Volatile`）。
    */
   suspend fun resetChannel() {
     io.abort()
@@ -250,7 +251,7 @@ open class AvFormat(
    *
    * **别把 [resetChannel] 加回这里兜底**：`releaseImpl` 经 `closeDeferred()` 的 `submit { }`
    * 排在 [dispatcher] 队列后面，而那条线程彼时正被读作业的 `runBlocking` 占死 ⇒「唯一能叫醒读的
-   * 那行代码排在它要叫醒的东西后面」。实测与修法见 `http-streaming.md` 第二节。
+   * 那行代码排在它要叫醒的东西后面」。实测与修法见 `playback-invariants.md` 第五节（私有作废信号）。
    */
   override suspend fun releaseImpl(ptr: Long) {
     destroyNative(ptr)

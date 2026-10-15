@@ -12,7 +12,8 @@ import soko.ekibun.ffmpeg.AvIO
  *
  * **EOF 必须翻成 [AvFormat.AVERROR_EOF]，不能返回 0** —— aviobuf 的 `fill_buffer` 只把
  * `AVERROR_EOF` / 负数当终止（`aviobuf.c:551-558`），返回 0 会被当成「读空，继续要数据」，
- * wav/pcm 这类 demuxer 会在文件尾**无限空转**。症状与实测见 `silent-failures.md`。
+ * wav/pcm 这类 demuxer 会在文件尾**无限空转**。依据与实测见
+ * `docs/development/playback-invariants.md` 第一节「`avio` 只把 `AVERROR_EOF` 与负数当读终止」。
  *
  * 受 [AvIO.seek] 的 `Int` 签名与 native 侧 `(II)I` 方法描述符限制，本实现只对
  * **小于 2 GiB** 的文件正确（偏移在 JNI 边界上就被截成了 32 位）。

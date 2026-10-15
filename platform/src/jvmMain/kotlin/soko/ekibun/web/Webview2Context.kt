@@ -1,4 +1,4 @@
-﻿package soko.ekibun.web
+package soko.ekibun.web
 
 import androidx.annotation.Keep
 import kotlinx.coroutines.CompletableDeferred
@@ -22,7 +22,7 @@ import kotlin.time.Duration.Companion.milliseconds
  * 多个），每个上下文只在这个 environment 下开自己的窗口与 controller；
  * cookie 因此天然在可见页与后台页之间共享。详见 `cxx/webview/webview.cmake`。
  *
- * 挂载与尺寸跟随（[attach] / [fitToParent] / [setBounds] / [focus]）是**桌面私有**
+ * 挂载与尺寸跟随（[attach] / [fitToParent] / [setBounds]）是**桌面私有**
  * 能力，不上 [WebviewContext] 接口、也不挂起 —— 调用点全在没有协程上下文的 AWT
  * 回调里，由 [WebViewSurface] 直接强转成本类型取用。
  */
@@ -161,10 +161,6 @@ class Webview2Context(
     submit { setBounds(ptr, width, height) }
   }
 
-  fun focus() {
-    submit { focus(ptr) }
-  }
-
   // ---- native 回调入口：由宿主线程直接调进来，故 @Keep ----
 
   @Keep
@@ -239,7 +235,7 @@ class Webview2Context(
      *
      * ⚠️ 别往这里加 `--no-sandbox` / `--disable-gpu-sandbox` —— 那是安全降级，只在诊断时用环境
      * 变量 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 按需开（它会**追加**到本参数之后）。
-     * 依据与对照实测见 `.agents/skills/troubleshooting/references/webview2-windows.md` §3。
+     * 依据与对照实测见 `docs/development/webview2-windows.md` §3。
      */
     private const val BROWSER_ARGUMENTS = "--disable-gpu-process-crash-limit"
 
@@ -371,9 +367,6 @@ class Webview2Context(
 
     @JvmStatic
     private external fun openDevTools(ptr: Long)
-
-    @JvmStatic
-    private external fun focus(ptr: Long)
 
     /**
      * 读 url 下的 cookie，摊平成 `"n1=v1; n2=v2"` 经 [CookieCallback.onResult] 回来；

@@ -35,7 +35,7 @@ object Http {
    * `select onTimeout` 的**默认**时长。取值照 ExoPlayer 的 `DEFAULT_READ_TIMEOUT_MILLIS = 8000`。
    *
    * **不是**「请求总时长」：整条流可以播几小时，只要每 8 s 内出过字节就不触发。也不装进两端的
-   * `HttpTimeout`（语义对不上，详见 `http-streaming.md` 第一节）。
+   * `HttpTimeout`（语义对不上，详见 `playback-invariants.md` 第五节「必须在 IO 层阻塞等」）。
    */
   const val SOCKET_TIMEOUT_MS = 8_000L
 
@@ -44,7 +44,7 @@ object Http {
    *
    * 显式把引擎层的「闲置超时」设成无限：这条判据**唯一**交给 [Response.read] 内那支
    * `select onTimeout`（见 [SOCKET_TIMEOUT_MS]），两平台行为才一致。不装的话 OkHttp 自带的
-   * 10 s read timeout 会照旧生效，而那走的不是我们这支（成因见 `http-streaming.md` 第一节）。
+   * 10 s read timeout 会照旧生效，而那走的不是我们这支（成因见 `playback-invariants.md` 第五节）。
    *
    * 装在**这里**而不是各平台侧：装两遍虽然安全（ktor 对同一 plugin 的重复 `install`
    * 会作用到已有配置上），但会让读者误以为平台侧那处才是权威，而 JVM 侧并不需要。
@@ -74,20 +74,20 @@ object Http {
    *
    * 「整包消费」（下完整个 body 再用）的场景也走这里，然后 [Response.readAll] ——
    * ktor 的便捷入口内部有一句 `call.save()`，本函数没有，**别指望它替你缓冲**
-   * （实测见 `silent-failures.md` 的「整包缓冲」一节）。
+   * （实测见 `docs/development/playback-invariants.md` 的「ktor 流式读取」一节）。
    *
    * 拿到 [Response] 的两条消费路径：**Kotlin 侧**（`HttpIO`，显式 `close`）与
    * **JS 侧**（`fetch` 把它当 `_opaque` 挂进 JS，body 由 `Response.arrayBuffer` 桥取，
    * 关闭交给 native 的类析构回调代调）。JS 那条能成立靠的就是「会话开在无父 scope 上」——
-   * 推导见 `http-streaming.md` 第四节。
+   * 推导见 `playback-invariants.md` 第五节（会话 scope）。
    */
   suspend fun request(options: Map<Any, Any?>): Response {
     // 放行块（= [Response.close] 做的事）：完成它 ktor 随即 cleanup 掉这条响应。
     val done = CompletableDeferred<Unit>()
     // 响应就绪的信号。本函数等它拿到响应就返回；建立期的失败也从它这里出去。
     val ready = CompletableDeferred<Response>()
-    // 会话开在**无父** scope 上：挂调用方的 job 会死锁（推导见 `http-streaming.md`
-    // 第四节）。块也**不能**在这里返回（返回后 ktor 会 cleanup），靠 `done.await()`
+    // 会话开在**无父** scope 上：挂调用方的 job 会死锁（推导见 `playback-invariants.md`
+    // 第五节「会话 scope」）。块也**不能**在这里返回（返回后 ktor 会 cleanup），靠 `done.await()`
     // 挂住直到 close。
     val session =
       CoroutineScope(Dispatchers.IO).launch {
@@ -162,7 +162,7 @@ object Http {
      * **网络游标**：本条响应在流里的绝对位置，由 [read] 自己推进（白读丢弃一样算）。
      *
      * **不**从调用方灌进来 —— 「从哪开始」是服务端在 header 里**亲口说的**。
-     * 解析为什么走字符串而不是 ktor 的 `parseRangesSpecifier`，见 `http-streaming.md` 第五节。
+     * 解析为什么走字符串而不是 ktor 的 `parseRangesSpecifier`，见 `playback-invariants.md` 第五节（白读推进）。
      */
     var offset: Int =
       delegate.headers[HttpHeaders.ContentRange]
@@ -200,7 +200,7 @@ object Http {
     /**
      * 通道里**已经到达、但还没被 [read] 取走**的字节数。
      *
-     * 两条反直觉的性质（机制与实测见 `http-streaming.md` 第六节）：
+     * 两条反直觉的性质（机制与实测见 `playback-invariants.md` 第五节「通道存量」）：
      * - **通道没建时返回的 0 是假的** —— 只说明本对象还没拿到通道引用，不说明网络上下过什么；
      * - **存量不会自己涨** —— 搬运只发生在读侧，想让它变多只能靠读，而读会同时推进 [offset]。
      *
@@ -219,7 +219,7 @@ object Http {
      * 超时用**异常**而不是返回值（调用方要么往上抛、要么 catch 住换会话重试，返回值得让它当场分叉）。
      * **没有「作废」这一支** —— 作废由 `HttpIO.read` 的哨兵**取消整条读协程**表达，`finally` 里必须
      * **显式**收掉落选的 `data`。返回**原始** [Int]、不做 EOF 翻译（翻译留在 `HttpIO.read`；返回 0
-     * 会被 aviobuf 当「读空，继续要数据」）。推导见 `http-streaming.md`。
+     * 会被 aviobuf 当「读空，继续要数据」）。推导见 `playback-invariants.md` 第五节。
      */
     @OptIn(ExperimentalCoroutinesApi::class) // `select` 的 `onTimeout` 子句目前仍是 experimental API
     suspend fun read(

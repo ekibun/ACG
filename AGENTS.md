@@ -65,7 +65,7 @@ trigger: always_on
 
 - **DO：使用项目技能。** 技能在 `.agents/skills` 下；任务命中某个技能时，改代码或文档前先读它。
 
-- **DO：改代码只跑定点 `jvmTest`，最终提交前再验证编译、lint 和全量测试。** 验收阶段只跑与本次改动直接相关的测试（平台层 `:platform:jvmTest`、其余 `:shared:jvmTest`，`--tests "soko.ekibun.<包>.<类>"`），不跑全量 `:shared:jvmTest`，不跑 `ktlintCheck` / `ktlintFormat` / `clang-format --dry-run`；用户确认提交时再跑四条编译闸门、全量测试、lint（命令见 [build-and-test 技能](./.agents/skills/build-and-test/SKILL.md)），超时兜底失败按 `silent-failures.md` 甄别，别靠重跑掩盖。
+- **DO：改代码只跑定点 `jvmTest`，最终提交前再验证编译、lint 和全量测试。** 验收阶段只跑与本次改动直接相关的测试（平台层 `:platform:jvmTest`、其余 `:shared:jvmTest`，`--tests "soko.ekibun.<包>.<类>"`），不跑全量 `:shared:jvmTest`，不跑 `ktlintCheck` / `ktlintFormat` / `clang-format --dry-run`；用户确认提交时再跑四条编译闸门、全量测试、lint（命令见 [build-and-test 技能](./.agents/skills/build-and-test/SKILL.md)），超时兜底失败按 [`docs/development/playback-invariants.md`](./docs/development/playback-invariants.md) 甄别，别靠重跑掩盖。
 
 - **DO：命名用描述性词，最具体的名词放最后。** 别用费解的单字母名或含糊缩写；用能暴露归属与职责的名字。
 
@@ -84,9 +84,9 @@ trigger: always_on
   - 不为不可能发生的场景写错误处理。
   - 写了 200 行、能用 100 行，就重写。
 
-- **DO：注释尽量简洁，只写不能直接推断的内容。** 讲当前设计、职责与约束，不写「不再…」「改为…」这类历程；不写代码复述（删掉这行不影响理解的就是在翻译代码）；只对齐技术目标，不对齐来源仓库；保留契约签名。带实测数据或推演「为什么」的段落搬进 `.agents/` 对应 `references/`，源码只留裸约束 + 指针；用 `import` 不写全限定名；`.kt` / `.kts` 注释不用 emoji（`.md` 例外）。
+- **DO：注释尽量简洁，只写不能直接推断的内容。** 讲当前设计、职责与约束，不写「不再…」「改为…」这类历程；不写代码复述（删掉这行不影响理解的就是在翻译代码）；只对齐技术目标，不对齐来源仓库；保留契约签名。带实测数据或推演「为什么」的段落搬进 `docs/` 下对应正本，源码只留裸约束 + 指针；用 `import` 不写全限定名；`.kt` / `.kts` 注释不用 emoji（`.md` 例外）。
 
-- **DO：遇到"不报错只失效"的问题时查 silent-failures。** 清单见 [`.agents/skills/troubleshooting/references/silent-failures.md`](./.agents/skills/troubleshooting/references/silent-failures.md)。
+- **DO：遇到"不报错只失效"的问题先查播放链路不变量，再走取证步骤。** 外部库（ffmpeg / kotlinx / ktor / skiko）的行为依据与判据在 [`docs/development/playback-invariants.md`](./docs/development/playback-invariants.md)，崩溃 / 挂死的取证步骤见 [`docs/development/debugging.md`](./docs/development/debugging.md)，症状路由表见 [`docs/development/troubleshooting.md`](./docs/development/troubleshooting.md)。
 
 - **DON'T：`commonMain` 出现平台符号。** 不许 `java.*` / `android.*` / `System.currentTimeMillis` 等；需要平台能力就 `expect` 最小原语、两端各 `actual`，别自创抽象层。
 

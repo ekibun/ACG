@@ -115,7 +115,7 @@ tasks.matching { it.name == "createDistributable" }.configureEach {
 // 显式透传一次，否则 `buildJni` 里的 `exec.cmd` 找不到 MSYS2 的 bash。
 //
 // （`cxx/webview/webview.cpp` 的原生日志一律走 stderr，没有开关；想看 Chromium 自己的
-// 日志，见 `.agents/skills/troubleshooting/references/debugging.md`。）
+// 日志，见 `docs/development/debugging.md`。）
 tasks.withType<JavaExec>().configureEach {
   providers.environmentVariable("MSYS2_BIN").orNull?.let { environment("MSYS2_BIN", it) }
 }
