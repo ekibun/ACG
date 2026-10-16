@@ -28,8 +28,12 @@ val buildJni =
         .get()
         .metadata.installationPath.asFile.absolutePath
         .replace("\\", "/")
+    // Windows 下经 cmd 起 `cxx/exec.cmd`，**写 `.\exec` 而不是裸 `exec`**：cmd 默认会搜当前
+    // 目录，但环境里带 `NoDefaultCurrentDirectoryInExePath=1` 时它停搜（从 Git Bash / MSYS 那种
+    // shell 里起 gradlew 就有这个变量），裸 `exec` 于是变成「不是内部或外部命令」。本文件三处
+    // `cmd /c` 同理。
     if (OperatingSystem.current().isWindows) {
-      commandLine("cmd", "/c", "exec ./build.jni.sh \"$javaHome\"")
+      commandLine("cmd", "/c", ".\\exec ./build.jni.sh \"$javaHome\"")
     } else {
       commandLine("./build.jni.sh", javaHome)
     }
@@ -46,7 +50,7 @@ val clangCheck =
     group = "verification"
     workingDir = rootDir.resolve("cxx")
     if (OperatingSystem.current().isWindows) {
-      commandLine("cmd", "/c", "exec ./format.jni.sh check")
+      commandLine("cmd", "/c", ".\\exec ./format.jni.sh check")
     } else {
       commandLine("./format.jni.sh", "check")
     }
@@ -58,7 +62,7 @@ val clangFormat =
     group = "formatting"
     workingDir = rootDir.resolve("cxx")
     if (OperatingSystem.current().isWindows) {
-      commandLine("cmd", "/c", "exec ./format.jni.sh fix")
+      commandLine("cmd", "/c", ".\\exec ./format.jni.sh fix")
     } else {
       commandLine("./format.jni.sh", "fix")
     }
