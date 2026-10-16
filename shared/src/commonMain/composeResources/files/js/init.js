@@ -166,13 +166,10 @@ async (_binding) => {
   /**
    * 后台 WebView —— 对应 BangumiPlugin 的 `modules/http.js#__webview__`。
    *
-   * 那个工程里它是个 `require("http")` 出来的模块；这里**内联**，原因是 QuickJS
-   * 的动态 `import()` 在本工程的 JNI 桥上会把进程打崩（实测两种路径都 abort）：
-   * 模块不存在时命中 `assert(js_rc(p)->ref_count == 0)`（quickjs.c:6425），
-   * 模块存在时又在 `JS_FreeRuntime` 命中
-   * `assert(list_empty(&rt->gc_obj_list))`（quickjs.c:2464）。
-   * 所以这里没有对应的 `files/js/module/webview.js`。init.js 里其它能力
-   * （fetch / TextEncoder / FormData）本来也都是内联的，与之一致。
+   * 那个工程里它是个 `require("http")` 出来的模块；这里内联，因为它和 fetch /
+   * TextEncoder / FormData 一样是**宿主能力**：init.js 就是这份能力表的定义处，
+   * 模块目录 `files/js/module/` 留给跑在能力之上的插件（`import("bgm")` 那条路）。
+   * 所以这里没有对应的 `files/js/module/webview.js`。
    *
    * 与参照实现只差一件事：那边是**阻塞**等待（`while(!finished) sleep(1000)`），
    * 这里返回 Promise。QuickJS 只有一个事件循环，阻塞会把整个引擎锁死 ——
@@ -253,6 +250,20 @@ async (_binding) => {
      * token 交换本身不在这里做 —— 引擎不含任何服务商知识，`client_secret` 是插件自己的事。
      */
     openBrowser: (url) => _binding("openBrowser", ["" + (url || "")]),
+    /**
+     * 扁平的字符串设置，落盘在平台的设置文件里。
+     *
+     *   await settings.get("bgm.client_id");     // 没有该键则 null
+     *   await settings.set("bgm.client_id", "…"); // 写（键与值都在这里折成字符串）
+     *   await settings.set("bgm.session", null);  // 值为 null 即删键
+     *
+     * 两个都是**异步**的（走能力桥，返回 Promise）：读必须 await 才拿得到值；
+     * **写也必须 await** —— 不 await 的话下一句读与它并发，谁先落盘不确定。
+     */
+    settings: {
+      get: (key) => _binding("settings.get", ["" + key]),
+      set: (key, value) => _binding("settings.set", ["" + key, value == null ? null : "" + value])
+    },
     encodeURI: (uri, encoding) => {
       const encoder = new _TextEncoder(encoding || "utf-8");
       return `${uri}`.replace(/[^a-zA-Z0-9-_.!~*'();/?:@&=+$,#]/g, (c) => encodeURI_hex(encoder, c));

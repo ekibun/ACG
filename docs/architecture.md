@@ -17,10 +17,12 @@ Android `android.webkit.WebView`）与**播放内核**（FFmpeg）。两族各�
 | 未落地的设计草案（领域模型、数据源契约、落地顺序） | [design/architecture-design.md](./design/architecture-design.md) |
 | 「不报错只失效」的现象 | [development/playback-invariants.md](./development/playback-invariants.md)、[development/troubleshooting.md](./development/troubleshooting.md) |
 
-> **当前阶段：内核骨架已跑通，业务域未落地。** 仓库里能跑起来的是两族的端到端验证面
-> —— 播放页、浏览器页、脚本控制台；**没有**番剧库、收藏、条目页，也没有 `catalog`（Bangumi /
-> AniList 客户端）与 `model`（领域模型）这两个包。读本文时请按「内核 + 验证面」来理解，
-> 不要把 [design/architecture-design.md](./design/architecture-design.md) 的分层当成现状。
+> **当前阶段：内核骨架已跑通，业务域刚开一个口子。** 仓库里能跑起来的是两族的端到端验证面
+> —— 播放页、浏览器页、脚本控制台 —— 加上第一个真业务页：Bangumi 收藏（OAuth 登录 + 收藏列表）。
+> **没有**番剧库、条目页，也没有 [design/architecture-design.md](./design/architecture-design.md)
+> 里那个 `catalog` / `model` 分层（Bangumi 客户端落在了 `acg.source`，形态与那份草案不同，
+> 见 [design/bgm-plugin.md](./design/bgm-plugin.md)）。读本文时请按「内核 + 验证面 + 一个样板业务页」
+> 来理解。
 
 ## 项目关系
 
@@ -36,7 +38,9 @@ ACG 只依赖**库与运行时**，目前不依赖任何自建服务端。数据
 | Compose Multiplatform | Gradle 依赖 | 唯一的 UI 框架，两端共用 |
 | ktor + JDK / OkHttp 引擎 | Gradle 依赖 | 唯一的 HTTP 栈。桌面走 JDK 引擎，Android 走 OkHttp |
 | JetBrains Skia（经 Compose） | Gradle 依赖 | 桌面端视频帧的绘画面 |
-| Bangumi v0 API / AniList / JS 数据源站点 | 规划中 | 见 [design/architecture-design.md](./design/architecture-design.md) |
+| androidx.datastore（preferences-core）+ okio | Gradle 依赖 | 设置的落盘（`:platform` 内部）。okio 版本跟 datastore-core-okio 声明的一致，不另外抬版本 |
+| Bangumi v0 API | 已接入（第一个插件） | 见 [design/bgm-plugin.md](./design/bgm-plugin.md) |
+| AniList / 其它 JS 数据源站点 | 规划中 | 见 [design/architecture-design.md](./design/architecture-design.md) |
 
 ```mermaid
 flowchart LR
@@ -65,12 +69,12 @@ flowchart LR
 
 ## 仓库结构
 
-Gradle 四个模块，外加一个不进 Gradle 工程的原生层目录：
+Gradle 四个模块，外加一个不进 Gradle 工程的原生层目录（规模列数的是**生产** `.kt` / `.js`，不含测试，随改动漂移，只用来估体量）：
 
 | 模块 | 职责 | 源码集 | 规模 |
 | --- | --- | --- | --- |
-| `:platform` | **平台层**：native 绑定门面、webview 契约与两端实现、播放器视图、File/Http/Time 原语 | `commonMain` / `jvmShared` / `androidMain` / `jvmMain` | ~5.0k 行 |
-| `:shared` | **业务层**：UI、JS 引擎、播放接线、网络 | 生产代码只在 `commonMain`；`jvmTest` 另有 dev 工具与用例 | ~1.6k 行 |
+| `:platform` | **平台层**：native 绑定门面、webview 契约与两端实现、播放器视图、File/Http/Time/Settings 原语 | `commonMain` / `jvmShared` / `androidMain` / `jvmMain` | ~5.4k 行 |
+| `:shared` | **业务层**：UI、JS 引擎、播放接线、网络、数据源客户端 | 生产代码只在 `commonMain`（`.kt` ~2.7k 行 + `files/js/**` ~450 行）；`jvmTest` 另有 dev 工具与用例 | ~3.2k 行 |
 | `:androidApp` | Android 入口（`MainActivity`，`applicationId = soko.ekibun.acg`） | — | 30 行 |
 | `:desktopApp` | 桌面入口（`main.kt`，`mainClass = soko.ekibun.acg.MainKt`），并承载 `buildJni` | — | 42 行 |
 | `cxx/` | **原生层**：`webview` / `quickjs` / `ffmpeg` 三个共享库 | 自研 C++ 三个翻译单元 | ~2.6k 行 |
@@ -97,9 +101,13 @@ Gradle 四个模块，外加一个不进 Gradle 工程的原生层目录：
 两族共用同一副基座（`Pointer` / `ThreadDispatcher`），业务侧的 `JsEngine` 与 `VideoSurface` 调用点
 只负责把它们接起来。
 
-另有 `soko.ekibun.browser` 一族**平台原语**（不进任何继承树、没有 native 面）：外部浏览器登录的
-回调会话与「用系统默认浏览器打开」。它只被脚本插件链的 `openBrowser` 能力用到，形态依据见
-[design/browser-login.md](./design/browser-login.md)。
+另有两组**平台原语**（不进任何继承树、没有 native 面）：`soko.ekibun.browser` 一族是外部浏览器
+登录的回调会话与「用系统默认浏览器打开」，只被脚本插件链的 `openBrowser` 能力用到，形态依据见
+[design/browser-login.md](./design/browser-login.md)；`soko.ekibun.common.Settings` 是扁平的
+字符串设置表（DataStore Preferences），只被 `settings` 能力用到。两者都**不开在自己的抽象层上**：
+`Settings` 的契约面（`SettingsStore`）不暴露 okio 类型 —— DataStore 的 `createWithPath` 只吃
+okio `Path`，那个 `Path` 只出现在 `:platform` 内部的建表函数与懒初始化里，`:shared` 与界面
+见不到。
 
 ### 基座：`Pointer` 与 `ThreadDispatcher`
 
@@ -131,6 +139,7 @@ Gradle 四个模块，外加一个不进 Gradle 工程的原生层目录：
 | `expect createHttpClientImpl(block)` | JDK ktor 引擎 | OkHttp |
 | `expect createCallbackSession()`（`soko.ekibun.browser`） | `jvmShared` 的回环服务器 —— **两端共用一份** | 同左（`jvmShared`） |
 | `expect launchExternalBrowser(url)` | `java.awt.Desktop` | Chrome Custom Tabs |
+| `expect settingsFilePath()`（`soko.ekibun.common`） | `acg.dataDir` 系统属性，缺省 `~/.acg` | 进程 Context 的 `filesDir` |
 | `interface FileHandle` | `jvmShared` 的 `RandomAccessFileHandle` | 同左（`jvmShared`） |
 
 ### QuickJS 族（`soko.ekibun.quickjs` + `soko.ekibun.web`）
@@ -245,17 +254,23 @@ classDiagram
 
 ### 业务层（`:shared`）—— 两族的调用方
 
-`shared/src/commonMain/kotlin/soko/ekibun/acg/` 下四个包，都不进任何继承树，只把上面两族接起来：
+`shared/src/commonMain/kotlin/soko/ekibun/acg/` 下五个包，都不进任何继承树，只把上面两族接起来：
 
-- **`ui`** —— Compose 界面。`App.kt` 是两端共用入口，一个 `PrimaryTabRow` 挂三个页签：
-  `PlayScreen`（播放）、`WebScreen`（浏览器）、`CodeScreen`（脚本控制台）。`ui/comp` 放与业务
-  无关的小组件（如 `highlight` 代码着色）。
-  三个页**都是内核验证面**，不是产品界面 —— 业务四页（收藏 / 详情 / 搜索 / 设置）未落地。
+- **`ui`** —— Compose 界面。`App.kt` 是两端共用入口，一个 `PrimaryTabRow` 挂四个页签：
+  `PlayScreen`（播放）、`WebScreen`（浏览器）、`CollectionScreen`（收藏）、`CodeScreen`
+  （脚本控制台）。`ui/comp` 放可复用的小组件（代码着色 `highlight`、网络图 `RemoteImage`）。
+  前三页里的播放与浏览器**是内核验证面**，收藏页是第一个真业务页（形态依据见
+  [design/bgm-plugin.md](./design/bgm-plugin.md)）；业务四页里的详情 / 搜索 / 设置仍未落地。
+- **`source`** —— 数据源客户端。目前只有 `BgmSource`：把 JS 插件交回来的 `Map` 收成强类型
+  （`BgmUser` / `BgmCollectionItem` / …）。它自己**不发 HTTP**，网络出口全在插件里，
+  见下文「脚本插件链」。
 - **`engine`** —— `JsEngine`，全进程单例（`JsEngine.instance`）。持一个惰性建的 QuickJS runtime，
   把 JS 侧那一**份**能力桥 `_binding(method, args)` 落到 Kotlin 原语上；后台 WebView 驱动
   `webviewAsync` 也住在这个文件里。细节见下文「脚本插件链」。
 - **`player`** —— `AvIO` 的两个 Kotlin 实现：`HttpIO`（range 会话 + 白读推进 + 闲置超时）与
   `FileIO`（本地文件）。它们被 native 的 avio 回调**同步调用**，是播放链唯一与网络/磁盘相接的地方。
+  `HttpIO` 之外还挂一层**进程级**的块缓存 `HttpCache`（16 MiB、按 URL + 块号键、只当加速使，
+  命中不了就退回网络那条路）。
 - **`common`** —— `Http`：ktor 的流式会话收口。**不缓冲** body，返回一条活着的 `Response`，
   两条读法（播放器用的 `read`、JS 用的 `readAll`）共用一个 `close`。闲置超时
   `SOCKET_TIMEOUT_MS = 8000` 只在这里实现一次，两端行为才一致。
@@ -294,16 +309,20 @@ flowchart LR
 
 ### 脚本插件链（`JsEngine` + WebView）
 
-数据源插件的执行环境。`init.js` 从 Compose 资源里读出来（`files/js/init.js`，按需模块在
-`files/js/module/`），在 QuickJS 里求值一次，往 JS 全局注入 `fetch` / `Response` / `Request` /
-`FormData` / `TextEncoder` / `TextDecoder` / `Cookies` / `console` / `webview` / `openBrowser` /
-`encodeURI…`；
+数据源插件的执行环境。`init.js` 从 Compose 资源里读出来（`files/js/init.js`），在 QuickJS 里求值
+一次，往 JS 全局注入 `fetch` / `Response` / `Request` / `FormData` / `TextEncoder` / `TextDecoder` /
+`Cookies` / `console` / `webview` / `openBrowser` / `settings` / `encodeURI…`；
 **执行期间注入的那一份 `_binding` 就是全部能力**，Kotlin 侧用一个 `when` 直接派发到各能力
 （不按名字反射查找 —— 判据见 [design/quickjs-ability-bridge.md](./design/quickjs-ability-bridge.md)）。
 
-`import()` / `require()` 被**禁用**：QuickJS 的动态导入会撞上本桥的模块加载路径，直接把进程
-`abort()`（实测两条路径都崩），所以 `webview` 这类能力是**内联**在 `init.js` 里的，没有对应的
-`module/webview.js`。
+`files/js/module/` 下的是**插件**（`bgm.js`、打包进来的 `crypto.js`），由宿主用
+`JsEngine.callPlugin(module, function, …)` 现 `import()` 一次再调；`init.js` 不引用它们。
+宿主能力之所以**内联**在 `init.js` 里而不是做成 `module/webview.js`：能力是宿主提供的，
+`init.js` 就是那张能力表，插件才是能力的消费者。
+
+> **DON'T:** 相信「本桥 `import()` 会让进程 `abort()`」这类老说法（本文档与 `init.js` 里都曾写过）。
+> 实测是通的，`init.js` / 本文都已更正；插件机制就建立在它上面。加新插件的第一步是跑一次
+> `ModuleImportProbeTest` 这类探测用例，不要靠二手结论去设计绕路方案。
 
 ```mermaid
 sequenceDiagram
@@ -366,6 +385,9 @@ flowchart TD
 - **暂停不停取包**：轮次判据不含 `pts.playing`，暂停期间照常解码入队 —— 这就是预读缓存。
 - **`HttpIO.read` 里存在唯一的 `runBlocking`**（native 回调要同步签名）；数据没到时在 IO 层阻塞
   等，「作废」由 `Handler.abort()` 叫醒，会话不掀。
+- **`HttpCache` 只当加速**：命中不了只是多一次请求，任何情况下都不许改变读出来的字节。
+  拼块规则（只往块首前缀上接、凑不满整块就整块跳过）与判据见
+  `docs/development/playback-invariants.md` 第 5.7 节。
 
 ## 跨层的三条约定
 
@@ -387,6 +409,7 @@ flowchart TD
 | `cxx/quickjs` + `_binding` 桥 | [`flutter_qjs`](https://github.com/ekibun/flutter_qjs) / `neko`(2020) | `JS_TAG_*` 分派口径、`jsToJava` / `javaToJs` 互操作思路、「关闭前清算泄漏」 |
 | `cxx/ffmpeg` + `FFPlayer` | [`flutter_ffplay`](https://github.com/ekibun/flutter_ffplay) | 自定义 AVIO、`sendPacketAndGetFrames` 解码节奏、主时钟对齐的播放模型 |
 | `init.js` 的能力面 | `BangumiPlugin` 的 `modules/http.js` | 各能力的签名与用法（`webview` 的位置参数完全一致） |
+| 收藏页的版面 | `Bangumi`(Android) 的 `fragment_collection.xml` | 顶部筛选 + 条目类型页签 + 列表的三段式；**不**照抄它的 `ViewPager`（见 [design/bgm-plugin.md](./design/bgm-plugin.md)） |
 | 领域模型与分层草案 | `bangumi-onair` / `animeko` / `neko` | `Subject` / `Episode` / `Line` 的形状、插件契约的演化路径 |
 
 ## 开发面（不参与打包）

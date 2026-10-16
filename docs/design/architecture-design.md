@@ -145,6 +145,17 @@ resolveEpisode(line, episode)     → { url, headers? }            // sort + lin
 
 ## 5. 落地顺序
 
+> **落地状态（2026-10 更新）：** 第 2 条已经落了**第一个切片**，但形态与本文草案不同，以
+> [./bgm-plugin.md](./bgm-plugin.md) 为准：
+> - 包名是 `acg.source`（`BgmSource`），**不是** `acg.catalog.bgm`；「不进 `acg.engine`」这条
+>   仍然成立，§3 里那一行按新包名读。
+> - DTO + mapper 只做了**收藏**这一条链路（`me` / `collections`），`Subject` / `Episode` 那套
+>   领域模型一个都没建 —— 收藏页要的字段直接从应答折到界面用的 data class。
+> - 服务商知识**不在 Kotlin 里**，挪进了 JS 插件 `files/js/module/bgm.js`；§3 里「客户端放
+>   `acg.catalog.bgm`」的隐含前提（Kotlin 侧直接调 v0）没有采纳。
+> - 限流退避、`epochTimeMs()`、kotlinx-serialization、`model` 包、持久化分片**都还没做**；
+>   目前唯一的持久化是扁平的字符串设置表（凭据 + token）。
+
 1. `epochTimeMs()` 原语 + kotlinx-serialization 依赖（改依赖先确认）+ `model` 包类型
 2. `acg.catalog.bgm`：DTO + mapper + 限流退避（UA 必带，~3 req/s）
 3. 持久化分片 + 收藏/历史仓库（本地先行）

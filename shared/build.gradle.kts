@@ -34,6 +34,7 @@ kotlin {
       // 平台层（native 绑定 + webview/播放器视图/IO 原语，soko.ekibun.*）在 :platform，
       // 包名未变。api：业务层直接用它的类型，desktopApp / androidApp 也要看得见。
       api(project(":platform"))
+      implementation(libs.androidx.collection)
       implementation(libs.compose.runtime)
       implementation(libs.compose.foundation)
       implementation(libs.compose.material3)
@@ -73,6 +74,10 @@ tasks.named<Test>("jvmTest") {
   // `jniLoadLibrary` 正是用它加载 cxx 的三个 dll，所以这里也要显式声明一次。
   // 详细理由与取值见 desktopApp/build.gradle.kts 的同名注释。
   jvmArgs("--enable-native-access=ALL-UNNAMED")
+  // 设置文件落到本模块 build/ 下（`Settings.jvm.kt` 认这个属性）—— JsEngine 的
+  // `settings.*` 能力走的是全进程共享那个实例，不指开就往跑测试的机器的家目录写。
+  val settingsDataDir = layout.buildDirectory.dir("acg-data")
+  systemProperty("acg.dataDir", settingsDataDir.get().asFile.absolutePath)
   // 每个用例各自 ctx.close()：native 段的断言 abort 会连整个测试进程一起带走，
   // 而 Gradle 默认只汇总结果，崩了就只能从上一轮残留的 XML 去猜死在哪个用例。
   // 打印逐用例事件才能一眼定位，代价是每轮几十行输出 —— 留着当偶发崩的第一现场。

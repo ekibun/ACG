@@ -22,6 +22,7 @@ import kotlinx.io.bytestring.decodeToString
 import soko.ekibun.acg.common.Http
 import soko.ekibun.browser.createCallbackSession
 import soko.ekibun.browser.launchExternalBrowser
+import soko.ekibun.common.settingsStore
 import soko.ekibun.quickjs.JSError
 import soko.ekibun.quickjs.JSFunction
 import soko.ekibun.quickjs.JSInvokable
@@ -162,6 +163,18 @@ class JsEngine {
                       openBrowserAsync(args[0] as String)
                     }
 
+                  // 设置的读：交回 `Deferred<String?>`，没有该键就是 null。
+                  "settings.get" ->
+                    CoroutineScope(Dispatchers.IO).async {
+                      settingsStore.read()[settingsKey(args)]
+                    }
+
+                  // 设置的写：值为 null 即删该键（`SettingsStore` 的契约）。
+                  "settings.set" ->
+                    CoroutineScope(Dispatchers.IO).async {
+                      settingsStore.write(mapOf(settingsKey(args) to settingsValue(args)))
+                    }
+
                   else -> throw JSError("unknown method '${argv[0]}'")
                 }
               },
@@ -184,6 +197,38 @@ class JsEngine {
     name: String = "<eval>",
   ): Any? = quickjs.evaluate(cmd, name)
 
+  /**
+   * 调插件模块导出的函数 —— 宿主叫 JS 那一侧的唯一入口。
+   *
+   * [module] 是 `files/js/module/` 下的文件名（不带 `.js`），与 [moduleHandler] 拼路径的
+   * 规则同一套；每次调用现 `import()` 一次，**不登记、不缓存**模块引用 —— 顺带也就没有
+   * 「谁负责放掉那份导出表」这笔账（模块命名空间一旦整图展开，里面的函数全是要归还的
+   * [JSFunction]；这里只取一个成员，`jsToJava` 只包那一个）。
+   *
+   * 插件导出的函数基本都是 `async`（要 `fetch`），所以这里把 Promise 收口成 [Deferred]
+   * 一并 `await` 掉，调用点拿到的就是数据本身。
+   */
+  suspend fun callPlugin(
+    module: String,
+    function: String,
+    vararg args: Any?,
+  ): Any? {
+    val exported =
+      evaluate("(async () => (await import(${jsStringLiteral(module)}))[${jsStringLiteral(function)}])()")
+    val pluginFunction = (exported as? Deferred<*>)?.await()
+    if (pluginFunction !is JSFunction) {
+      throw JSError("module '$module' exports no function '$function'")
+    }
+    val result =
+      try {
+        pluginFunction.invokeAsync(*args)
+      } finally {
+        // 这一票是本函数借的（evaluate 交出来的），调用完就还。
+        pluginFunction.close()
+      }
+    return if (result is Deferred<*>) result.await() else result
+  }
+
   fun reset() {
     // 主动销毁 runtime，而不是只把引用置空等 GC：JS 侧的 Java 对象持有
     // global ref，只有 destroyContext 触发的析构才会把它们还回去。
@@ -199,6 +244,41 @@ class JsEngine {
   ) {
     println("$type\n$data")
   }
+
+  /**
+   * `settings.*` 的键。形状由 `init.js` 保证（那边 `"" + key` 已经折过一次字符串），
+   * 这里仍旧逐项判：桥把 JS 实参一律交成 `Any?`，落在 `String` 上才有下文。
+   */
+  private fun settingsKey(args: List<*>): String {
+    val key = args.getOrNull(0)
+    if (key !is String) throw JSError("settings key must be a string")
+    return key
+  }
+
+  /** `settings.*` 的值：字符串，或 `null`（删键）。 */
+  private fun settingsValue(args: List<*>): String? {
+    val value = args.getOrNull(1)
+    if (value == null) return null
+    if (value !is String) throw JSError("settings value must be a string or null")
+    return value
+  }
+
+  /**
+   * 把 [value] 包成 JS 字符串字面量 —— [callPlugin] 要把模块名与函数名嵌进求值串里。
+   *
+   * 参数实际都是源码里的常量，但拼串就得能装下任意内容：漏转义的话一句带引号的
+   * 名字会变成另一段代码。
+   */
+  private fun jsStringLiteral(value: String): String =
+    "'" +
+      value
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029") +
+      "'"
 
   /**
    * [input] 按 [to] 编码成字节 —— `TextEncoder` 那侧的实现。

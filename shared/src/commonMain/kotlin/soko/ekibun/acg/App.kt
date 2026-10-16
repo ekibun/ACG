@@ -14,6 +14,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import soko.ekibun.acg.ui.screen.CodeScreen
+import soko.ekibun.acg.ui.screen.CollectionScreen
 import soko.ekibun.acg.ui.screen.PlayScreen
 import soko.ekibun.acg.ui.screen.WebScreen
 
@@ -22,6 +23,7 @@ private enum class AppTab(
 ) {
   Play("播放"),
   Web("浏览器"),
+  Collect("收藏"),
 
   // 一个能直接执行插件 JS 的控制台 —— 后台 WebView 这些能力只有从 JS 里
   // 才够得着，没有这个页签就没法在应用内验证。
@@ -52,6 +54,7 @@ fun App() {
       when (tabs[selected]) {
         AppTab.Play -> PlayScreen()
         AppTab.Web -> WebScreen(Modifier.fillMaxSize())
+        AppTab.Collect -> CollectionScreen(Modifier.fillMaxSize())
         AppTab.Code -> CodeScreen()
       }
     }

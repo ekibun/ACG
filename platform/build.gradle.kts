@@ -62,6 +62,11 @@ kotlin {
       // Http 的公共面直接暴露 ktor 类型（HttpClient / HttpResponse / ByteReadChannel），
       // 消费方（:shared 的 JsEngine / FileIO / HttpIO）要看得见 —— 与 coroutines 同理用 api。
       api(libs.ktor.client.core)
+      // 设置的落盘：DataStore 的 commonMain 只认 okio Path（`createWithPath`），
+      // 只收 java.io.File 的那个重载在 jvmAndroidMain 里、commonMain 看不见。
+      // 契约面（SettingsStore）不暴露 okio 类型，所以不用 api。
+      implementation(libs.okio)
+      implementation(libs.androidx.datastore.preferences.core)
     }
     jvmMain.dependencies {
       // 桌面端 ktor 引擎；logback 是 ktor 经 slf4j 打日志的后端（代码零引用，纯运行时）。
@@ -102,6 +107,10 @@ tasks.named<Test>("jvmTest") {
   // `jniLoadLibrary` 正是用它加载 cxx 的四个 dll，所以这里也要显式声明一次。
   // 详细理由与取值见 desktopApp/build.gradle.kts 的同名注释。
   jvmArgs("--enable-native-access=ALL-UNNAMED")
+  // 设置文件落到本模块 build/ 下（`Settings.jvm.kt` 认这个属性），免得跑一次测试就往
+  // 跑测试那台机器的家目录写一份真实设置。
+  val settingsDataDir = layout.buildDirectory.dir("acg-data")
+  systemProperty("acg.dataDir", settingsDataDir.get().asFile.absolutePath)
   // 每个用例各自 ctx.close()：native 段的断言 abort 会连整个测试进程一起带走，
   // 而 Gradle 默认只汇总结果，崩了就只能从上一轮残留的 XML 去猜死在哪个用例。
   // 打印逐用例事件才能一眼定位，代价是每轮几十行输出 —— 留着当偶发崩的第一现场。

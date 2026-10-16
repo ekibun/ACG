@@ -27,6 +27,9 @@ const callbackUrl = await openBrowser(templateUrl);
 插件侧两件必须做对的事：
 
 ```js
+const form = (fields) =>
+  Object.keys(fields).map((k) => encodeURIComponent(k) + "=" + encodeURIComponent(fields[k])).join("&");
+
 const cb = await openBrowser(authorizeUrl);
 const params = Object.fromEntries(cb.split("?")[1].split("&").map((p) => {
   const [k, v] = p.split("=");
@@ -34,13 +37,18 @@ const params = Object.fromEntries(cb.split("?")[1].split("&").map((p) => {
 }));
 const token = await fetch(tokenEndpoint, {
   method: "POST",
-  body: JSON.stringify({ code: params.code, redirect_uri: cb.split("?")[0], … }),
+  headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  body: form({ grant_type: "authorization_code", code: params.code, redirect_uri: cb.split("?")[0], … }),
 });
 ```
 
 1. **换 token 的 `redirect_uri` 取 `cb.split("?")[0]`** —— 它必须与授权请求里那个值逐字相同
    （实测：服务商在换 token 这一步校验它）。
 2. **别整串 `decodeURIComponent`** —— 那会把参数值里的 `%26` 解成 `&`，把参数切开；要按段解。
+3. **换 token 的请求体是表单，不是 JSON。** RFC 6749 §4.1.3 规定 `application/x-www-form-urlencoded`；
+   实测 Bangumi 的令牌端点 JSON 也收（两种编码都到了 `invalid_client`，说明请求体被解析、栽在凭据上），
+   但**规定动作是表单**，没必要赌某个服务商哪天只收一种。表单得自己拼 —— 这份引擎里没有
+   `URLSearchParams`（§四），`encodeURIComponent` 是内建。
 
 ## 二、为什么是回环服务器
 

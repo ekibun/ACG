@@ -20,4 +20,19 @@ class JSFunction(
     withPtrSync {
       ctx.toJava(ctx.jsCallImpl(this, *argv, thisVal = thisVal))
     }
+
+  /**
+   * [invoke] 的挂起版：把调用**投递**到 JS 线程，而不是在调用方线程上阻塞等。
+   *
+   * 从协程侧发起调用时用这一个 —— [invoke] 的 [withPtrSync] 会占住调用方线程一直等到
+   * JS 线程空出来，而协程侧本来就有地方挂起。JNI 回调链（没有协程上下文）仍然只能走
+   * [invoke]。
+   */
+  suspend fun invokeAsync(
+    vararg argv: Any?,
+    thisVal: Any? = null,
+  ): Any? =
+    withPtr {
+      ctx.toJava(ctx.jsCallImpl(this, *argv, thisVal = thisVal))
+    }
 }

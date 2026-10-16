@@ -13,6 +13,7 @@ import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.http.Headers
 import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
 import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.availableForRead
 import io.ktor.utils.io.readAvailable
@@ -295,6 +296,11 @@ object Http {
         }
       }
     }
+    // 请求方法：`init.js` 的 `Request` 已经把它归一成字符串（缺省 "GET"）放进 options。
+    // **不设就等于一律按 GET 发**（`prepareRequest` 的默认方法），而「声明 POST、实际发 GET」
+    // 在客户端这边既不报错、也没有可断言的返回值 —— 要到服务端那一侧才看得出来。
+    (options["method"] as? String)?.let { verb -> method = HttpMethod.parse(verb) }
+
     val body = options["body"]
     if (body != null) {
       if (body is Map<*, *> && body["__js_proto__"] == "FormData") {

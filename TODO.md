@@ -271,6 +271,12 @@
 
 - **现状**：设计定稿于 [docs/design/architecture-design.md](./docs/design/architecture-design.md)  
   （2026-10-02，调研纪要见 [docs/design/architecture-research.md](./docs/design/architecture-research.md)），未落地。
+- **已落地的第一个切片（2026-10）**：Bangumi OAuth 登录 + 收藏页，形态依据见
+  [docs/design/bgm-plugin.md](./docs/design/bgm-plugin.md)。它**不按本文的包名与分层走**：客户端
+  叫 `acg.source.BgmSource`（不是 `acg.catalog.bgm`）、服务商知识在 JS 插件里而不在 Kotlin、
+  领域模型（`acg.model`）一个都没建、持久化是扁平字符串设置表而不是分片。清单里剩下的
+  `epochTimeMs()` / kotlinx-serialization / `model` / 持久化分片 / `HtmlParser` / 限流退避
+  **仍在**。已知缺口逐条列在 bgm-plugin.md §六（token 刷新、收藏写操作、条目详情页、限流退避）。
 - **落地顺序**（architecture-design.md §5）：`epochTimeMs()` 墙钟原语 + kotlinx-serialization 依赖  
   （**改依赖需用户确认**）→ `acg.model` 领域类型 → `acg.catalog.bgm`（DTO + mapper + 限流退避）  
   → 持久化分片 + 收藏/历史仓库 → `HtmlParser` 宿主原语 + JS 数据源契约（含 B23 流式 response）+ Line 绑定 →  

@@ -62,7 +62,27 @@ try {
 
 > **DON'T:** 把它改成 `use { }`。`use` 的契约是「拿这个对象去调一个方法」，而 `init` 是**借用一次就还的工厂函数**，`use` 块里的 `it` 只会绑到 `init` 自己，语义反而更费解；`try/finally` 明确标出那一次借用的生命周期边界。
 
-## 四、参照实现的形态（出处）
+## 四、插件模块（`import()` + `callPlugin`）
+
+插件放在 `shared/src/commonMain/composeResources/files/js/module/<名字>.js`，是**不被 `init.js` 引用**的独立 ES 模块。`init.js` 是**宿主能力的表**（能力由宿主提供），插件是能力的**消费者**；把插件写进 `init.js` 会让「加一个插件」变成改宿主引导脚本。
+
+名字到文件的映射在 [JsEngine](../../shared/src/commonMain/kotlin/soko/ekibun/acg/engine/JsEngine.kt) 的 `moduleHandler` 里：`import("bgm")` 与 `import("bgm.js")` 都读 `files/js/module/bgm.js`（`replaceFirst(".js$".toRegex(), "")` 兜住后缀），字节走 Compose Resources（`Res.readBytes`），所以它被打进 jvm jar 的 `composeResources/acg.shared.generated.resources/files/js/module/` 下，桌面端跑的也是同一份。
+
+宿主调插件的唯一入口是 `JsEngine.callPlugin(module, function, *args)`，它求值的是这么一句：
+
+```js
+(async () => (await import("<module>"))["<function>"])()
+```
+
+> **DO:** 每次现 `import()`，不缓存模块对象。ES 模块的求值结果本来就由引擎的模块表按 specifier 缓存（同一个名字只求值一次），能缓存下来的只有「模块对象在 Kotlin 侧的句柄」，而持有它就要替它管引用计数 —— 换不来任何东西。名字里的引号与换行由 `jsStringLiteral` 转义，别手拼。
+
+> **DO:** 取到的导出**必须** `as JSFunction`（不是 `as JSInvokable`）并在 `finally` 里 `close()`。`jsToJava` 的函数分支 `JS_DupValue` 出一票，票归拿到它的人；漏掉就是每个引擎实例永久漏一票，`reset()` 的泄漏报告从此带一条噪音。这是 §三 那条约束的同一件事，只是对象从 `init` 换成了插件函数。
+
+> **DO:** 插件函数交回的 Promise 要 `await` 掉再回给调用方（`callPlugin` 里那个 `Deferred` 分支）。不 await 的话调用方拿到的是 `Deferred` 本身而不是结果（形状对不上），失败也无人接 —— 拒绝兑现的异常是从 `await()` 那个点抛出来的，类型是 [`JSError`](../../platform/src/commonMain/kotlin/soko/ekibun/quickjs/JSError.kt)（`wrapJSPromiseAsync` 的 reject 分支是 `argv[0] as? Throwable ?: JSError(...)`，而 JS 的 `Error` 过桥就是 `JSError`）。反方向同理：`when` 分支里 Kotlin 抛的异常由 `handleJSInvokable` 转成 JS 异常，插件那边 `catch` 得到。
+
+> **DON'T:** 为「让插件被宿主调得到」在 `init.js` 里开自注册全局（`__acg_register(...)` 之类）。动态 `import()` 在这条 JNI 桥上是通的（本文 §五 记的那条老注记已被实测推翻），自注册是给一个不存在的问题做的绕路：它把加载变成带副作用的动作，还要宿主另找地方存插件对象。
+
+## 五、参照实现的形态（出处）
 
 本工程的 `init.js` 与能力桥形态来自本地只读参照工程 `D:\Work\Self\ACG\.workbuddy\ref\`（未纳入 git 跟踪，别指望 clone 后能读到）：
 
@@ -72,9 +92,10 @@ try {
 | BangumiPlugin | `assets/modules/http.js` | 后台页 JS 契约来源：`webview(url, header, script, onInterceptRequest)` |
 | animeko | `AGENTS.md` | 注释规范来源（见 [coding-style 技能](../../.agents/skills/coding-style/SKILL.md)） |
 
-> **DO:** 只参考参数传递形态，不照抄机制。nezumi 的 `_dart` 依赖 `IsolateQjs`（Dart isolate 桥），而本工程 `init.js` 明确记载 JNI 桥上 `import()` / `require()` 会让进程 `abort()`；nezumi 的 `fetch` 也是整包缓冲（dio `ResponseType.bytes`），流式无参考。出处只留在本文、不进代码注释（未跟踪目录在别人 clone 里不存在）。
+> **DO:** 只参考参数传递形态，不照抄机制。nezumi 的 `_dart` 依赖 `IsolateQjs`（Dart isolate 桥）；nezumi 的 `fetch` 也是整包缓冲（dio `ResponseType.bytes`），流式无参考。出处只留在本文、不进代码注释（未跟踪目录在别人 clone 里不存在）。
 
-## 五、桩测试验错了东西
+> **DON'T:** 相信「JNI 桥上 `import()` 会让进程 `abort()`」这类老注记。`init.js` 里曾有这么一句，**已经实测推翻并删掉**：`import()` 在平台层与引擎层都通（`QuickJSTest.moduleLoading`、`JsEngineDispatchTest` 的模块用例），`JS_FreeRuntime` 的收尾也正常。结论：加插件前先花一次跑探测用例的成本去验，不要靠注记里的二手结论去设计绕路方案（当初为它设计过「`init.js` 里自注册全局」的替代路，属白做）。
+## 六、桩测试验错了东西
 
 桩用 `getOrNull(i)` + 静默默认值（`?: ""` / `?: emptyArray()` / `?: Charsets.UTF_8`）：形状错了不响、只吃到默认值；而真派发是硬下标 + 硬转型，错位当场抛。桩的分支只消费参数、不断言形状——验的是「桩自己喂进去的东西」，正文改了它不知道。删桩也暴露了两条以前被挡着的真分支：①「没传脚本」那支 Kotlin 侧直接发 `ScriptFinished(json = null)` 触发 `init.js` 的 `json == null`/`json === ""` 判定；② 可见视图链路上 WebView2 把 `undefined` 序列化成 `"null"`，后台链路只判 `null`/`""` 不判 `"null"`。
 
@@ -94,3 +115,4 @@ try {
 6. 任何 `as JSInvokable` 用在需要 `close()` 的 `JSFunction` 上都是漏票。
 7. 跨语言的数据形状（`FormData` 的 `__js_proto__` / `__items__` / 每项的 `name` / `value` / `type` / `filename`）**键名要逐字对齐** `Http.kt` 那边。错一个字母的后果是**静默降级**（文件名送不到 multipart 头，HTTP 层面仍合法，不引起任何异常）。`JsEngineDispatchTest.formDataShapeIsReachable` 锁着这条。
 8. **别给「真破坏会自己响」的东西留测试，也别给「换个设计」判红。** 文本规则能换成行为断言就换掉，别让它与行为用例并存成双份。`JsEngineDispatchTest` 现在一条源码文本断言都没有（9 条全走真派发）；「唯一测试面」只对「行为」成立，文本层面没人守——这是有意的。
+9. 加插件：`.js` 放 `files/js/module/`，宿主侧用 `callPlugin` 调；**不要**在 `init.js` 里注册（§四）。插件与宿主之间**共享的键名**（设置键、协议里的字段名）两边各写一份，改一处要改两处 —— 用一条跨界的用例钉住（`PluginHostTest.readsBackTheSessionItStored` 就是这么钉 `bgm.session` 的）。
