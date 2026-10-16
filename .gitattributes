@@ -1,0 +1,7 @@
+# Batch files cannot be parsed reliably with LF-only line endings: cmd.exe needs
+# CRLF for some label / block forms. core.autocrlf=input normalises to LF in the
+# index and leaves LF in the worktree, so this has to be stated explicitly --
+# cxx/exec.cmd is currently LF in the index and only survives because an older
+# checkout left CRLF on disk.
+*.cmd text eol=crlf
+*.bat text eol=crlf

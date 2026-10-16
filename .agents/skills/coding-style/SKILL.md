@@ -1,4 +1,4 @@
-﻿---
+---
 name: coding-style
 description: Use when 新增或修改 shared/ 下的 Kotlin 与 Compose 代码、cxx/ 下自研的 C++，或任何 build.gradle.kts 时。
 ---

@@ -1,4 +1,4 @@
-﻿# webview.cpp 并发、锁与生命周期分析
+# webview.cpp 并发、锁与生命周期分析
 
 >
 本分析锁定 webview.cpp 的并发模型。两个线程：**JNI 线程**（Kotlin dispatcher 固定单线程，所有 `Java_soko_ekibun_web_Webview2Context_*` 入口）

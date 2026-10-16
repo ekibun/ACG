@@ -1,4 +1,4 @@
-﻿package soko.ekibun.quickjs
+package soko.ekibun.quickjs
 
 import kotlinx.coroutines.runBlocking
 import java.util.concurrent.atomic.AtomicInteger

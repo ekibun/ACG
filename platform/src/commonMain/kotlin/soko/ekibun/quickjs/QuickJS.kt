@@ -1,4 +1,4 @@
-﻿package soko.ekibun.quickjs
+package soko.ekibun.quickjs
 
 import androidx.annotation.Keep
 import kotlinx.coroutines.CompletableDeferred
