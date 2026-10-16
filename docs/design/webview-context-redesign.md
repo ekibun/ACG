@@ -4,7 +4,7 @@
 动 webview 契约层之前读本文，避免把已裁定的设计重新打开。具体实现以源码为准
 （`platform/.../web/WebView.kt` 与 `soko.ekibun.web` 下的平台实现、`shared/.../engine/JsEngine.kt`）。
 
-与 `docs/architecture.md` §4「前后台同实例两种可见态」的关系：那条不变，本文只规定
+与 `docs/design/architecture-design.md` §4「前后台同实例两种可见态」的关系：那条不变，本文只规定
 它下面的平台契约层。
 
 ## 契约要点（D1–D10 裁定）

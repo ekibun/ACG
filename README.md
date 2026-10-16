@@ -25,7 +25,8 @@ For prerequisites and manual rebuilds, see [cxx/AGENTS.md](./cxx/AGENTS.md).
 
 ---
 
-Working in this repository? Read [AGENTS.md](./AGENTS.md) first — it is the project's binding contract
-for how to build, test, and what not to touch.
+Working in this repository? Start with [docs/architecture.md](./docs/architecture.md) — the map of how
+the modules, the platform layer and the native libraries fit together — then read [AGENTS.md](./AGENTS.md),
+the project's binding contract for how to build, test, and what not to touch.
 
 Learn more about [Kotlin Multiplatform](https://www.jetbrains.com/help/kotlin-multiplatform-dev/get-started.html)…

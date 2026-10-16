@@ -269,9 +269,9 @@
 
 ### E8. 领域架构落地（数据结构 + WebView 前后台）
 
-- **现状**：设计定稿于 [docs/architecture.md](./docs/architecture.md)  
-  （2026-10-02，调研纪要见 [docs/research-2026-10-02.md](./docs/research-2026-10-02.md)），未落地。
-- **落地顺序**（architecture.md §5）：`epochTimeMs()` 墙钟原语 + kotlinx-serialization 依赖  
+- **现状**：设计定稿于 [docs/design/architecture-design.md](./docs/design/architecture-design.md)  
+  （2026-10-02，调研纪要见 [docs/design/architecture-research.md](./docs/design/architecture-research.md)），未落地。
+- **落地顺序**（architecture-design.md §5）：`epochTimeMs()` 墙钟原语 + kotlinx-serialization 依赖  
   （**改依赖需用户确认**）→ `acg.model` 领域类型 → `acg.catalog.bgm`（DTO + mapper + 限流退避）  
   → 持久化分片 + 收藏/历史仓库 → `HtmlParser` 宿主原语 + JS 数据源契约（含 B23 流式 response）+ Line 绑定 →  
   业务四页 → WebView 接口重设计（设计定稿于 [docs/design/webview-context-redesign.md](docs/design/webview-context-redesign.md)，已实现）→ WebView 投前台（悬浮按钮方案，先 Android 验证、桌面动 C++ 摘 `background` 标志）  
