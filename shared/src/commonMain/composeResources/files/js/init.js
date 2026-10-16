@@ -240,6 +240,19 @@ async (_binding) => {
       return new Response(response);
     },
     webview,
+    /**
+     * 打开系统浏览器做登录：`url` 是授权地址，回调地址的位置用占位符 `{{callback}}` 标出，
+     * 会被换成 `http://127.0.0.1:<端口>/<会话id>`（百分号编码形式，直接放在 redirect_uri 上）。
+     *
+     *   const cb = await openBrowser("https://bgm.tv/oauth/authorize?client_id=…&redirect_uri={{callback}}");
+     *   // cb = "http://127.0.0.1:51987/9f3a4b…?code=4808dfb7…&state=probe123"
+     *
+     * 返回值是浏览器**实际请求的那个完整 URL**（含查询串、原样未解码、不超时）：
+     * 参数要逐段 `decodeURIComponent`（整串解会把值里的 `%26` 变成 `&`、把参数切开），
+     * 换 token 的 `redirect_uri` 回传 `cb.split("?")[0]`。
+     * token 交换本身不在这里做 —— 引擎不含任何服务商知识，`client_secret` 是插件自己的事。
+     */
+    openBrowser: (url) => _binding("openBrowser", ["" + (url || "")]),
     encodeURI: (uri, encoding) => {
       const encoder = new _TextEncoder(encoding || "utf-8");
       return `${uri}`.replace(/[^a-zA-Z0-9-_.!~*'();/?:@&=+$,#]/g, (c) => encodeURI_hex(encoder, c));

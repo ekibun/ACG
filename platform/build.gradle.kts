@@ -74,6 +74,8 @@ kotlin {
       // SurfaceContext.android 的 createBitmap（androidx.core.graphics 扩展）——
       // 在 :shared 时经传递依赖可见，:platform 的依赖图没有它，须显式声明。
       implementation(libs.androidx.core.ktx)
+      // 外部浏览器登录的 Custom Tabs（soko.ekibun.browser 的 Android 实现）。
+      implementation(libs.androidx.browser)
     }
     jvmTest.dependencies {
       implementation(libs.kotlin.test)

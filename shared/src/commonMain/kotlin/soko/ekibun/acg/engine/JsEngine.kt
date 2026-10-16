@@ -7,6 +7,7 @@ import io.ktor.util.toMap
 import io.ktor.utils.io.charsets.Charsets
 import io.ktor.utils.io.charsets.encodeToByteArray
 import io.ktor.utils.io.charsets.forName
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -19,6 +20,8 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.io.bytestring.ByteString
 import kotlinx.io.bytestring.decodeToString
 import soko.ekibun.acg.common.Http
+import soko.ekibun.browser.createCallbackSession
+import soko.ekibun.browser.launchExternalBrowser
 import soko.ekibun.quickjs.JSError
 import soko.ekibun.quickjs.JSFunction
 import soko.ekibun.quickjs.JSInvokable
@@ -28,6 +31,14 @@ import soko.ekibun.web.WebViewEvent
 import soko.ekibun.web.createWebviewContext
 import soko.ekibun.web.getWebviewCookieManager
 import kotlin.time.Duration.Companion.seconds
+
+/** 授权链接里标出回调地址位置的占位符，见 [JsEngine.openBrowserAsync]。 */
+private const val CALLBACK_PLACEHOLDER = "{{callback}}"
+
+/** 百分号编码时不转义的字符（`encodeURIComponent` 的保留集）。 */
+private const val UNRESERVED_CHARS = "-_.!~*'()"
+
+private const val HEX_DIGITS = "0123456789ABCDEF"
 
 class JsEngine {
   companion object {
@@ -143,6 +154,12 @@ class JsEngine {
                           }
                         },
                       )
+                    }
+
+                  // openBrowser 只有一个实参：带 `{{callback}}` 占位符的授权链接。
+                  "openBrowser" ->
+                    CoroutineScope(Dispatchers.IO).async {
+                      openBrowserAsync(args[0] as String)
                     }
 
                   else -> throw JSError("unknown method '${argv[0]}'")
@@ -329,4 +346,69 @@ class JsEngine {
       runCatching { ctx.close() }
     }
   }
+
+  /**
+   * 外部浏览器登录桥 —— 插件 JS 里的 `openBrowser(templateUrl)`。
+   *
+   * [templateUrl] 是授权地址，回调地址的位置由占位符 `{{callback}}` 标出：这里把它换成
+   * **百分号编码**后的会话地址 —— 授权链接把它放在查询串里，`: / ? #` 之类必须编码。
+   *
+   * 返回**浏览器实际请求的那个完整 URL**（含查询串，原样未解码）：
+   * `http://127.0.0.1:51987/9f3a4b…?code=4808dfb7…&state=probe123`。
+   * 用法归插件：换 token 的 `redirect_uri` 取 `split("?")[0]`（就是换进去的那个值），
+   * 参数逐段 `decodeURIComponent` —— **别整串解**，值里的 `%26` 会被解成 `&`、把参数切开。
+   *
+   * **不做 token 交换**：那要 `client_id` / `client_secret`，是插件自己的知识，
+   * 引擎里一条服务商相关的东西都不能有。
+   *
+   * 一直等，不超时 —— 用户可能把浏览器挂在后台很久再回来点登录。模板里没有占位符、
+   * 或浏览器起不来时抛 [JSError]，让 JS 侧 Promise reject，而不是回一个让脚本误判的空值。
+   *
+   * [launch] 是「开浏览器」的可注入缝：测试直接驱动本函数、不真去开。
+   */
+  internal suspend fun openBrowserAsync(
+    templateUrl: String,
+    launch: suspend (String) -> Unit = ::launchExternalBrowser,
+  ): String {
+    if (!templateUrl.contains(CALLBACK_PLACEHOLDER)) {
+      throw JSError("openBrowser template has no $CALLBACK_PLACEHOLDER placeholder: $templateUrl")
+    }
+    val session = createCallbackSession()
+    try {
+      val authorizeUrl =
+        templateUrl.replace(CALLBACK_PLACEHOLDER, percentEncodeComponent(session.callbackUrl))
+      try {
+        launch(authorizeUrl)
+      } catch (e: CancellationException) {
+        throw e
+      } catch (t: Throwable) {
+        throw JSError("Launch external browser failed: ${t.message ?: t}")
+      }
+      return session.awaitCallback()
+    } finally {
+      session.close()
+    }
+  }
+
+  /**
+   * 按 `encodeURIComponent` 的保留集做百分号编码（非 ASCII 取 UTF-8 字节）。
+   *
+   * 会话地址本身是纯 ASCII（回环 host + 十六进制 id），走字节而不是字符是为了让
+   * 换进去的值在任何位置都合法 —— 按字节判 ASCII，非 ASCII 一律进 `%XX`。
+   */
+  private fun percentEncodeComponent(value: String): String =
+    buildString {
+      value.encodeToByteArray().forEach { raw ->
+        val code = raw.toInt() and 0xFF
+        val char = code.toChar()
+        val keep =
+          code < 0x80 &&
+            (char in 'A'..'Z' || char in 'a'..'z' || char in '0'..'9' || UNRESERVED_CHARS.contains(char))
+        if (keep) {
+          append(char)
+        } else {
+          append('%').append(HEX_DIGITS[code shr 4]).append(HEX_DIGITS[code and 0xF])
+        }
+      }
+    }
 }

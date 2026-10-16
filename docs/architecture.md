@@ -97,6 +97,10 @@ Gradle 四个模块，外加一个不进 Gradle 工程的原生层目录：
 两族共用同一副基座（`Pointer` / `ThreadDispatcher`），业务侧的 `JsEngine` 与 `VideoSurface` 调用点
 只负责把它们接起来。
 
+另有 `soko.ekibun.browser` 一族**平台原语**（不进任何继承树、没有 native 面）：外部浏览器登录的
+回调会话与「用系统默认浏览器打开」。它只被脚本插件链的 `openBrowser` 能力用到，形态依据见
+[design/browser-login.md](./design/browser-login.md)。
+
 ### 基座：`Pointer` 与 `ThreadDispatcher`
 
 两族共用，本身不属于任何一族 —— 全部 native 资源的生命周期都从这两个类过。
@@ -125,6 +129,8 @@ Gradle 四个模块，外加一个不进 Gradle 工程的原生层目录：
 | `expect loadLibrary(name)` | 按序找 dll（策略正本在同名 `.jvm.kt`） | `System.loadLibrary` |
 | `expect monoTimeMs()` / `openFileHandle(…)` | `jvmShared`：`System.nanoTime()` / `RandomAccessFile` | 同左（`jvmShared`） |
 | `expect createHttpClientImpl(block)` | JDK ktor 引擎 | OkHttp |
+| `expect createCallbackSession()`（`soko.ekibun.browser`） | `jvmShared` 的回环服务器 —— **两端共用一份** | 同左（`jvmShared`） |
+| `expect launchExternalBrowser(url)` | `java.awt.Desktop` | Chrome Custom Tabs |
 | `interface FileHandle` | `jvmShared` 的 `RandomAccessFileHandle` | 同左（`jvmShared`） |
 
 ### QuickJS 族（`soko.ekibun.quickjs` + `soko.ekibun.web`）
@@ -290,7 +296,8 @@ flowchart LR
 
 数据源插件的执行环境。`init.js` 从 Compose 资源里读出来（`files/js/init.js`，按需模块在
 `files/js/module/`），在 QuickJS 里求值一次，往 JS 全局注入 `fetch` / `Response` / `Request` /
-`FormData` / `TextEncoder` / `TextDecoder` / `Cookies` / `console` / `webview` / `encodeURI…`；
+`FormData` / `TextEncoder` / `TextDecoder` / `Cookies` / `console` / `webview` / `openBrowser` /
+`encodeURI…`；
 **执行期间注入的那一份 `_binding` 就是全部能力**，Kotlin 侧用一个 `when` 直接派发到各能力
 （不按名字反射查找 —— 判据见 [design/quickjs-ability-bridge.md](./design/quickjs-ability-bridge.md)）。
 
@@ -325,6 +332,11 @@ sequenceDiagram
 怎么用；两端的可见页与后台页共用同一份 cookie 存储（桌面共用一个 user data folder，Android 共用
 系统 `CookieManager`）。契约层的裁定见
 [design/webview-context-redesign.md](./design/webview-context-redesign.md)。
+
+**登录走的是外部浏览器，不是上面这个 WebView**（`openBrowser`）：插件给一个带 `{{callback}}`
+占位符的授权地址，引擎在进程内建的回环服务器上开一个会话、把会话地址换进去，再用系统浏览器打开
+（Android = Custom Tabs，桌面 = `Desktop.browse`）；浏览器打中会话地址时，把**它实际请求的那串完整
+URL** 交回插件，token 交换归插件自己。契约与取舍见 [design/browser-login.md](./design/browser-login.md)。
 
 ### 播放链（`FFPlayer`）
 

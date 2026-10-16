@@ -15,7 +15,7 @@
 | D2 | 后台驱动落点 | 并入 `shared/.../engine/JsEngine.kt`（同文件 top-level），驱动只被 JsEngine 消费 |
 | D3 | `WebViewConfig.allowNewWindow` / `zoom` | 删（无调用方改过值；`WebScreen` 显式设的 `false` 就是默认值） |
 | D4 | 接口 `navigate` 带不带 `method` | 不带（Android 侧只有 GET；POST 走 `postUrl(url, bytes)`，没有 headers + method 组合；桌面调用方全传 `"GET"`） |
-| D5 | Android `Context` 来源 | `lateinit var webviewApplicationContext` + 宿主（`MainActivity.onCreate`）注入一次；漏注入是宿主编程错误，`lateinit` 当场炸，平台层不兜底 |
+| D5 | Android `Context` 来源 | `lateinit var hostApplicationContext`（`platform` androidMain 根，进程级共用）+ 宿主（`MainActivity.onCreate`）注入一次；漏注入是宿主编程错误，`lateinit` 当场炸，平台层不兜底 |
 | D6 | `evaluate` 默认实现 | 不留（两端都真实现，不为不存在的平台写兜底） |
 | D7 | 测试迁移 | 任务级用例随驱动进 `shared/jvmTest`；直构平台类的留 `platform/jvmTest`（`internal` 跨模块不可见） |
 | D8 | 接口函数形态 | 接口上的函数全部 `suspend`（`setUserAgent` / `setDevtoolsEnabled` / `navigate` / `evaluate` / `reload` / `stop` / `goBack` / `goForward` / `openDevTools` / `dispose`），无例外——每条命令落到归属线程并返回，`submit` 那种 fire-and-forget 报不出「已落实」 |

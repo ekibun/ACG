@@ -6,16 +6,16 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
-import soko.ekibun.web.setWebviewApplicationContext
+import soko.ekibun.setHostApplicationContext
 
 class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
 
-    // WebView 的平台层要一个进程级 Context（后台任务跑在 JsEngine 里、没有组合上下文），
-    // 必须在任何 WebView 建起来之前注入 —— 漏了就是第一次建 WebView 时 lateinit 炸。
-    setWebviewApplicationContext(this)
+    // 平台层（WebView、外部浏览器）要的进程级 Context 在这里注入一次 —— 它们的调用点跑在
+    // JsEngine 的协程里、没有组合上下文，漏了就是第一次用的时候 lateinit 炸。
+    setHostApplicationContext(this)
 
     setContent {
       App()

@@ -337,6 +337,36 @@ class JsEngineDispatchTest {
   }
 
   /**
+   * `openBrowser`：`args[0]` 是带 `{{callback}}` 占位符的授权链接，就这一个实参。
+   *
+   * **只走模板校验那一支**：真跑到底会去开系统浏览器（桌面是 `Desktop.browse`，
+   * Android 是 Custom Tabs），那是测试不能碰的动作 —— 所以这里给的模板故意没有占位符，
+   * `launch` 根本到不了。
+   *
+   * 断言带上错误文案是为了**顺带锁住 `args[0]` 真的按位送到了**：只断言「拒绝了」的话，
+   * `args[0]` 取错（越界 / 类型不符）同样会拒绝，那条错路也能过。文案是本工程自己给的，
+   * 不是平台给的 —— 平台给的才不许锁（见 [failedWebviewRejects]）。
+   *
+   * 编排（换成什么、回什么形状）由 [BrowserLoginTest] 驱动 `openBrowserAsync` 验，
+   * 那边能注入 `launch`，这里不能。
+   */
+  @Test
+  fun openBrowserWithoutPlaceholderRejects() {
+    val out =
+      evalAsync(
+        """
+        try { await openBrowser('https://example.com/auth?x=1'); return "no throw"; }
+        catch (e) { return "caught:" + e.message; }
+        """.trimIndent(),
+      )
+    assertEquals(
+      "caught:openBrowser template has no {{callback}} placeholder: https://example.com/auth?x=1",
+      out,
+      "没有占位符的模板必须 reject，且 args[0] 要原样到达 Kotlin 侧",
+    )
+  }
+
+  /**
    * `FormData` 的形状 —— 它一次都不调 `_binding`，是纯 JS 类，但**跨语言**：
    * `__js_proto__` / `__items__` / 每项的 `name` / `value` / `type` / `filename`
    * 是 `soko.ekibun.common.Http` 构造 multipart 时读的**唯一**入口。

@@ -9,6 +9,7 @@
 | 桌面端 WebView 现象：白屏、GPU/浏览器进程崩溃、焦点与键盘、JAWT 嵌入、Cookie 生命周期 | [`webview2-windows.md`](./webview2-windows.md) |
 | HTTP 流的读取与会话生命周期（seek 作废、白读推进、通道存量） | [`playback-invariants.md`](./playback-invariants.md) 第五节 |
 | 不变量与"不要做 X"的清单（动手前核对当前代码） | [`cxx/AGENTS.md`](../../cxx/AGENTS.md) 的 JNI / webview / quickjs 各节，以及下面的正本表 |
+| 插件登录收不到回调（`openBrowser` 一直不返回）、回调地址回 404、换 token 报 `redirect_uri` 不一致 | [`browser-login.md`](../design/browser-login.md) 第一、三节 |
 
 几条 Read 顺序建议：
 
@@ -31,3 +32,4 @@
 | 构建 / 测试 / 验收闸门、dll 三处同步 | [build-and-test 技能](../../.agents/skills/build-and-test/SKILL.md) |
 | WebView 接口的设计规格与已裁定项（改契约层前先看，别把已定的重新打开） | [`webview-context-redesign.md`](../design/webview-context-redesign.md) |
 | 能力桥（`_binding`）形态与为什么不用反射 | [`quickjs-ability-bridge.md`](../design/quickjs-ability-bridge.md) |
+| 外部浏览器登录（`openBrowser` / 回环回调会话）的契约与取舍 | [`browser-login.md`](../design/browser-login.md) |

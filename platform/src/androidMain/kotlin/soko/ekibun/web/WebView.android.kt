@@ -1,7 +1,6 @@
 package soko.ekibun.web
 
 import android.annotation.SuppressLint
-import android.content.Context
 import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
@@ -20,6 +19,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import soko.ekibun.hostApplicationContext
 
 // Android 端的 WebView 平台层：上下文工厂（可见 + 后台共用一个类，按模式分配置）+
 // 原生视图挂载面。直接包 `android.webkit.WebView`，不做无头化 —— 它就是真身。
@@ -28,7 +28,7 @@ import kotlinx.coroutines.withContext
 // 可见页和后台 WebView 走的是同一份存储，不像桌面端那样必须刻意共用一个
 // user data folder。
 //
-// 建 `android.webkit.WebView` 要的 Context 由宿主注入一次，见 [webviewApplicationContext]。
+// 建 `android.webkit.WebView` 要的 Context 由宿主注入一次，见 [hostApplicationContext]。
 //
 // 与桌面端的行为差别（都是平台本性，不是实现取舍）：
 //
@@ -44,32 +44,13 @@ import kotlinx.coroutines.withContext
 //
 // 状态折算在 commonMain；这里只发 [WebViewEvent]。
 
-/**
- * 建 `android.webkit.WebView` 要的 Context。
- *
- * `createWebviewContext` 是命令式的，调用点在 JsEngine 里的后台任务上；可见页由 common 的壳建
- * —— 两边都没有 Compose 上下文，拿不到 `LocalContext`。所以备一个**进程级**的槽，由宿主
- * （androidApp 的 `MainActivity.onCreate`）在 `setContent` **之前**调
- * [setWebviewApplicationContext] 注入一次。
- *
- * 只留 `applicationContext`（不是 Activity）：整个进程活着它就在，不存在泄漏。
- * 漏注入是宿主编程错误 —— `lateinit` 会在第一次建 WebView 时自己炸，平台层不做兜底。
- */
-lateinit var webviewApplicationContext: Context
-  private set
-
-/** 注入 [webviewApplicationContext]；只收 `applicationContext`。 */
-fun setWebviewApplicationContext(context: Context) {
-  webviewApplicationContext = context.applicationContext
-}
-
 /** Android 端的 [createWebviewContext] 实现：可见与后台（headless）共用一个类。 */
 actual suspend fun createWebviewContext(isHeadless: Boolean): WebviewContext {
   // WebView 只能在主线程建/用；这里全程停在主线程上，而不是像 http.js 那样用
   // Thread.sleep 轮询（那会锁死主循环）。
   return withContext(Dispatchers.Main) {
     try {
-      AndroidWebviewContext(WebView(webviewApplicationContext), isHeadless)
+      AndroidWebviewContext(WebView(hostApplicationContext), isHeadless)
     } catch (e: Throwable) {
       throw IllegalStateException("WebView 创建失败：$e", e)
     }
