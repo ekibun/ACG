@@ -129,10 +129,12 @@ class WebViewHostTest {
           )
         }
 
+      // 回调可能还在别的线程上追加，读之前必须整份拷出来，否则边迭代边改。
+      val seenSnapshot = synchronized(seen) { seen.toList() }
       val hit =
         assertIs<Map<*, *>>(
           result,
-          "子资源 /sub.js 没被拦下来（结果是 $result）。看到的请求：${seen.map { it.url }}",
+          "子资源 /sub.js 没被拦下来（结果是 $result）。看到的请求：${seenSnapshot.map { it.url }}",
         )
       val hitUrl = assertIs<String>(hit["url"], "命中结果应带回被拦请求的 url")
       assertTrue(
@@ -140,11 +142,11 @@ class WebViewHostTest {
         "命中的应该是子资源：$hitUrl",
       )
 
-      val main = seen.firstOrNull { it.url.endsWith("/page.html") }
-      assertTrue(main != null, "main-frame navigation should be visible; seen: ${seen.map { it.url }}")
+      val main = seenSnapshot.firstOrNull { it.url.endsWith("/page.html") }
+      assertTrue(main != null, "main-frame navigation should be visible; seen: ${seenSnapshot.map { it.url }}")
       assertTrue(main.isForMainFrame, "main-frame navigation must have isForMainFrame == true")
 
-      val sub = seen.first { it.url.endsWith("/sub.js") }
+      val sub = seenSnapshot.first { it.url.endsWith("/sub.js") }
       assertEquals("GET", sub.method, "method must be the real HTTP method")
       assertTrue(!sub.isForMainFrame, "<script src> is not a main frame")
       assertTrue(
@@ -210,13 +212,18 @@ class WebViewHostTest {
         }
 
       // 回调被反复调用过（不是只调一次就完事），且主框架与子资源都到过。
-      val urls = seen.map { it.url }
+      // 回调可能还在别的线程上追加，读之前必须整份拷出来，否则边迭代边改。
+      val seenSnapshot = synchronized(seen) { seen.toList() }
+      val urls = seenSnapshot.map { it.url }
       assertTrue(
-        seen.any { it.url.endsWith("/page.html") && it.isForMainFrame },
+        seenSnapshot.any { it.url.endsWith("/page.html") && it.isForMainFrame },
         "主框架请求应该在回调里：$urls",
       )
-      assertTrue(seen.any { it.url.endsWith("/sub.js") && !it.isForMainFrame }, "<script> 应该到过：$urls")
-      assertTrue(seen.size >= 2, "回调应该在每个请求上都被调用一次，实际只调了 ${seen.size} 次：$urls")
+      assertTrue(
+        seenSnapshot.any { it.url.endsWith("/sub.js") && !it.isForMainFrame },
+        "<script> 应该到过：$urls",
+      )
+      assertTrue(seenSnapshot.size >= 2, "回调应该在每个请求上都被调用一次，实际只调了 ${seenSnapshot.size} 次：$urls")
 
       // 全程放行 ⇒ 没有任何一次命中 ⇒ 整轮必须以「脚本跑完」收场。
       val json =
