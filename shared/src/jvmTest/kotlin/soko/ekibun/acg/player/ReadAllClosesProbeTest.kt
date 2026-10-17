@@ -3,7 +3,7 @@ package soko.ekibun.acg.player
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
-import soko.ekibun.acg.common.Http
+import soko.ekibun.common.Http
 import java.net.InetSocketAddress
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
@@ -21,9 +21,7 @@ import kotlin.test.assertTrue
  * 2. **异常路径也关** —— 服务端在读完之前掐断连接时 `toByteArray()` 抛异常，
  *    这时连接与响应同样必须放掉（靠 `use`；写成「读完再手动 close」会漏掉这一条）。
  *
- * 第 2 条另有一个可观测的副作用：`close()` 放掉会话的 `block` 之后 ktor 会 cleanup，
- * 而 `block` 返回与否决定了连接池里那条连接**是否被放回**。
- * 所以「异常路径上有没有漏」可以只看 `isClosed`，不必去数连接。
+ * 「异常路径上有没有漏」只看 `isClosed` 就够：连接怎么回收是传输层的事，不是本层的契约。
  */
 class ReadAllClosesProbeTest {
   /** 掐断式服务端：先给若干字节，然后在 [cutAfter] 字节处直接断链。 */

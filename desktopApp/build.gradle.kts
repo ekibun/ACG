@@ -143,7 +143,7 @@ tasks.withType<JavaExec>().configureEach {
   jvmArgs("--enable-native-access=ALL-UNNAMED")
   // 打开**本包**的 JVM 断言：`Pointer.ptr` 的同线程断言、`initPtr` 的归属线程断言都在
   // -ea 下才生效。测试任务默认就开着；这里给 run / hotRun 补上。按包收窄（尾部的
-  // `...` 含子包）而不是裸 `-ea`，免得把 ktor / compose 等第三方库的断言一起激活。
+  // `...` 含子包）而不是裸 `-ea`，免得把 compose 等第三方库的断言一起激活。
   // 生产打包的启动器不带 JVM 参数，断言关闭 —— 每次读只剩一次静态标志判断。
   jvmArgs("-ea:soko.ekibun...")
 }

@@ -36,7 +36,7 @@ ACG 只依赖**库与运行时**，目前不依赖任何自建服务端。数据
 | FFmpeg | git submodule（`cxx/ffmpeg/ffmpeg/`） | 只编不改。开 `--disable-network` / `--disable-protocols`，I/O 全部由 Kotlin 侧的 `AvIO` 接管 |
 | QuickJS | git submodule（`cxx/quickjs/quickjs/`） | 只编不改。上游为 `ekibun/quickjs` 分支 |
 | Compose Multiplatform | Gradle 依赖 | 唯一的 UI 框架，两端共用 |
-| ktor + JDK / OkHttp 引擎 | Gradle 依赖 | 唯一的 HTTP 栈。桌面走 JDK 引擎，Android 走 OkHttp |
+| OkHttp | Gradle 依赖 | 唯一的 HTTP 栈。桌面与 Android 共用 `jvmShared` 那一份实现；okhttp 只有 jvm / androidJvm 两个真实 target，所以没有 common 层的虚拟实现可用 |
 | JetBrains Skia（经 Compose） | Gradle 依赖 | 桌面端视频帧的绘画面 |
 | androidx.datastore（preferences-core）+ okio | Gradle 依赖 | 设置的落盘（`:platform` 内部）。okio 版本跟 datastore-core-okio 声明的一致，不另外抬版本 |
 | Bangumi v0 API | 已接入（第一个插件） | 见 [design/bgm-plugin.md](./design/bgm-plugin.md) |
@@ -128,15 +128,15 @@ okio `Path`，那个 `Path` 只出现在 `:platform` 内部的建表函数与懒
   **谁都不该关**；只有 `avcodec` 是每个解码器实例独占一条，随实例归还一起关掉
   （`closeDispatcherOnClose`）。
 
-基座（`soko.ekibun` 根包 + `soko.ekibun.common`）的契约与实现 —— 只有 `loadLibrary` 与
-`createHttpClientImpl` 两端各写一份，其余都收在 `jvmShared`：
+基座（`soko.ekibun` 根包 + `soko.ekibun.common`）的契约与实现 —— 只有 `loadLibrary` 两端各写一份，
+其余都收在 `jvmShared`：
 
 | 契约（`commonMain`） | 桌面（`jvmMain`） | Android（`androidMain`） |
 | --- | --- | --- |
 | `expect createThreadDispatcher(name)` | `jvmShared` 的 `ThreadDispatcherImpl` —— **两端共用一份** | 同左（`jvmShared`） |
 | `expect loadLibrary(name)` | 按序找 dll（策略正本在同名 `.jvm.kt`） | `System.loadLibrary` |
 | `expect monoTimeMs()` / `openFileHandle(…)` | `jvmShared`：`System.nanoTime()` / `RandomAccessFile` | 同左（`jvmShared`） |
-| `expect createHttpClientImpl(block)` | JDK ktor 引擎 | OkHttp |
+| `expect openResponse(options)`（`soko.ekibun.common`） | `jvmShared` 的 OkHttp 实现 —— **两端共用一份** | 同左（`jvmShared`） |
 | `expect createCallbackSession()`（`soko.ekibun.browser`） | `jvmShared` 的回环服务器 —— **两端共用一份** | 同左（`jvmShared`） |
 | `expect launchExternalBrowser(url)` | `java.awt.Desktop` | Chrome Custom Tabs |
 | `expect settingsFilePath()`（`soko.ekibun.common`） | `acg.dataDir` 系统属性，缺省 `~/.acg` | 进程 Context 的 `filesDir` |
@@ -254,7 +254,8 @@ classDiagram
 
 ### 业务层（`:shared`）—— 两族的调用方
 
-`shared/src/commonMain/kotlin/soko/ekibun/acg/` 下五个包，都不进任何继承树，只把上面两族接起来：
+`shared/src/commonMain/kotlin/soko/ekibun/acg/` 下四个包，都不进任何继承树，只把上面两族接起来
+（`Http` 已整体下沉到 `:platform`，本层只经 `soko.ekibun.common.Http` 调用）：
 
 - **`ui`** —— Compose 界面。`App.kt` 是两端共用入口，一个 `PrimaryTabRow` 挂四个页签：
   `PlayScreen`（播放）、`WebScreen`（浏览器）、`CollectionScreen`（收藏）、`CodeScreen`
@@ -269,11 +270,6 @@ classDiagram
   `webviewAsync` 也住在这个文件里。细节见下文「脚本插件链」。
 - **`player`** —— `AvIO` 的两个 Kotlin 实现：`HttpIO`（range 会话 + 白读推进 + 闲置超时）与
   `FileIO`（本地文件）。它们被 native 的 avio 回调**同步调用**，是播放链唯一与网络/磁盘相接的地方。
-  `HttpIO` 之外还挂一层**进程级**的块缓存 `HttpCache`（16 MiB、按 URL + 块号键、只当加速使，
-  命中不了就退回网络那条路）。
-- **`common`** —— `Http`：ktor 的流式会话收口。**不缓冲** body，返回一条活着的 `Response`，
-  两条读法（播放器用的 `read`、JS 用的 `readAll`）共用一个 `close`。闲置超时
-  `SOCKET_TIMEOUT_MS = 8000` 只在这里实现一次，两端行为才一致。
 
 ### 原生层（`cxx/`）
 
@@ -365,7 +361,7 @@ URL** 交回插件，token 交换归插件自己。契约与取舍见 [design/br
 flowchart TD
     FP["FFPlayer<br/>ffplayer 线程 · 主时钟 PTS · 轮次闸"] -->|getPacket| AF["AvFormat<br/>avformat 线程 · packetChannel 预读"]
     AF -->|av_read_frame| IO["AvIO<br/>HttpIO / FileIO"]
-    IO -->|ktor 流式会话 / RandomAccessFile| EXT[(网络 / 磁盘)]
+    IO -->|OkHttp 流式会话 / RandomAccessFile| EXT[(网络 / 磁盘)]
     AF -->|AvPacket| FP
     FP -->|sendPacketAndGetFrames| CODEC["AvCodec<br/>每实例一条 avcodec 线程"]
     CODEC -->|AvFrame| FP
@@ -384,10 +380,7 @@ flowchart TD
 - **送显与丢帧的先后**：同一轮内相邻两帧必须**先等上一帧送显完**，否则上一帧会显示成本帧的像素。
 - **暂停不停取包**：轮次判据不含 `pts.playing`，暂停期间照常解码入队 —— 这就是预读缓存。
 - **`HttpIO.read` 里存在唯一的 `runBlocking`**（native 回调要同步签名）；数据没到时在 IO 层阻塞
-  等，「作废」由 `Handler.abort()` 叫醒，会话不掀。
-- **`HttpCache` 只当加速**：命中不了只是多一次请求，任何情况下都不许改变读出来的字节。
-  拼块规则（只往块首前缀上接、凑不满整块就整块跳过）与判据见
-  `docs/development/playback-invariants.md` 第 5.7 节。
+  等，「作废」由 `Handler.abort()` 叫醒 —— 叫醒的手段是掀掉那条连接，那条会话跟着作废、下一条读重发。
 
 ## 跨层的三条约定
 

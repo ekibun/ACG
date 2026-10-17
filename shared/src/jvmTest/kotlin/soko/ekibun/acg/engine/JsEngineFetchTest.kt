@@ -13,10 +13,10 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 
 /**
- * JS 的 `fetch` 落到 ktor 上的形状。
+ * JS 的 `fetch` 落到网络上的形状。
  *
  * 打的是**真的**本地 HTTP 服务端（`com.sun.net.httpserver`）：请求方法、`Content-Type`、
- * body 这三样只有服务端那一侧看得见 —— 全在客户端内断言的话，"方法没落到 ktor 上、
+ * body 这三样只有服务端那一侧看得见 —— 全在客户端内断言的话，"方法丢了、
  * 一律按 GET 发出去"这种失效正好落在断言之外，测不出来。
  */
 class JsEngineFetchTest {
@@ -67,7 +67,7 @@ class JsEngineFetchTest {
     assertEquals(200L, status)
 
     val seen = assertNotNull(recorded.get(), "服务端没收到请求")
-    assertEquals("POST", seen.method, "fetch 的 method 必须落到 ktor 的请求方法上")
+    assertEquals("POST", seen.method, "fetch 的 method 必须落到发出请求的方法上")
     assertEquals(
       "application/x-www-form-urlencoded",
       seen.contentType?.substringBefore(';'),

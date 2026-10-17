@@ -50,7 +50,7 @@
   network 一关那几支根本进不了编译）。
 - **这不是缺陷，是设计**：ffmpeg 的 URL 访问被换成 `io_open` 回调 + `AvIO` 抽象  
   （`cxx/ffmpeg/ffmpeg.cpp` 的 `AVFMT_FLAG_CUSTOM_IO`），实际 I/O 全由 Kotlin 侧  
-  `FileIO` / `HttpIO` 实现（ktor/OkHttp）。所&#x4EE5;**「ffmpeg 没有网络协议」是对的**。
+  `FileIO` / `HttpIO` 实现（`HttpIO` 的传输层是 OkHttp，在 `:platform` 的 `jvmShared`）。 所以**「ffmpeg 没有网络协议」是对的**。
 - ⚠️ **别被日志误导**：真实源起播时 stderr 会打  
   `https or dtls protocol not found, recompile FFmpeg with openssl, gnutls or securetransport enabled.`  
   与 `Protocol name not provided, cannot determine if input is local or a network protocol…`。  

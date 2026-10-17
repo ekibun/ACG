@@ -23,8 +23,8 @@ import kotlin.test.assertTrue
  * 叫醒它（机制见 `playback-invariants.md` 第五节「私有作废信号」）。
  *
  * 这条用例压两个行为：① **叫醒要快** —— 信号一投，读当场以「读满 `buf.size`」收场；② **恢复要
- * 走重连** —— abort 不掀会话，下一次读面对的还是这条停住的会话，闲置超时（[SOCKET_TIMEOUT_MS]）后自己
- * 拆掉重发。
+ * 走重发** —— 叫醒的手段是掀掉那条连接，所以那条会话当场作废（[Http.Response.isClosed]），
+ * 下一次读重新发一条、在落点上接着读。
  *
  * **测试自己不许被吊死**：这里测的就是「永久阻塞」，两层兜底都得有 —— 可能永久阻塞的读都走
  * [readBounded]（本文件私有：守护线程 + join 超时），用例再带 `@Test(timeout = …)`。
@@ -145,11 +145,10 @@ class HttpAbortTest {
           "被作废的读应当报「读满 buf.size」的正数：让 demuxer 当场收手、不再重读（见 HttpIO.read）",
         )
 
-        // 作废信号只活在那一次 read 里 —— 这次读面对的是同一条**停住的**会话，它会等
-        // `select onTimeout`（[SOCKET_TIMEOUT_MS] = 8 s）到点、自己换一条。
-        // 超时给 30 s（不是默认 10 s）：8 s 超时 + 重连 + 收 4 KB 得留足余量。
+        // 作废信号只活在那一次 read 里，而它掀掉的那条会话已经在 `HttpIO.read` 里丢掉了 ——
+        // 这次读直接重发一条，不必等闲置超时（8 s）到点。
         val after = readBounded(io, 4096, timeoutMs = 30_000)
-        assertTrue(after > 0, "作废之后的下一次读应当自行重连并读到数据，实际 $after")
+        assertTrue(after > 0, "作废之后的下一次读应当自行重发并读到数据，实际 $after")
       } finally {
         io.close()
       }

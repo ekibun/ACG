@@ -12,7 +12,7 @@
 | 应答 → 强类型 | `BgmSource`（`shared/.../acg/source/`） | JS 侧拼串**没有编译期检查**，形状变化只会在运行期暴露；收口成 data class 后界面拿不到裸 `Map` |
 | 界面状态与翻页 | `CollectionState` | 跨次点击的东西（登录态、当前筛选、翻到第几页），与 Compose 的重新组合无关 |
 
-`BgmSource` 里**没有任何 ktor 调用**：它只经 `JsEngine.callPlugin("bgm", …)` 走插件，网络出口
+`BgmSource` 里**没有任何 HTTP 调用**：它只经 `JsEngine.callPlugin("bgm", …)` 走插件，网络出口
 全在插件的 `fetch` 上。这样「换服务商」与「换 HTTP 栈」互不牵连。
 
 > **DO:** 折字段时把「缺字段 / 类型不符」一律当**没有**（`BgmSource` 里的 `asStringOrNull` /

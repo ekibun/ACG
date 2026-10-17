@@ -2,7 +2,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 // 平台层（:platform）：native 绑定（soko.ekibun.{jni,quickjs,ffmpeg,web} 的 JNI 面）+
 // 跨端通用结构与平台原语（webview 契约与两端实现、播放器的 SurfaceContext / VideoSurface、
-// File/Http IO 原语与 ktor 引擎）。包名是 JNI 符号的一部分，搬动文件不改包名。业务与界面在 :shared。
+// File/Http IO 原语与 OkHttp 传输层）。包名是 JNI 符号的一部分，搬动文件不改包名。业务与界面在 :shared。
 plugins {
   alias(libs.plugins.kotlinMultiplatform)
   alias(libs.plugins.androidMultiplatformLibrary)
@@ -39,8 +39,8 @@ kotlin {
     // 留在 commonMain 已合规。搬声明会改 61 个 JNI 导出符号（类名进符号），换不来任何东西。
     //
     // 判据是「两端逐字相同、且不含平台专有符号」。留在原处的是**真有差异**的那些：
-    // loadLibrary（桌面按序找 dll / Android 直接 loadLibrary）、Http（ktor 引擎
-    // Java vs OkHttp）、以及 web / SurfaceContext / VideoSurface（Android 专有）。
+    // loadLibrary（桌面按序找 dll / Android 直接 loadLibrary）、以及
+    // web / SurfaceContext / VideoSurface（Android 专有）。
     val jvmShared =
       create("jvmShared") {
         dependsOn(commonMain.get())
@@ -59,28 +59,23 @@ kotlin {
       implementation(libs.compose.runtime)
       implementation(libs.compose.foundation)
       implementation(libs.compose.ui)
-      // Http 的公共面直接暴露 ktor 类型（HttpClient / HttpResponse / ByteReadChannel），
-      // 消费方（:shared 的 JsEngine / FileIO / HttpIO）要看得见 —— 与 coroutines 同理用 api。
-      api(libs.ktor.client.core)
       // 设置的落盘：DataStore 的 commonMain 只认 okio Path（`createWithPath`），
       // 只收 java.io.File 的那个重载在 jvmAndroidMain 里、commonMain 看不见。
       // 契约面（SettingsStore）不暴露 okio 类型，所以不用 api。
       implementation(libs.okio)
       implementation(libs.androidx.datastore.preferences.core)
     }
-    jvmMain.dependencies {
-      // 桌面端 ktor 引擎；logback 是 ktor 经 slf4j 打日志的后端（代码零引用，纯运行时）。
-      implementation(libs.ktor.client.java)
-      implementation(libs.logback.classic)
-    }
     androidMain.dependencies {
-      // Android 端 ktor 引擎。
-      implementation(libs.ktor.client.okhttp)
       // SurfaceContext.android 的 createBitmap（androidx.core.graphics 扩展）——
       // 在 :shared 时经传递依赖可见，:platform 的依赖图没有它，须显式声明。
       implementation(libs.androidx.core.ktx)
       // 外部浏览器登录的 Custom Tabs（soko.ekibun.browser 的 Android 实现）。
       implementation(libs.androidx.browser)
+    }
+    // HTTP 传输层：OkHttp 只有 jvm / androidJvm 两个真实 target（common 只是元数据），
+    // 而两端都用它 ⇒ 放在中间层，一份实现覆盖桌面与 Android。
+    jvmShared.dependencies {
+      implementation(libs.okhttp)
     }
     jvmTest.dependencies {
       implementation(libs.kotlin.test)

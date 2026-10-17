@@ -11,9 +11,8 @@ import kotlin.test.assertTrue
  * `HttpIO` 必须是**流式**的：第一个 `read` 在响应体发完**之前**就该拿到数据。
  *
  * 判据用「第一次读的耗时 vs 整包下发时长」比：服务端把 body 分若干块下发、块间固定间隔，整包要约
- * 「块数 × 每块间隔」ms；第一次读只要**远早于**它（< 一半）就说明没在等整包。ktor 的便捷入口
- * 内部有一句 `call.save()` 会先整包缓冲，`Http.request` 没有那句（实测见
- * `docs/development/playback-invariants.md` 的「ktor 流式读取」一节）。
+ * 「块数 × 每块间隔」ms；第一次读只要**远早于**它（< 一半）就说明没在等整包。整包缓冲是这层最容易
+ * 退回去的形态（实测见 `docs/development/playback-invariants.md` 的「流式读取」一节）。
  */
 class HttpStreamingTest {
   /**
@@ -110,14 +109,16 @@ class HttpStreamingTest {
   }
 
   /**
-   * **正在进行、但是健康的那次读**：abort 会把它叫醒（报「读满 buf.size」的正数），
-   * 但**会话必须保住** —— 会话的去留只看「还出不出字节」（闲置超过 [SOCKET_TIMEOUT_MS]
-   * 才换），不是「有读正在进行」。健康的流 300ms 后就把第一块发出来了，闲置远不到阈值。
+   * **正在进行、但是健康的那次读**：abort 会把它叫醒（报「读满 buf.size」的正数），代价是
+   * **那条会话跟着没了** —— 叫醒一次阻塞在 socket 上的读，唯一的手段就是关掉那条连接
+   * （见 `docs/development/playback-invariants.md` 第五节「私有作废信号」）。
    *
-   * 判据：读被叫醒成 EXIT；请求数仍是 1；撤销作废后下一次读在**同一条会话**上拿到数据。
+   * 健康不健康在这里救不了它：被掀的那一刻，字节还没从连接上取出来。所以判据是「叫醒 + 重发」：
+   * 请求数变成 2，且下一次读**在新会话上**拿到正确的字节（丢掉作废那一下的字节不算丢数据 ——
+   * 被作废的那次读上报的是「读满 buf.size」的谎，那一包本来就丢）。
    */
   @Test(timeout = 60_000)
-  fun abortWakesAHealthyReadButKeepsTheSession() {
+  fun abortWakesAHealthyReadButDropsTheSession() {
     val firstChunkDelayMs = 300L
     TestMediaServer(
       body = ByteArray(40 * 4096) { (it % 251).toByte() },
@@ -148,9 +149,9 @@ class HttpStreamingTest {
           "被作废的读应当报「读满 buf.size」的正数：让 demuxer 当场收手、不再重读（见 HttpIO.read）",
         )
 
-        // 下一次 read 自带全新信号，不会再被上次的 abort 影响。
+        // 下一次 read 自带全新信号（且手上那条会话已作废）⇒ 重发一条、接着读。
         assertTrue(readBounded(io, 4096) > 0, "作废之后应当能继续读到数据")
-        assertEquals(1, server.requests, "健康会话不该被 abort 拆掉、重发请求")
+        assertEquals(2, server.requests, "作废掀掉了那条会话，下一次读必须重发")
       } finally {
         io.close()
       }

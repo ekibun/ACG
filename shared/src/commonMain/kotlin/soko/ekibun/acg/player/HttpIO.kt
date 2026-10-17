@@ -5,23 +5,27 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import soko.ekibun.acg.common.Http
+import soko.ekibun.common.Http
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvIO
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * HTTP 上的 [AvIO]：一条**活着的**会话，响应体边到边读（走 [Http.request] —— 它**不缓冲**，
- * 见 `docs/development/playback-invariants.md` 的「ktor 流式读取」一节）。
+ * 见 `docs/development/playback-invariants.md` 的「流式读取」一节）。
  *
  * 读与 seek 只在一条线程上（native 的 avio 回调单线程串行），所以本类不加锁。[read] 是**唯一**的
  * `runBlocking`（native 回调要同步签名），进门就把活交给挂起主体。
  *
  * 数据没到时**在 IO 层等**，而那次读卡在 `av_read_frame` 里、协程取消够不到 ⇒
- * [AvIO.Handler.abort] 从另一条线程叫醒它（**只叫醒、不掀会话**，推演见 `playback-invariants.md` 第五节）。
+ * [AvIO.Handler.abort] 从另一条线程叫醒它。叫醒的手段是掀掉那条连接，于是**会话跟着作废**、
+ * 下一条读重发（推演见 `playback-invariants.md` 第五节）。
  */
 class HttpIO(
-  val options: Map<String, Any>,
+  /** 本条流的 URL —— 请求的 `url` 出自它。 */
+  private val url: String,
+  /** 源自己的选项（`headers` 等，**不含** `url`）。 */
+  private val options: Map<String, Any>,
   /** 创建本 IO 的 [Handler]（反向引用）—— 用于把「本次读的投递口」登记回去，见 [Handler.abort]。 */
   private val handler: Handler,
 ) : AvIO {
@@ -39,10 +43,8 @@ class HttpIO(
 
     override fun open(url: String): AvIO =
       HttpIO(
-        (options ?: mapOf()) +
-          mapOf(
-            "url" to url,
-          ),
+        url = url,
+        options = options ?: mapOf(),
         handler = this,
       )
 
@@ -57,6 +59,9 @@ class HttpIO(
     }
   }
 
+  /** 交给 [Http.request] 的选项：`url` 在这一处补上，别跟构造参数两处各写一遍。 */
+  private val requestOptions: Map<String, Any> = options + mapOf("url" to url)
+
   private var offset = 0
   private var cachedRsp: Http.Response? = null
 
@@ -67,23 +72,23 @@ class HttpIO(
    * 「往前跳多远就不如在网络上白读白丢」的阈值 —— 取 avio 缓冲的大小（[getBufferSize]，与 ffmpeg
    * 对齐，来由见 `cxx/AGENTS.md`）。
    *
-   * 比阈值时**要减掉通道里已有的部分**（[Http.Response.availableForRead]）：那部分白读是纯内存
+   * 比阈值时**要减掉本地已有的部分**（[Http.Response.availableForRead]）：那部分白读是纯内存
    * memcpy、零网络成本。**别改成「把阈值调大来代替扣减」**（阈值是常量，扣减按实际缓冲量算）。
    * 与 ffmpeg 官方判据（`aviobuf.c:279`，`offset1 <= buffer_size + short_seek_threshold`）的
-   * 对照、以及「缓冲量极度依赖服务端发得多快」的实测，都见 `playback-invariants.md` 第五节（白读推进）。
+   * 对照见 `playback-invariants.md` 第五节（白读推进）。
    */
   private val skipThreshold: Int get() = getBufferSize().toInt()
 
   /**
-   * 打开一条从 [start] 起的会话，等它把响应交出来。**不用**给 [Http.Response.offset] 赋起点 ——
-   * 它自己从 `Content-Range` header 算，本函数只管请求、不管记账。
+   * 打开一条从 [start] 起的会话，等它把响应交出来。**不用**给
+   * [Http.Response.offset] 赋起点 —— 它自己从 `Content-Range` header 算，本函数只管请求、不管记账。
    *
    * 这里**没有** `runBlocking`（[Http.request] 本身就是 suspend），阻塞交给最外层的 [read]。
    * **建立期也能被掀掉**：[read] 那支哨兵**取消整条协程** —— 建连 / TLS 握手 / 等响应头都算。
    */
   private suspend fun getRange(start: Int): Http.Response =
     Http.request(
-      options +
+      requestOptions +
         mapOf(
           "headers" to
             (options["headers"] as? Map<*, *> ?: mapOf<Any, Any>()) +
@@ -107,12 +112,11 @@ class HttpIO(
       rsp.close()
       rsp = getRange(offset)
     } else if (offset - rsp.offset - rsp.availableForRead > skipThreshold) {
-      // [////已交付////][//通道//]  |
-      //                       offset
-      // 往前跳得远 —— 远到**扣掉通道里已有的那些**之后仍超过一个 avio 缓冲：剩下的部分还得从网络上
+      // [////已交付////][/本地存量/]  |
+      //                             offset
+      // 往前跳得远 —— 远到**扣掉本地已有的那些**之后仍超过一个 avio 缓冲：剩下的部分还得从网络上
       // 取，与其白读白丢，不如换一条**真落在 offset 上**的。服务端给不出这种响应时保留手上这条。
-      // 扣减量在本分支里可信（进来的是复用的缓存会话，通道必定已建立），推导见
-      // `playback-invariants.md` 第五节（白读推进）。
+      // 推导见 `playback-invariants.md` 第五节（白读推进）。
       val newRsp = getRange(offset)
       if (newRsp.offset == offset) {
         rsp.close()
@@ -131,9 +135,9 @@ class HttpIO(
     cachedRsp = rsp
     val advanced =
       try {
-        // 把 rsp 自己往前推 want 字节（白读白丢）。每一段都走 `rsp.read`（内部先等数据到、再读），
-        // 别直接用 `readAvailable` —— 后者在通道空时是裸的 `awaitContent()`，既没有超时、也不在
-        // 本协程自己的取消点上。闲置超时（`IdleTimeoutException`）直接上抛，交给下面的 catch 收场。
+        // 把 rsp 自己往前推 want 字节（ffmpeg 不会用到这段）。每一段都走 `rsp.read` —— 只有它带
+        // 闲置超时、且在本协程的取消点上。闲置超时（`IdleTimeoutException`）直接上抛，交给下面的
+        // catch 收场。
         var left = want
         while (left > 0) {
           val n = rsp.read(discardBuf, len = minOf(left, discardBuf.size))
@@ -143,8 +147,8 @@ class HttpIO(
         left <= 0
       } catch (t: Throwable) {
         // **新建立的那条必须自己收干净**：它已经登记进 [cachedRsp]，但连 offset 都没走到、不是
-        // 「可复用的缓存会话」，留着下次读会拿它当地基。而建立它的那次 [Http.request] 早已
-        // 返回 ⇒ [close] 与建立期的 job 两边都抓不住它（实测：服务端 entered=3 / exited=2）。
+        // 「可复用的缓存会话」，留着下次读会拿它当地基。建它与推进是前后两段、异常只从这段抛出
+        // ⇒ 收场只能由发起它的这次读自己做（实测：服务端 entered=3 / exited=2）。
         if (!reused) {
           cachedRsp = null
           rsp.close()
@@ -190,6 +194,11 @@ class HttpIO(
           // 必须返回正数 `buf.size`（谎报读满 —— 字节并没有，但那条包必然被丢），不是任何错误码：
           // 翻错误码会让 demuxer 再读一轮、重开 range 会话干等超时，`closeAsync` 被拖到 8s 量级。
           // 逐档推演见 `playback-invariants.md` 第五节（私有作废信号）。
+          //
+          // 叫醒的代价是那条会话没了（取消 = 关连接，见 [Http.Response.isClosed]）：它必须在这里
+          // 丢掉，否则下一条读会拿着一条死响应继续用，报出来的是一串 -1（= 假 EOF）。
+          // 只丢**真的被掀掉**的那条：作废也可能落在建连上，那时手上这条还活着、不该陪葬。
+          if (cachedRsp?.isClosed == true) cachedRsp = null
           buf.size
         } catch (e: Throwable) {
           // 真故障才出声。被作废叫醒的读走上面那条，落不到这里 —— 不必再查旗标。
@@ -303,7 +312,7 @@ class HttpIO(
 
   /** 与 abort 不同，这里**不等**：语义是「这条 IO 到此为止」，必须无条件释放。 */
   override fun close() {
-    // close 掀起这条会话：通道 + 放 block 回去（ktor 随即 cleanup）都在这里。
+    // 放掉这条会话（连接随之关闭）。
     cachedRsp?.close()
     cachedRsp = null
   }

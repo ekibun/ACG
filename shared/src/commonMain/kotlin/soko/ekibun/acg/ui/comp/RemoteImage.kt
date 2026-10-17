@@ -16,9 +16,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.decodeToImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import io.ktor.http.isSuccess
 import kotlinx.coroutines.CancellationException
-import soko.ekibun.acg.common.Http
+import soko.ekibun.common.Http
 
 /**
  * 已解码的图缓存：**进程级**，按 URL 存 [ImageBitmap]。
@@ -79,7 +78,7 @@ private suspend fun fetchImageBitmap(url: String): ImageBitmap? {
       // 而这里换到的是 API 给的图床地址、随时可能被跳到别处 —— 拿到 302 的响应体解码必失败。
       // （bgm 现在的图床是直连 200，见 `docs/design/bgm-plugin.md`；这条是防跳。）
       Http.request(mapOf("url" to url, "redirect" to "follow")).use { response ->
-        if (!response.delegate.status.isSuccess()) {
+        if (response.status !in 200..299) {
           null
         } else {
           response.readAll().decodeToImageBitmap()

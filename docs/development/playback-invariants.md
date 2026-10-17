@@ -1,6 +1,6 @@
 # 播放链路的不变量与外部依据
 
-只收录**已定稿的知识**：ffmpeg / kotlinx / ktor / skiko 的**外部行为依据**，以及由它们推导出的判据。
+只收录**已定稿的知识**：ffmpeg / kotlinx / OkHttp / skiko 的**外部行为依据**，以及由它们推导出的判据。
 不在 agent 自动决策路径上；动手改播放链路（`AvFormat` / `FFPlayer` / `HttpIO` / `SurfaceContext`）前先读本文对应节。
 命令与验收纪律见 [build-and-test 技能](../../.agents/skills/build-and-test/SKILL.md)。
 
@@ -174,52 +174,59 @@ Java 堆实际占用远低于上限时 GC 可能十秒才来一次，于是 RSS 
 
 ---
 
-## 四、ktor 流式读取
+## 四、OkHttp 传输层
 
-版本：ktor **3.5.2**（`gradle/libs.versions.toml`）。
+版本：OkHttp **5.3.2**（`gradle/libs.versions.toml`），桌面与 Android 共用一份实现
+（`platform/src/jvmShared/.../common/Http.kt`；okhttp 只有 jvm / androidJvm 两个真实 target）。
 
-### 4.1 便捷入口会整包缓冲
+### 4.1 拉取式：不读就不下，一次读只到一小段
 
-`HttpClient.request(...)` → `HttpStatement.execute()` → `fetchResponse()`，
-内部有一句 `call.save().response`（注释 "Save the body again to make sure that it is replayable…"）
-⇒ **body 被完整读进内存**。表现为远程播放迟迟不出画面（等整包下完）、内存随文件大小走，
-无任何报错。
+`Http.request` = 拼好 `Request` + `Call.execute()`（阻塞搬到 `Dispatchers.IO`）→ **响应头到就返回**，
+body 是一条按需读的流（`Response.body.byteStream()`），读到哪下到哪。
+既没有「拿到响应时已经在拉 body」这回事，也没有任何预读缓冲。
 
-⇒ ktor 另有一条不 save 的路：`HttpStatement.execute(block)` → `fetchStreamingResponse()`
-→ `builder.skipSaveBody()`。**读必须发生在 block 期间**——block 返回后 ktor 随即 cleanup。
+⇒ **整包缓冲是这层最容易退回去的形态**：它会表现成远程播放迟迟不出画面（等整包下完）、
+内存随文件大小走、无任何报错。判据是
+`HttpStreamingTest.firstReadReturnsLongBeforeTheWholeBodyArrives`（第一次读的耗时 < 整包下发时长的一半），
+以及 `HttpBodyDownloadTimingProbeTest`（不读时本地存量为 0、读全程峰值也不超过一个 avio 缓冲）。
 
 ⇒ 同一入口两种读法要分流：流式边下边用走 `Response.read`（内部等数据到再读一段），
-一次性拿完走 `Response.readAll`。**混用会串**——读完再 `read` 只会拿到流尾。
+一次性拿完走 `Response.readAll`（读完即 `close`，插件 JS 的 `Response.arrayBuffer()` 走这条，
+用例 `ReadAllClosesProbeTest`）。**混用会串**——读完再 `read` 只会拿到流尾。
 
-### 4.2 `awaitContent(min)` 的参数是最少字节数，不是超时
+### 4.2 闲置超时 = 两次读之间，由 okhttp 的 `readTimeout` 实现
 
-`ByteReadChannel.awaitContent(min)` 实现是 `source.request(min)`：
-挂起等到**凑够 min 字节**或通道关闭，**没有超时重载**（`javap` 确认只有一个 `(int, Continuation)` 签名）。
-两个引擎（Java / OkHttp）的 body 通道都是 `ByteChannel`，行为一致。
+**约束：判据是「两次数据包之间有没有出字节」，不是「请求总共花了多久」——整条流可以播几小时。**
 
-⇒ 把毫秒数当参数传进去**编译通过**，健康流上看起来也正常（数据一直在来），
-但数据停住的静默处**永远醒不来**——它在等凑够那个字节数，abort 叫不醒、旗标查不到。
+okhttp 的 `readTimeout` 恰好就是这个语义（okio 的 `AsyncTimeout` 在两次 `read` 之间计时），
+于是本层直接把它设成 `Http.SOCKET_TIMEOUT_MS`（8 s，取 ExoPlayer 的 `DEFAULT_READ_TIMEOUT_MILLIS`），
+并把它抛出的 `SocketTimeoutException` 翻成 `Http.IdleTimeoutException`。
 
-⇒ 「等一会儿再查旗标」要自包超时：`withTimeoutOrNull(ms) { channel.awaitContent(1) }`
-（超时取消干净、不 consume 字节），或等价的 `select { onAwait { … }; onTimeout(ms) { … } }`。
+⇒ **不在应用层自己另起一套计时器**：引擎给的 `readTimeout` 正好就是这个语义，
+应用层再计一次只会多出一个与它不同源的判据。
 
-⇒ 也别直接用 `readAvailable`：通道空时它内部是**裸的 `awaitContent()`**——
-既没有超时、也不在调用方自己的取消点上，直接调就卡死在那里。
+⇒ **超时即这条连接作废**（okio 超时会关掉 socket），所以 `HttpIO` 的「超时 ⇒ 关掉、换一条重试」
+（`readSuspend` 的 `catch (Http.IdleTimeoutException)`）正好接住，不必再谈「连接还能不能留」。
 
-### 4.3 引擎层的「读闲置超时」两平台对不上
+### 4.3 叫醒阻塞读的唯一手段是关掉连接
 
-桌面（`java.net.http.HttpClient`）**没有**「读闲置超时」这个概念，装上去被静默忽略；
-OkHttp 自带 10 s 默认值，与 ktor 的取值不一定同源。
+阻塞在 socket 上的 `read` **不看协程取消点**。取消一个已经落在这层阻塞里的读，能做的只有
+`Call.cancel()`，而它就是关掉那条连接。
 
-⇒ 两端都不装，统一由应用层自己计时：判据是「两次数据包之间有没有出字节」，
-不是「请求总共花了多久」——整条流可以播几小时。`HttpTimeout` 的 socket 超时显式设成无限。
+⇒ 于是「本轮作废」的代价是**那条会话当场作废**：`Http.Response.isClosed` 变真（取消也算作废），
+`HttpIO` 据此丢掉它、下一条读重发（§5.3）。
+
+> **DON'T:** 「不 cancel，让后台线程把这次读读完」。那样确实会从流里**真的取走一批字节**，而协程
+> 已被取消 ⇒ 网络游标不推进、那批字节也没交付给调用方，之后的字节全部错位（**静默串数据**）。
+> §5.2 那个「谎报读满」的安全前提正是「这批字节没有被真的取走」。
 
 ---
 
 ## 五、HTTP 流的读取与会话生命周期
 
-`HttpIO`（`acg/player/HttpIO.kt`）与 `Http.Response`（`acg/common/Http.kt`）的实现细节。
-源码里只留契约与指针，推演过程在此。通用的 ffmpeg / ktor / 协程判据分别在 §1.2/§1.3、§4、§6，
+`HttpIO`（`acg/player/HttpIO.kt`）与 `Http.Response`
+（`platform/src/commonMain/.../common/Http.kt`，实现在 `jvmShared`）的实现细节。
+源码里只留契约与指针，推演过程在此。通用的 ffmpeg / OkHttp / 协程判据分别在 §1.2/§1.3、§4、§6，
 本节的差异点与推演在此，不重复列通用结论。
 
 ### 5.1 必须在 IO 层阻塞等
@@ -228,8 +235,7 @@ OkHttp 自带 10 s 默认值，与 ktor 的取值不一定同源。
 返回值的两种合法解（`HttpReadContractTest` 钉着）与作废收场的正数返回，后果表见 §1.3
 （负值再读一轮、0 原地死循环、正数当场 return）。
 
-**闲置超时不装进 `HttpTimeout`**：读闲置超时由 `Response.read` 里自己的 `select onTimeout` 计时
-（`SOCKET_TIMEOUT_MS = 8_000L`），不交给两端 `HttpTimeout`。判据与两平台对不上的原因见 §4.3：
+**闲置超时由传输层的 `readTimeout` 计时**（8 s，「两次读之间」，见 §4.2），不在这里另起一套计时器：
 
 > **DO:** 判据是「两次数据包之间有没有出字节」，不是「请求总共花了多久」——整条流可播几小时。
 
@@ -280,12 +286,13 @@ finally { abort.cancel(); handler.onSignal(null) }
 
 > **DON'T:** 哨兵 `throw`。它挂在 `runBlocking` 的 scope 上，是**子协程**；`async` 里抛出的异常不是
 > 「留给 `await` 取的值」，而是**未捕获异常**，会 `parentCancelled` 向上取消父 `BlockingCoroutine`
-> ⇒ 整个 scope（含 `readSuspend`）全被拆掉，外层那个 `catch (Http.AbortedException)` **一次都没跑**，
+> ⇒ 整个 scope（含 `readSuspend`）全被拆掉，外层那个 `catch (e: CancellationException)` **一次都没跑**，
 > `read` 直接以 `Int.MIN_VALUE` 收场（实测形状：`kotlinx.coroutines.JobCancellationException:
 > Parent job is Cancelling; job="coroutine#26":BlockingCoroutine{Cancelling}`）。
 
-> **DO:** `async` 只用来挂等待，不用来报错。对照：`Http.Response.read` 里也有 `async { data }`，
-> 它安全是因为那里用 `select` 挑一支、`finally` 把落选支 `cancel()` 掉——异常从来没被「抛出去」过。
+> **DO:** `async` 只用来挂等待，不用来报错。对照：传输层里把阻塞 IO 搬上 IO 线程用的是
+> `withContext(Dispatchers.IO) { suspendCancellableCoroutine { … } }`，取消经 `invokeOnCancellation`
+> 接到 `Call.cancel()` 上（§4.3）——既没有 `async`，也没有把异常「抛出去」这一说。
 
 > **DO:** `finally` 里两句都不能省——`abort.cancel()`（哨兵正常收场时永远挂在 `signal.await()` 上，
 > 不取消它 `runBlocking` 会一直等）、`handler.onSignal(null)`（摘投递口——正常返回/作废收场/真故障三条路都要摘，
@@ -299,32 +306,37 @@ finally { abort.cancel(); handler.onSignal(null) }
 > **DO:** 值取 `buf.size` 而不是随便一个正数。`append_packet_chunked`（utils.c）的 `do/while`
 > 靠 `ret == read_size` 才继续凑包（`ret != read_size` 即 `break`），一次请求的长度正好对上。
 
-### 5.3 abort 只叫醒、不掀会话
+### 5.3 abort 叫醒了读，代价是那条会话作废
 
-**约束：会话去留只看「这条会话还出不出字节」——由正在等的那个读自己判断（`HttpIO.read` 内那支
-`select onTimeout`，见 `Http.SOCKET_TIMEOUT_MS`）。**
+**约束：会话去留只看「这条会话还出不出字节」（闲置超时，§4.2）；而叫醒一次阻塞读只能靠关连接（§4.3）。**
 
-健康会话跨 abort 复用（seek 每次作废，不白重开连接），而「掀会话」永远由同一条线程自己做，
-**没有跨线程拆对方正在用的东西的竞态**。
+⇒ 作废分两步收口，两步都在同一条线程上，**没有跨线程拆对方正在用的东西的竞态**：叫醒是哨兵 `cancel()`
+掀掉那次读（连带 okhttp 那条连接）；丢掉那条会话是 `HttpIO.read` 自己的收场：
 
-> **DO:** 下一次读面对的仍是那条停住的会话，它会闲置超时到点、自己换一条重试（`HttpIO.readSuspend`
-> 的 `catch (e: Http.IdleTimeoutException)`）——压的是静默自愈路（`HttpAbortTest` 那条用例的后半段「恢复要走重连」）。
+- 判据用 `Http.Response.isClosed`（取消也把它置成作废）：`catch (CancellationException)` 里只丢
+  **真的被掀掉**的那条。作废也可能落在建连上，那时手上这条还活着、不该陪葬；
+- 下一次读 `cachedRsp == null` ⇒ 直接在逻辑游标上重发（`HttpAbortTest` 那条用例的后半段）。
 
-> **DON'T:** 把 `close()` 与 `abort()` 合成一件事。`close` 是「这条 IO 到此为止」，无条件释放
-> （掀通道 + 放 `execute` 的 block 回去，ktor 随即 cleanup）；`abort` 是「这一轮不要了」，
-> **不可逆的只有 close**。合成一个会把「作废」错当成「关会话」。
+⇒ **健康会话一样保不住**：被掀的那一刻字节还在 socket 上、没交付给任何人，救不回来；不 cancel 又会让
+那批字节被真的取走（§4.3 的 DON'T）。判据记在
+`HttpStreamingTest.abortWakesAHealthyReadButDropsTheSession`（请求数 1 → 2，下一次读在新会话上拿到正确字节）。
 
-### 5.4 会话 scope 不能挂调用方 job
+⇒ 没人在等时 `abort` 仍是 no-op（`HttpStreamingTest.abortWithoutAnyWaitingReadKeepsTheSameSession`）——
+FFPlayer 每次 seek / 单帧步进都会 `abort`，而那种时刻通常没有读卡在网络上，会话照旧复用。
 
-**约束：`Http.request` 里那条会话开在 `CoroutineScope(Dispatchers.IO)` 上，不挂调用方 job。**
+> **DON'T:** 把 `close()` 与 `abort()` 合成一件事。`close` 是「这条 IO 到此为止」、无条件释放；
+> `abort` 是「这一轮不要了」，只是那一下顺带把会话掀了。合成一个会把「作废」错当成「关会话」。
 
-- 调用方（avformat 线程）在 `runBlocking` 里等到 `[Response]` 再消费，而 `runBlocking` 会等**所有子协程**
-  结束才返回（`BlockingCoroutine.isScopedCoroutine`）⇒ 会话等 `Response.close`、`Response.close` 等
-  `runBlocking` 返回，**直接死锁**；
-- `CoroutineScope(Dispatchers.IO)` 工厂在上下文没有 `Job` 时自己补一个 `Job()`，那个 `Job()` 同样**没有父**，
-  `runBlocking` 的结构化等待够不着这棵树；
-- **也别挂在本函数自己的 scope 上**——本函数是 `suspend`、直接跑在调用方协程里，`launch` 上去就是同一个死锁；
-- dispatcher 定死 IO 池：建连/TLS 握手是**真阻塞的 IO**，丢给 `Default`（核数那么大的池）会在多路并发时占满。
+### 5.4 会话不挂任何协程树
+
+**约束：一条会话（一条 `Http.Response`）不持有协程、也不持有 scope —— 它只是一条连接。**
+
+拉取式下这不需要额外设计：建连（`Call.execute()`）与每一次 `read` 都在**调用方自己的协程**里跑，
+只是把阻塞段用 `withContext(Dispatchers.IO)` 搬上 IO 池（§4.3）。没有后台在填缓冲的协程，
+也就没有「`runBlocking` 等子协程、子协程等 `Response.close`」那个环。
+
+> **DO:** 阻塞段一律走 `Dispatchers.IO`，不要丢给 `Default`：建连 / TLS 握手 / socket 读是**真阻塞的 IO**，
+> `Default`（核数那么大的池）在多路并发时会被占满。
 
 ### 5.5 白读推进（`getResponseBlocking` 里的 `advance`）
 
@@ -335,48 +347,41 @@ finally { abort.cancel(); handler.onSignal(null) }
    ⇒ `reused` 判错，且「这条会话已归本 IO」在半途不成立。
 2. **新建立的那条必须自己收干净**——抛出时它已经登记进 `cachedRsp`，但连 offset 都没走到、
    不是「可复用的缓存会话」（复用那条的存亡归 `close`/静默自愈管，顺手关掉会伤到还没用完的会话）。
-   建立它的那次 `Http.request` 调用早已返回 ⇒ `close` 与建立期的 job 两边都抓不住它，不收就是一条
-   永久挂在 `done.await()` 上的 ktor 会话 + 漏掉的连接（实测：服务端 `entered=3`/`exited=2`）。
-3. **每一段都走 `rsp.read`**（内部先等数据到、再读），不要直接用 `readAvailable`——后者在通道空时是
-   裸的 `awaitContent()`，既没有超时、也不在本协程自己的取消点上。
+   建它与推进是前后两段、异常只从推进那段抛出 ⇒ 收场只能由发起它的这次读自己做，`cachedRsp`
+   也必须在同一处摘掉（留着它，下次读会拿一条没推到位的会话当地基）。
+   不收就是一条永久吊在服务端的连接（实测：服务端 `entered=3`/`exited=2`）。
+3. **每一段都走 `rsp.read`**，不要绕开它去直接摸底层流——只有它带闲置超时（§4.2）、
+   且落在本协程自己的取消点上。
 
 **换会话的判据是「白读的那部分里，还得从网络上取多少」**——即 `offset - rsp.offset - rsp.availableForRead`。
-**通道里已有的那部分要减掉**：白读它们是纯内存 memcpy、零网络成本，算进代价会高估，于是「其实一个字节都不用下」
-的时候也去重开会话，而重开要付 TCP 往返 + TLS + 响应头的固定成本。量用 `Http.Response.availableForRead`（ktor 公开 API）。
+**本地已有的那部分要减掉**：白读它们是纯内存 memcpy、零网络成本，算进代价会高估，于是「其实一个字节都不用下」
+的时候也去重开会话，而重开要付 TCP 往返 + TLS + 响应头的固定成本。
 
-> **DO:** 这条判据只在「复用缓存会话」时生效，而那条通道必定已建立（每条缓存会话至少被 `read` 过一次）
-> ⇒ 扣减量可信。新建那条的存量恒为 0、扣减退化成 0 ⇒ **只会更倾向换会话**，最坏等于扣减前。
-
-> **DON'T:** 用「把 `skipThreshold` 调大」代替扣减。阈值是常量，扣减按**实际缓冲量**算。缓冲量极度依赖
-> 服务端发得多快——慢发（≈ 400 KiB/s）时通道**恒空**、判据退化成扣减前；只有**快发**时才铺开到 ≈ 1 MiB。
-> 省不省得到全看生产侧落在哪一档。
+> **DO:** 这条判据只在「复用缓存会话」时生效，而那条会话的缓冲量必定已知 ⇒ 扣减量可信。
+> 新建那条的存量恒为 0、扣减退化成 0 ⇒ **只会更倾向换会话**，最坏等于扣减前。
 
 **附：`Response.offset` 起点为什么从 header 推。** 起点**必须**是服务端在 header 里**亲口说的**那个数
 （206 的 `Content-Range` 起点；没有这个头——也就是 200 从头给——就是 0），**不能**由调用方灌进去。
 灌进去的话，`HttpIO` 建完响应还得追一次赋值，而漏一处就**静默重开一条会话**、从头重发。
 
-解析刻意走**字符串**（`substringBefore('-')` / `removePrefix("bytes")`）而不是 ktor 的 `parseRangesSpecifier`：
-后者解析的是**请求侧**的 `Range: bytes=0-`，形态不同。
+解析刻意走**字符串**（`substringBefore('-')` / `removePrefix("bytes")`）：`Content-Range` 的形态
+（`bytes 3280000-3407871/3407872`）与请求侧 `Range: bytes=0-` 不同，没有现成的解析器可用。
 
-### 5.6 通道存量（`availableForRead`）的三反直觉点
+### 5.6 本地存量（`availableForRead`）的三点
 
-`Http.Response.availableForRead` 量的是 `readBuffer.buffer.size`，是「网络已经付过、ffmpeg 还没拿到」的那部分
-（探针 `HttpBufferedAmountProbeTest`；判据级用例
-`HttpReadContractTest.forwardSeekWithinBufferedRangeKeepsSessionButFarSeekDoesNot`）。
-下面三条每一条都能让上层判断错：
+`Http.Response.availableForRead` 量的是「已经从网络上取到本地、ffmpeg 还没拿到」的那部分
+（拉取式下就是 okio 缓冲里的字节；判据级用例
+`HttpReadContractTest.forwardSeekWithinBufferedRangeKeepsSessionButFarSeekDoesNot`，探针
+`HttpBodyDownloadTimingProbeTest`）。下面三条每一条都能让上层判断错：
 
-1. **通道没建时它返回 0，而那个 0 不代表「网络上什么都没下」。** 下载与它无关：`Http.request` 拿到响应时
-   引擎侧**已经在拉 body** 了（实测：一次 `read` 都没调、服务端已写出 704 KiB / 共 2 MiB）。0 的真正含义只是
-   「本对象还没拿到通道引用」。⇒ 任何拿它当「网速慢/还没缓冲」的判据都是错的。
-2. **存量不会自己涨——空等是等不来的。** 快发服务端 + 第一次读之后，存量稳定在 40879 B、**空等 10 s 一字节不涨**。
-   因为 ktor 的写入先进 `flushBuffer`，而 `flushBuffer`→`readBuffer` 的搬运**只发生在读侧**
-   （`moveFlushToReadBuffer`，由 `awaitContent`/`readAvailable` 触发）。⇒ 想让「已缓冲」变多**只能靠读**，
-   而读会同时推进 `Response.offset`。
-3. **存量极度依赖服务端发得多快。** 慢发（4 KiB/块 + 块间 `sleep(10ms)`，≈ 400 KiB/s，接近真实播放）时通道
-   **恒空**、扣减量恒为 0；全速（64 KiB/块）时第一读之后 ≈ 1.0 MiB——写侧被 `flush()` 挂起在 `CHANNEL_MAX_SIZE`
-   （1 MiB，`internal const val`、编译期内联、运行时改不了）附近，最后一次 flush 之前写进 `_writeBuffer` 的那个块
-   不会被退回，所以存量可以略微超过 1 MiB（实测跑出过 1,056,687 B = 1 MiB + 8 KiB）。⇒ 「按已缓冲量判代价」这个改法
-   只在快发时有收益（最多省 1 MiB），慢发时退化成原判据。
+1. **它是 0 就是「网络真的还没被读」**，不是「本对象还没拿到流引用」那类假 0。拉取式不预读：
+   一次 `read` 都没调之前本地一个字节都没有（实测：空等 500 ms 后仍是 0）。
+2. **空等不会让它涨。** 要它变大只能靠读，而读会同时推进 `Response.offset`。
+3. **上限极小**（okio 一次搬运一个 8 KiB 段；实测读满 2 MiB 全程峰值 ≤ 32 KiB）⇒ §5.5 那条判据里的
+   扣减项事实上恒为 0，判据退化成「超过网络游标一个 avio 缓冲就换会话」。这不是缺陷：预读一小，
+   「已缓冲」才诚实（拿它当「快下好了」的判据在任何一档下都错），代价只是跨会话时多走白读推进（§5.5）。
+   **别为了让它变大去加预读缓冲** —— 预读要另起协程在后台填，等于把「会话挂协程树」那套（5.4）搬回来，
+   而且「已缓冲」会变成「快下好了」的假象（判据在任何一档下都错）。
 
 ---
 

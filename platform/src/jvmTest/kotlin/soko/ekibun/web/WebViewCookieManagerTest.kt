@@ -16,7 +16,7 @@ import kotlin.test.assertTrue
 /**
  * [WebView2CookieManager] 这条产品链路的回归测试。
  *
- * 背景：ktor 的 cookie 读写在桌面端桥到 WebView2 的 cookie 库。[WebView2CookieManager] 内部
+ * 背景：插件 JS 的 cookie 读写在桌面端桥到 WebView2 的 cookie 库。[WebView2CookieManager] 内部
  * **惰性缓存一个 [Webview2Context]**（第一次用时才建，之后所有读写都走它），不再「每次读 / 写
  * 都现建一个上下文、用完即关」。上下文自己的 `ICoreWebView2CookieManager` 在 controller
  * 就绪时一次取好缓存在 native 侧，随取随用。这条路能成立的前提是：

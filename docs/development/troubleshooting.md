@@ -28,7 +28,7 @@
 
 | 主题 | 正本 |
 |---|---|
-| 外部库（ffmpeg / kotlinx / ktor / skiko）行为依据、播放链路判据 | [`playback-invariants.md`](./playback-invariants.md) |
+| 外部库（ffmpeg / kotlinx / OkHttp / skiko）行为依据、播放链路判据 | [`playback-invariants.md`](./playback-invariants.md) |
 | HTTP 流的读取与会话生命周期（推演过程） | [`playback-invariants.md`](./playback-invariants.md) 第五节 |
 | JNI 符号导出、加载方式差异、MSYS2 与工具链 | [`cxx/AGENTS.md`](../../cxx/AGENTS.md) |
 | QuickJS 引用计数与所有权 | [`cxx/AGENTS.md`](../../cxx/AGENTS.md) 的 quickjs 节 |

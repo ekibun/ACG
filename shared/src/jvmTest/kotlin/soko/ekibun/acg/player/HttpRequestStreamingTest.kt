@@ -1,30 +1,29 @@
 package soko.ekibun.acg.player
 
-import io.ktor.http.HttpHeaders
 import kotlinx.coroutines.runBlocking
 import soko.ekibun.TestMediaServer
-import soko.ekibun.acg.common.Http
+import soko.ekibun.common.Http
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
  * 钉住 `Http.request(...)` 的**返回值式**契约：它返回一条活的 [Http.Response]，
- * 元数据从 `delegate` 取，`close()` 必须真把服务端那条连接放掉。
+ * 元数据从响应自身取，`close()` 必须真把服务端那条连接放掉。
  *
  * 与 `HttpStreamingTest` 的分工：那边测的是 `HttpIO`（消费方）的行为；这边直接测 API 本身，
  * 判据独立于 `HttpIO` —— 这样「返回式 API 的生命周期对不对」不再只能靠播放器路径间接验证。
  */
 class HttpRequestStreamingTest {
   /**
-   * 返回的 [Http.Response] 必须**真的包着块内那个响应**：`status` / `headers` / `call`
+   * 返回的 [Http.Response] 必须**真的包着服务端那条响应**：`status` / `headers` / `url`
    * 都对得上，`offset` 与 `contentLength` 的推导口径也对。
    *
    * `Http.request` **不收任何作废信号**：建立期的取消由调用方（`HttpIO.read` 的哨兵）
    * **取消整条协程**掀掉 —— 见 [Http.request] 与 `HttpIO.read` 的 KDoc。
    */
   @Test(timeout = 60_000)
-  fun responseExposesTheInBlockDelegateAndDerivedMetadata() {
+  fun responseExposesStatusHeadersAndUrlWithDerivedMetadata() {
     TestMediaServer(
       body = ByteArray(20 * 4096) { (it % 251).toByte() },
       chunkDelayMs = 30,
@@ -37,20 +36,19 @@ class HttpRequestStreamingTest {
           Http.request(mapOf("url" to server.url))
         }
       try {
-        // ktor 元数据一律从 delegate 取（不转发）。
-        val status = rsp.delegate.status.value
-        val request = rsp.delegate.call.request
-        val requestUrl = request.url.toString()
-        assertEquals(200, status, "delegate 应当是那条 200 响应")
+        assertEquals(200, rsp.status, "status 应当是那条 200 响应")
         assertTrue(
-          rsp.delegate.headers[HttpHeaders.TransferEncoding] != null,
-          "delegate.headers 应当带着服务端的头（这里服务端用 chunked 发）",
+          rsp.headers.any { (name, values) ->
+            name.equals("Transfer-Encoding", ignoreCase = true) &&
+              values.any { it.equals("chunked", ignoreCase = true) }
+          },
+          "headers 应当带着服务端的头（这里服务端用 chunked 发）",
         )
-        assertEquals(server.url, requestUrl, "delegate 的请求 URL 要对得上")
+        assertEquals(server.url, rsp.url, "响应的 URL 要对得上")
         // 网络游标起点由 `Content-Range` 推（200 = 服务端从头给 ⇒ 起点 0），
         // 见 [Http.Response.offset] 的 KDoc。
         assertEquals(0, rsp.offset, "服务端回 200 ⇒ 起点按 0 记")
-        // contentLength 由 init 从 delegate 的 header 推 —— 这里服务端用 chunked 发
+        // contentLength 从响应头推 —— 这里服务端用 chunked 发
         // （sendResponseHeaders(200, 0)），没有 Content-Length，所以按契约是 -1。
         assertEquals(-1L, rsp.contentLength, "没有 Content-Length/Content-Range 时总长未知，按契约是 -1")
       } finally {
@@ -111,7 +109,7 @@ class HttpRequestStreamingTest {
       assertEquals(
         server.entered,
         server.exited,
-        "close() 之后连接仍挂着（entered>exited）：block 没被放回去、ktor 没 cleanup",
+        "close() 之后连接仍挂着（entered>exited）：块没被放回去、传输层没 cleanup",
       )
       assertEquals(1, server.requests, "整个过程只该开一条会话")
     }
