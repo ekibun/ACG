@@ -18,6 +18,22 @@
 
 ## 架构
 
+### 与上游的关系
+
+`quickjs/` 是**未打补丁的官方上游**（`bellard/quickjs`，当前 `84e723f`）。桥对上游的唯一依赖缺口是
+`JS_IsPromise`——上游没有这个断言器，`quickjs.cpp` 的 `jsIsPromise` 改用 `JS_PromiseState` 判：
+非 Promise 时它内部 `JS_GetOpaque(obj, JS_CLASS_PROMISE)` 为空、返回 `-1`，逐分支等价。
+返回值要先接进 `int` 再与 `-1` 比较——`JSPromiseStateEnum` 没钉底层类型，直接比 `-1` 会被 Clang
+报 always-true 的越界比较警告（上游自己也是先取 `int`）。⇒ **桥升级上游不需要再维护 fork**，直接
+`git -C cxx/quickjs/quickjs fetch origin && git checkout <tip>`。
+
+上游 2026-06 之后新增的 `intl/` 与 `temporal/` 受 `CONFIG_TEMPORAL_INTL` 宏门控，我们不用 Makefile、
+也没定义该宏，所以 `quickjs.cmake` 的源文件清单（`quickjs.c` / `cutils.c` / `libregexp.c` /
+`libunicode.c` / `dtoa.c` / `unicode_gen.c`）**保持不变**。要启用它们才需要往清单里加对应 `.c`。
+
+> `-DDUMP_LEAKS` 的转储走 `printf`，在 Android 上落到 stdout 而非 logcat（旧 fork 曾用宏重定向到
+> `__android_log_print`，已随换回上游丢弃）。桌面端的转储看得到，Android 侧看不到。
+
 ### 模块构成
 
 `quickjs.cpp` 在 QuickJS 本体之上补了三样东西：

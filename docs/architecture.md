@@ -34,7 +34,7 @@ ACG 只依赖**库与运行时**，目前不依赖任何自建服务端。数据
 | WebView2 Runtime | 桌面系统级运行时（evergreen） | 桌面端网页宿主。SDK 头与 `WebView2Loader.dll` 随仓库 vendored 在 `cxx/webview/sdk/` |
 | Android System WebView | Android 系统组件 | Android 端网页宿主，直接包 `android.webkit.WebView`，不做无头化 |
 | FFmpeg | git submodule（`cxx/ffmpeg/ffmpeg/`） | 只编不改。开 `--disable-network` / `--disable-protocols`，I/O 全部由 Kotlin 侧的 `AvIO` 接管 |
-| QuickJS | git submodule（`cxx/quickjs/quickjs/`） | 只编不改。上游为 `ekibun/quickjs` 分支 |
+| QuickJS | git submodule（`cxx/quickjs/quickjs/`） | 只编不改。上游为官方 `bellard/quickjs`，不打 fork 补丁 |
 | Compose Multiplatform | Gradle 依赖 | 唯一的 UI 框架，两端共用 |
 | OkHttp | Gradle 依赖 | 唯一的 HTTP 栈。桌面与 Android 共用 `jvmShared` 那一份实现；okhttp 只有 jvm / androidJvm 两个真实 target，所以没有 common 层的虚拟实现可用 |
 | JetBrains Skia（经 Compose） | Gradle 依赖 | 桌面端视频帧的绘画面 |

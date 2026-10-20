@@ -18,6 +18,8 @@ WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/de
   `-DLIBRARY_OUTPUT_PATH=bin` 给。文件名就是 `webview.dll` / `quickjs.dll` / `ffmpeg.dll`。
 - `cxx/ffmpeg/ffmpeg/`、`cxx/quickjs/quickjs/` 是 **git submodule**（完整上游源码树）。
   找参考实现（如 `fftools/ffplay.c`）**直接读本地文件，不要联网下载**；也不要修改它们。
+  ffmpeg 的 submodule 指向上游 `FFmpeg/FFmpeg`，本地改动只以 `cxx/ffmpeg/patches/hls.sed` 形式存在，
+  由构建在构建目录里应用（见 [ffmpeg 一节](#ffmpeg) 的「源码改动走 sed」）。
 - **重编与 dll 落位全自动，没有「手动同步」这一步**：所有消费链的任务图都挂着 `buildJni`
   （无 outputs 的 Exec，每次必跑，`cxx/` 一变就重编）—— `:desktopApp:run`（经 `prepareAppResources`）、
   `hotRun`（`hotSnapshotMain`）、IDE 直跑 MainKt（`processResources`）、打包（`syncNativeResources`）、
@@ -146,6 +148,24 @@ WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/de
 
 ## ffmpeg
 
+- **源码改动走 sed，不碰 submodule**：submodule 指向上游原版，本地唯一改动是
+  `cxx/ffmpeg/patches/hls.sed`（把 `hls.c` 的 `open_url` 协议检查连同只在该段用到的
+  `proto_name` 声明包进 `#if CONFIG_NETWORK`）。`patches/configure.sh` 就是 ExternalProject 的
+  `CONFIGURE_COMMAND`：先跑 configure，再把 `hls.c` 拷成构建目录的 `libavformat/hls.patched.c`、
+  用 sed 改它，并把构建目录的 `Makefile` 改写成把 `hls.o` 指向副本（该 Makefile 由 configure
+  写出、已存在时不覆盖，所以扛得住 reconfigure）。submodule 一个字节都不动。
+  改这条链路时的硬约束：
+  - **sed 匹配不到不报错**，改动会静默消失。脚本末尾用 `grep -c '^#if CONFIG_NETWORK$'`
+    必须为 1 兜底 —— 上游改了锚点就在这里失败，别把这道校验删掉。
+  - **锚点必须唯一**：`int is_http = 0;` 在文件里出现两次、`HLSContext *c = s->priv_data;`
+    九次，裸匹配会多插。`hls.sed` 因此把插入限定在 `open_url` 签名行到下一个顶格 `}` 之间；
+    删声明那条靠整行精确匹配（全文件唯一）。加新改动先数一下锚点出现次数。
+  - 副本不在源码树里，`hls.c` 的 `#include "avformat.h"` 要靠
+    `CCFLAGS += -I$(SRC_PATH)/libavformat -I$(SRC_PATH)`。
+  - **不要手工删 `hls.o` / `hls.d`**：副本每次 configure 都重写，mtime 更新就会触发重编，
+    显式规则也认新的 `hls.patched.c`（实测从旧 `hls.d` 指向 `hls.c` 的状态切过来照样重编）。
+    删了反而让每次 prepare 都白编一遍。
+  - sed 保持行尾不变（实测 CR count 0），不要引入会把整份文件改写的工具。
 - **视频转码目标固定为 `AV_PIX_FMT_RGBA`**，写死在 `ffmpeg.cpp` 的 `postFrameVideo`
   （`av_image_get_buffer_size` / `av_image_fill_arrays` / `sws_getContext` 三处必须用同一个
   格式常量，否则 `sws_scale` 写进来的布局与缓冲区对不上）。Kotlin 侧已无像素格式常量，

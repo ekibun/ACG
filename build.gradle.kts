@@ -46,8 +46,8 @@ allprojects {
   ideaModule.excludeDirs =
     ideaModule.excludeDirs +
     setOf(
-      rootDir.resolve("cxx/ffmpeg"),
-      rootDir.resolve("cxx/quickjs"),
+      rootDir.resolve("cxx/ffmpeg/ffmpeg"),
+      rootDir.resolve("cxx/quickjs/quickjs"),
       rootDir.resolve("cxx/build"),
     )
 }

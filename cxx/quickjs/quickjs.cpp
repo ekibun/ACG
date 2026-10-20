@@ -430,7 +430,13 @@ Java_soko_ekibun_quickjs_QuickJS_jsIsError(JNIEnv*, jclass, jlong ctx,
 extern "C" JNIEXPORT jboolean JNICALL
 Java_soko_ekibun_quickjs_QuickJS_jsIsPromise(JNIEnv*, jclass, jlong ctx,
                                              jlong obj) {
-  return JS_IsPromise((JSContext*)ctx, *(JSValue*)obj);
+  // 上游没有 JS_IsPromise；JS_PromiseState 对非 Promise 返回 -1
+  // （内部 JS_GetOpaque(obj, JS_CLASS_PROMISE) 为空）。
+  // 接进 int 再比：JSPromiseStateEnum 没钉底层类型，-1 不在其枚举常量集内，
+  // 直接与 -1 比较 Clang 会报 always-true 的越界比较警告；
+  // 上游自己也是先取 int。
+  int state = JS_PromiseState((JSContext*)ctx, *(JSValue*)obj);
+  return state != -1;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

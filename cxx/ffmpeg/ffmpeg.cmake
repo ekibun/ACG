@@ -17,6 +17,7 @@ set(FFMPEG_CONFIGURE_COMMAND
         # configure 默认带 -g,~90MB 的 DWARF 调试信息会随静态库进最终的 ffmpeg 动态库;
         # 需要单步跟 ffmpeg C 源码时临时去掉这行重编。
         --disable-debug
+        --prefix=${CMAKE_CURRENT_BINARY_DIR}
         )
 if (${CMAKE_HOST_SYSTEM_NAME} MATCHES "Windows")
     set(BASH_EXEC ${CMAKE_CURRENT_LIST_DIR}/../exec)
@@ -54,14 +55,19 @@ else ()
 endif ()
 
 include(ExternalProject)
+
+# 源码树（submodule）保持上游原样，本地改动只存在于 patches/：configure.sh 跑完 configure 后
+# 把 hls.c 的副本放进构建目录、用 hls.sed 改它，并把 hls.o 重定向到副本。sed 匹配不到不报错，
+# 脚本里用守卫计数兜底，上游改了锚点就构建失败。
 ExternalProject_Add(
         ffmpeg_lib
         PREFIX "ffmpeg_lib"
         SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/ffmpeg"
         BINARY_DIR "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
         INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}"
-        CONFIGURE_COMMAND ${BASH_EXEC} ${FFMPEG_CONFIGURE_COMMAND}
-            --prefix=${CMAKE_CURRENT_BINARY_DIR}
+        CONFIGURE_COMMAND
+            ${BASH_EXEC} bash "${CMAKE_CURRENT_LIST_DIR}/patches/configure.sh"
+            ${FFMPEG_CONFIGURE_COMMAND}
         BUILD_COMMAND ${BASH_EXEC} make -j8
         INSTALL_COMMAND ${BASH_EXEC} make install
 )
