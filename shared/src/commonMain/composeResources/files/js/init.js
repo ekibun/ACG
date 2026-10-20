@@ -253,16 +253,16 @@ async (_binding) => {
     /**
      * 扁平的字符串设置，落盘在平台的设置文件里。
      *
-     *   await settings.get("bgm.client_id");     // 没有该键则 null
-     *   await settings.set("bgm.client_id", "…"); // 写（键与值都在这里折成字符串）
-     *   await settings.set("bgm.session", null);  // 值为 null 即删键
+     *   await Settings.get("bgm.client_id");     // 没有该键则 null
+     *   await Settings.set("bgm.client_id", "…"); // 写
+     *   await Settings.set("bgm.session", null);  // 值为 null 即删键
      *
-     * 两个都是**异步**的（走能力桥，返回 Promise）：读必须 await 才拿得到值；
-     * **写也必须 await** —— 不 await 的话下一句读与它并发，谁先落盘不确定。
+     * 不做类型转换：非字符串由宿主的类型收窄拒绝该 Promise。
+     * 两个都是异步的，**写也必须 await** —— 否则下一句读与它并发，谁先落盘不确定。
      */
-    settings: {
-      get: (key) => _binding("settings.get", ["" + key]),
-      set: (key, value) => _binding("settings.set", ["" + key, value == null ? null : "" + value])
+    Settings: {
+      get: (key) => _binding("Settings.get", [key]),
+      set: (key, value) => _binding("Settings.set", [key, value])
     },
     encodeURI: (uri, encoding) => {
       const encoder = new _TextEncoder(encoding || "utf-8");

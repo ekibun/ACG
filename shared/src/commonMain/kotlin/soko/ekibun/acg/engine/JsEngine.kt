@@ -157,15 +157,15 @@ class JsEngine {
                     }
 
                   // 设置的读：交回 `Deferred<String?>`，没有该键就是 null。
-                  "settings.get" ->
+                  "Settings.get" ->
                     CoroutineScope(Dispatchers.IO).async {
-                      settingsStore.read()[settingsKey(args)]
+                      settingsStore.get(args[0] as String)
                     }
 
-                  // 设置的写：值为 null 即删该键（`SettingsStore` 的契约）。
-                  "settings.set" ->
+                  // 设置的写：值为 null 即删该键。
+                  "Settings.set" ->
                     CoroutineScope(Dispatchers.IO).async {
-                      settingsStore.write(mapOf(settingsKey(args) to settingsValue(args)))
+                      settingsStore.set(args[0] as String, args[1] as String?)
                     }
 
                   else -> throw JSError("unknown method '${argv[0]}'")
@@ -236,24 +236,6 @@ class JsEngine {
     data: List<Any?>,
   ) {
     println("$type\n$data")
-  }
-
-  /**
-   * `settings.*` 的键。形状由 `init.js` 保证（那边 `"" + key` 已经折过一次字符串），
-   * 这里仍旧逐项判：桥把 JS 实参一律交成 `Any?`，落在 `String` 上才有下文。
-   */
-  private fun settingsKey(args: List<*>): String {
-    val key = args.getOrNull(0)
-    if (key !is String) throw JSError("settings key must be a string")
-    return key
-  }
-
-  /** `settings.*` 的值：字符串，或 `null`（删键）。 */
-  private fun settingsValue(args: List<*>): String? {
-    val value = args.getOrNull(1)
-    if (value == null) return null
-    if (value !is String) throw JSError("settings value must be a string or null")
-    return value
   }
 
   /**

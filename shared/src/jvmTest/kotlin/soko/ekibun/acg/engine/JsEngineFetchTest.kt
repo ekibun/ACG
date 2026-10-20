@@ -3,10 +3,12 @@ package soko.ekibun.acg.engine
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.runBlocking
+import soko.ekibun.acg.TestPaths
 import java.net.InetSocketAddress
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -20,6 +22,11 @@ import kotlin.test.assertNotNull
  * 一律按 GET 发出去"这种失效正好落在断言之外，测不出来。
  */
 class JsEngineFetchTest {
+  @BeforeTest
+  fun initPaths() {
+    TestPaths.ensureInitialized()
+  }
+
   private class Recorded(
     val method: String,
     val contentType: String?,

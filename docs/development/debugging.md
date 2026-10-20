@@ -92,9 +92,8 @@ close2 -> null          ← 隔了 5s ⇒ 这次超时了，问题在第二条
 
 Chromium 自己的日志才是引擎级问题唯一说得清的东西：设
 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--enable-logging --v=1`（必须在创建 environment 之前），
-日志落在 user data folder 的 `EBWebView/chrome_debug.log`。
-想试别的浏览器参数用真 JVM 宿主，`jvmTest` 认 `WEBVIEW2_ARGS`（**只对 jvmTest 生效**，
-`:desktopApp:run` 不吃它），别用临时探针。
+日志落在 user data folder（`Paths.dataDir/webview2`）的 `EBWebView/chrome_debug.log`。
+想试别的浏览器参数就改 `Webview2Context.BROWSER_ARGUMENTS` 重编宿主 —— `jvmTest` 没有参数开关。
 
 **快速信号**：WebView2 起来了 → stdout 出现 `Failed to unregister class Chrome_WidgetWin_0`。
 

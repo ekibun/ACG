@@ -20,6 +20,8 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 internal fun webviewHostHealth(): String? =
   runBlocking {
+    // `Webview2Context` 的伴生初始化要从 `Paths` 取 user data folder：先补注入。
+    TestPaths.ensureInitialized()
     val ctx =
       runCatching { Webview2Context() }.getOrElse { return@runBlocking "宿主起不来：${it.message ?: it}" }
     try {

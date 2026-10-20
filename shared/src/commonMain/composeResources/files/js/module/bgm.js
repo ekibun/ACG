@@ -4,7 +4,7 @@
 // 的 `BgmSource` —— 拼串在 JS 侧没有编译期检查，而这一侧剩下的活（URL、表单、Bearer 头）
 // 本来就全是字符串。
 //
-// 能用的全局只有 init.js 定义的那几个：fetch / settings / openBrowser / FormData / console。
+// 能用的全局只有 init.js 定义的那几个：fetch / Settings / openBrowser / FormData / console。
 // 动态 `import()` 也通（宿主每次调用现 import 一次本模块）。
 //
 // 键空间的归属见 docs/design/bgm-plugin.md：**宿主只写凭据，插件只写登录态**。
@@ -52,7 +52,7 @@ export function parseCallback(callbackUrl) {
  * 存档坏了也当没登录：让用户重登一次，好过揣着半个对象去请求。
  */
 export async function session() {
-  const raw = await settings.get(SESSION_KEY);
+  const raw = await Settings.get(SESSION_KEY);
   if (!raw) return null;
   try {
     return JSON.parse(raw);
@@ -63,7 +63,7 @@ export async function session() {
 
 /** 退出登录：只清登录态，凭据留着（下次登录还用得上）。 */
 export async function logout() {
-  await settings.set(SESSION_KEY, null);
+  await Settings.set(SESSION_KEY, null);
 }
 
 async function requestToken(fields) {
@@ -90,8 +90,8 @@ async function requestToken(fields) {
  * 别人本来也够不着这次回调；这里是别让**手边的**页面把回调打进来。
  */
 export async function login() {
-  const clientId = await settings.get(CLIENT_ID_KEY);
-  const clientSecret = await settings.get(CLIENT_SECRET_KEY);
+  const clientId = await Settings.get(CLIENT_ID_KEY);
+  const clientSecret = await Settings.get(CLIENT_SECRET_KEY);
   if (!clientId || !clientSecret) {
     throw new Error("bangumi client_id / client_secret are not set; fill them in the collect tab first");
   }
@@ -118,7 +118,7 @@ export async function login() {
     // 必须与授权请求里那个 redirect_uri 逐字相同 —— 就是回调地址去掉查询串。
     redirect_uri: callbackUrl.split("?")[0]
   });
-  await settings.set(SESSION_KEY, JSON.stringify(token));
+  await Settings.set(SESSION_KEY, JSON.stringify(token));
   return token;
 }
 

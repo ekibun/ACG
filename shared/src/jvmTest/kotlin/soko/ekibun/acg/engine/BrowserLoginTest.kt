@@ -3,10 +3,12 @@ package soko.ekibun.acg.engine
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import soko.ekibun.acg.TestPaths
 import soko.ekibun.quickjs.JSError
 import java.net.Socket
 import java.net.URI
 import java.net.URLDecoder
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -22,6 +24,11 @@ import kotlin.test.assertTrue
  * JS 那一侧的真派发归 [JsEngineDispatchTest]：那边只能走到模板校验那一支（同样因为不能真开浏览器）。
  */
 class BrowserLoginTest {
+  @BeforeTest
+  fun initPaths() {
+    TestPaths.ensureInitialized()
+  }
+
   @Test
   fun substitutesEncodedCallbackAndReturnsRawCallbackUrl() =
     runBlocking {

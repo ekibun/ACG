@@ -1,8 +1,10 @@
 package soko.ekibun.acg.source
 
 import kotlinx.coroutines.runBlocking
+import soko.ekibun.acg.TestPaths
 import soko.ekibun.acg.engine.JsEngine
 import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -16,6 +18,11 @@ import kotlin.test.assertTrue
  * 最容易被写错的那条。夹具内容照 `GET /v0/users/{u}/collections` 的实测应答剪裁。
  */
 class BgmSourceMappingTest {
+  @BeforeTest
+  fun initPaths() {
+    TestPaths.ensureInitialized()
+  }
+
   @Test
   fun mapsCollectionPage() {
     val page = bgmCollectionPageOf(evalFixture(COLLECTIONS_FIXTURE))

@@ -58,6 +58,7 @@ class WebViewCookieManagerTest {
 
   @BeforeTest
   fun startServer() {
+    TestPaths.ensureInitialized()
     serverPool = Executors.newFixedThreadPool(2)
     server =
       HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {

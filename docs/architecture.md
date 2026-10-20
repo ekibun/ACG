@@ -104,7 +104,7 @@ Gradle 四个模块，外加一个不进 Gradle 工程的原生层目录（规�
 另有两组**平台原语**（不进任何继承树、没有 native 面）：`soko.ekibun.browser` 一族是外部浏览器
 登录的回调会话与「用系统默认浏览器打开」，只被脚本插件链的 `openBrowser` 能力用到，形态依据见
 [design/browser-login.md](./design/browser-login.md)；`soko.ekibun.common.Settings` 是扁平的
-字符串设置表（DataStore Preferences），只被 `settings` 能力用到。两者都**不开在自己的抽象层上**：
+字符串设置表（DataStore Preferences），只被 `Settings` 能力用到。两者都**不开在自己的抽象层上**：
 `Settings` 的契约面（`SettingsStore`）不暴露 okio 类型 —— DataStore 的 `createWithPath` 只吃
 okio `Path`，那个 `Path` 只出现在 `:platform` 内部的建表函数与懒初始化里，`:shared` 与界面
 见不到。
@@ -139,8 +139,13 @@ okio `Path`，那个 `Path` 只出现在 `:platform` 内部的建表函数与懒
 | `expect openResponse(options)`（`soko.ekibun.common`） | `jvmShared` 的 OkHttp 实现 —— **两端共用一份** | 同左（`jvmShared`） |
 | `expect createCallbackSession()`（`soko.ekibun.browser`） | `jvmShared` 的回环服务器 —— **两端共用一份** | 同左（`jvmShared`） |
 | `expect launchExternalBrowser(url)` | `java.awt.Desktop` | Chrome Custom Tabs |
-| `expect settingsFilePath()`（`soko.ekibun.common`） | `acg.dataDir` 系统属性，缺省 `~/.acg` | 进程 Context 的 `filesDir` |
+| `expect createDataStore(path)`（`soko.ekibun.common`） | `jvmShared` 的 DataStore —— **两端共用一份** | 同左（`jvmShared`） |
 | `interface FileHandle` | `jvmShared` 的 `RandomAccessFileHandle` | 同左（`jvmShared`） |
+
+数据目录不在上面这张表里：`soko.ekibun.common.Paths` 是 `commonMain` 的普通 `object`，
+由**入口层**在首次使用前 `init` 一次；平台层只读它（`Settings` 取 `dataDir` 下的
+`settings.preferences_pb`，`Webview2Context` 取 `dataDir/webview2`），不自己猜目录。
+测试各自注入临时目录。
 
 ### QuickJS 族（`soko.ekibun.quickjs` + `soko.ekibun.web`）
 
@@ -307,7 +312,7 @@ flowchart LR
 
 数据源插件的执行环境。`init.js` 从 Compose 资源里读出来（`files/js/init.js`），在 QuickJS 里求值
 一次，往 JS 全局注入 `fetch` / `Response` / `Request` / `FormData` / `TextEncoder` / `TextDecoder` /
-`Cookies` / `console` / `webview` / `openBrowser` / `settings` / `encodeURI…`；
+`Cookies` / `console` / `webview` / `openBrowser` / `Settings` / `encodeURI…`；
 **执行期间注入的那一份 `_binding` 就是全部能力**，Kotlin 侧用一个 `when` 直接派发到各能力
 （不按名字反射查找 —— 判据见 [design/quickjs-ability-bridge.md](./design/quickjs-ability-bridge.md)）。
 
@@ -344,8 +349,8 @@ sequenceDiagram
 ```
 
 后台 WebView 与用户看的那一页是**同一个 `WebviewContext` 类型**，差别只在 `isHeadless` 与调用方
-怎么用；两端的可见页与后台页共用同一份 cookie 存储（桌面共用一个 user data folder，Android 共用
-系统 `CookieManager`）。契约层的裁定见
+怎么用；两端的可见页与后台页共用同一份 cookie 存储（桌面共用一个 user data folder —— 位置由
+`Paths.dataDir/webview2` 决定，与设置文件同根；Android 共用系统 `CookieManager`）。契约层的裁定见
 [design/webview-context-redesign.md](./design/webview-context-redesign.md)。
 
 **登录走的是外部浏览器，不是上面这个 WebView**（`openBrowser`）：插件给一个带 `{{callback}}`

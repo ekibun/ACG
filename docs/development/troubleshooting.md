@@ -12,7 +12,7 @@
 | 插件登录收不到回调（`openBrowser` 一直不返回）、回调地址回 404、换 token 报 `redirect_uri` 不一致 | [`browser-login.md`](../design/browser-login.md) 第一、三节 |
 | 收藏页登不上 / 列表不动 / 插件报 `not logged in`，或 v0 接口回 403 `Please set a 'User-Agent'` | [`bgm-plugin.md`](../design/bgm-plugin.md) 第三、四节 |
 | `import("…")` 报 `could not load module`、`callPlugin` 报模块没有那个导出 | [`quickjs-ability-bridge.md`](../design/quickjs-ability-bridge.md) 第四节 |
-| `settings.get` 读回 null、写进去的值下次读不到 | [`bgm-plugin.md`](../design/bgm-plugin.md) 第二节（键空间归属；写必须 await） |
+| `Settings.get` 读回 null、写进去的值下次读不到 | [`bgm-plugin.md`](../design/bgm-plugin.md) 第二节（键空间归属；写必须 await） |
 
 几条 Read 顺序建议：
 

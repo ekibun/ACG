@@ -2,8 +2,10 @@ package soko.ekibun.acg.engine
 
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.runBlocking
+import soko.ekibun.acg.TestPaths
 import soko.ekibun.quickjs.JSError
 import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -21,6 +23,11 @@ import kotlin.test.assertTrue
  * 三步都过 ⇒ 引擎可以走 `import()` 加载插件；任一步 abort ⇒ 先修模块加载链路。
  */
 class ModuleImportProbeTest {
+  @BeforeTest
+  fun initPaths() {
+    TestPaths.ensureInitialized()
+  }
+
   /** 模块存在时：`import()` 求值出的命名空间要能读到 `export default`。 */
   @Test
   fun importsExistingBundledModule() {

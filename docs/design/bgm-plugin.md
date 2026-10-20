@@ -23,7 +23,7 @@
 
 ## 二、键空间的归属
 
-设置是一张扁平的 `String → String` 表（[能力桥](./quickjs-ability-bridge.md) 的 `settings`）。
+设置是一张扁平的 `String → String` 表（[能力桥](./quickjs-ability-bridge.md) 的 `Settings`）。
 三个键：
 
 | 键 | 谁写 | 谁读 |
@@ -116,10 +116,10 @@
 | --- | --- |
 | 模块 `import()` 与 `callPlugin` 的通路（真 `bgm.js`，不打网络） | `shared/src/jvmTest/.../engine/PluginHostTest.kt` |
 | 应答 → 强类型（含整数/浮点标签、缺字段、条目缺 `subject`） | `shared/src/jvmTest/.../source/BgmSourceMappingTest.kt` |
-| `settings` 能力的真派发（写/读/删/非字符串值） | `shared/src/jvmTest/.../engine/SettingsAbilityTest.kt` |
+| `Settings` 能力的真派发（写/读/删/非字符串值） | `shared/src/jvmTest/.../engine/SettingsAbilityTest.kt` |
 | 设置落盘本身（DataStore、父目录、删除） | `platform/src/jvmTest/.../common/SettingsStoreTest.kt` |
 | `Http` 真的把方法、Content-Type、body 发对（换 token 那条路的前提） | `shared/src/jvmTest/.../engine/JsEngineFetchTest.kt` |
 
 **没有**自动覆盖的：真跑一遍 OAuth（要人在浏览器里点）、收藏页的界面。前者只能人工走一遍；
-后者的验证方式是在桌面端起应用、切到「收藏」页签（`CollectionScreen` 的 `load()` 会落到
-`settingsStore`，所以 `~/.acg/settings.preferences_pb` 出现即是「组合 + 设置链路通」的证据）。
+后者的验证方式是桌面端起应用、切到「收藏」页签（`CollectionScreen` 的 `load()` 会落到
+`settingsStore`，出现 `%APPDATA%\ekibun\ACG\settings.preferences_pb` 即「组合 + 设置链路通」）。

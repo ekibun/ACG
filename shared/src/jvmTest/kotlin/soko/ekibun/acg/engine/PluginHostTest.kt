@@ -1,9 +1,11 @@
 package soko.ekibun.acg.engine
 
 import kotlinx.coroutines.runBlocking
+import soko.ekibun.acg.TestPaths
 import soko.ekibun.common.settingsStore
 import soko.ekibun.quickjs.JSError
 import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -23,6 +25,11 @@ class PluginHostTest {
    * 宿主写得进去、插件读得出来。宿主只写凭据、插件只写登录态，所以会话键在 Kotlin 侧没有常量。
    */
   private val sessionKey = "bgm.session"
+
+  @BeforeTest
+  fun initPaths() {
+    TestPaths.ensureInitialized()
+  }
 
   @Test
   fun callsExportedFunctionAndUnwrapsItsPromise() {

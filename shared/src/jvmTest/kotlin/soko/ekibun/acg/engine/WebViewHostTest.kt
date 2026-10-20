@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import soko.ekibun.acg.TestPaths
 import java.net.InetSocketAddress
 import java.util.Base64
 import java.util.Collections
@@ -75,6 +76,8 @@ class WebViewHostTest {
 
   @BeforeTest
   fun startServer() {
+    // WebView2 的 user data folder 由 `Paths` 决定：后台任务建上下文之前必须注入。
+    TestPaths.ensureInitialized()
     serverPool = Executors.newFixedThreadPool(4)
     server =
       HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {

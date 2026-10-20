@@ -88,9 +88,8 @@ WebView2 支持两种方式，且会**合并**：环境变量 / 注册表的值�
 - **DO**：优先走 options 接口。本工程的 `webview.cpp` 因 MinGW/g++ 缺 WRL `implements.h`，手写了一个零 WRL 依赖的 `ICoreWebView2EnvironmentOptions`，参数由 JVM 侧当构造参数给入。
 - **DO**：提权宿主以高 IL 运行时，WebView2 **忽略** `WEBVIEW2_*` 环境变量（含
   `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`），但**认**通过 API 设的 flags（Microsoft Learn《Develop secure WebView2 apps》）——这正是不走环境变量更稳的一条理由。
-- **DO**：测试期换参数不重编，在 Gradle 里用 `providers.environmentVariable("WEBVIEW2_ARGS")`
-  追加到 `Test` 任务的 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 上（见 `platform/build.gradle.kts`）。
-  注意这个变量**只对 jvmTest 生效**，`:desktopApp:run` 不吃它。
+- **DO**：测试期换参数要改 `Webview2Context.BROWSER_ARGUMENTS` 再重编；`jvmTest` **没有**参数
+  注入开关（早先文档提过的 `WEBVIEW2_ARGS` 从未实现过，已删）。
 
 ---
 
@@ -150,7 +149,7 @@ WebView2 支持两种方式，且会**合并**：环境变量 / 注册表的值�
 
 **fix（DO/DON'T）**：
 - **DON'T**：退到 `java.io.tmpdir` / `%TEMP%` —— 在 MSYS2 / Gradle 下那可能是一次性路径（MSYS2 自己的临时目录）。
-- **DO**：按 `LOCALAPPDATA` → `user.home/AppData/Local` → `user.home` 逐级找，并 `mkdirs()`。所有视图必须用**同一个**目录 —— 共享 cookie 全靠它。
+- **DO**：只认 `Paths.dataDir + "/webview2"`（入口层注入，桌面即 `%APPDATA%\ekibun\ACG\webview2`，与设置文件同根）。所有视图必须用**同一个**目录 —— 共享 cookie 全靠它。
 
 ---
 

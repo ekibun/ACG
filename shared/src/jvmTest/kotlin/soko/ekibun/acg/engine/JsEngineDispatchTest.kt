@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import soko.ekibun.acg.TestPaths
 import java.net.InetSocketAddress
 import java.util.Base64
 import java.util.Collections
@@ -62,6 +63,7 @@ class JsEngineDispatchTest {
 
   @BeforeTest
   fun startServer() {
+    TestPaths.ensureInitialized()
     pageRequests.clear()
     serverPool = Executors.newFixedThreadPool(4)
     server =

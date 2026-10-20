@@ -44,6 +44,7 @@ class Webview2Test {
 
   @BeforeTest
   fun startServer() {
+    TestPaths.ensureInitialized()
     serverPool = Executors.newFixedThreadPool(4)
     server =
       HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
