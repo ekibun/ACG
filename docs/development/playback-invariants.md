@@ -188,7 +188,7 @@ body 是一条按需读的流（`Response.body.byteStream()`），读到哪下�
 ⇒ **整包缓冲是这层最容易退回去的形态**：它会表现成远程播放迟迟不出画面（等整包下完）、
 内存随文件大小走、无任何报错。判据是
 `HttpStreamingTest.firstReadReturnsLongBeforeTheWholeBodyArrives`（第一次读的耗时 < 整包下发时长的一半），
-以及 `HttpBodyDownloadTimingProbeTest`（不读时本地存量为 0、读全程峰值也不超过一个 avio 缓冲）。
+以及 `HttpBodyDownloadTimingProbeTest`（读全程峰值不超过一个 avio 缓冲）。
 
 ⇒ 同一入口两种读法要分流：流式边下边用走 `Response.read`（内部等数据到再读一段），
 一次性拿完走 `Response.readAll`（读完即 `close`，插件 JS 的 `Response.arrayBuffer()` 走这条，
@@ -372,10 +372,12 @@ FFPlayer 每次 seek / 单帧步进都会 `abort`，而那种时刻通常没有�
 `Http.Response.availableForRead` 量的是「已经从网络上取到本地、ffmpeg 还没拿到」的那部分
 （拉取式下就是 okio 缓冲里的字节；判据级用例
 `HttpReadContractTest.forwardSeekWithinBufferedRangeKeepsSessionButFarSeekDoesNot`，探针
-`HttpBodyDownloadTimingProbeTest`）。下面三条每一条都能让上层判断错：
+`HttpBodyDownloadTimingProbeTest.localBufferedAmountStaysFarBelowTheBodyWhileStreaming`）。
+下面三条每一条都能让上层判断错：
 
 1. **它是 0 就是「网络真的还没被读」**，不是「本对象还没拿到流引用」那类假 0。拉取式不预读：
-   一次 `read` 都没调之前本地一个字节都没有（实测：空等 500 ms 后仍是 0）。
+   一次 `read` 都没调之前本地一个字节都没有（实测：空等 500 ms 后仍是 0 —— 这条**固化在实现里**，
+   不再单独跑用例：`HttpStreamingTest` 首读拿到的是「刚到的那一块」而非整包，已经是更强的判据）。
 2. **空等不会让它涨。** 要它变大只能靠读，而读会同时推进 `Response.offset`。
 3. **上限极小**（okio 一次搬运一个 8 KiB 段；实测读满 2 MiB 全程峰值 ≤ 32 KiB）⇒ §5.5 那条判据里的
    扣减项事实上恒为 0，判据退化成「超过网络游标一个 avio 缓冲就换会话」。这不是缺陷：预读一小，

@@ -206,7 +206,7 @@ class PointerTest {
           released++
         }
       }
-    shared.close() // 别家把共享的这条关了
+    shared.close() // someone else closes the shared one
     assertFailsWith<IllegalStateException> { probe.close() }
     assertEquals(0, released, "release block never ran; a missed release must be loud")
   }
@@ -286,7 +286,7 @@ class PointerTest {
   fun borrowedPointerDoesNotJoinPointerFamily() {
     assertFalse(
       AutoCloseable::class.java.isAssignableFrom(AvStream::class.java),
-      "借用型的 AvStream 不该继承 Pointer（即 AutoCloseable）",
+      "a borrowed AvStream must not inherit Pointer (i.e. AutoCloseable)",
     )
   }
 
@@ -305,7 +305,7 @@ class PointerTest {
       // 从别的线程裸读：断言当场炸（零投递 —— 拦截发生在读之前，不是靠投递去拦）
       val base = counting.dispatches
       assertFailsWith<AssertionError> { probe.ptr }
-      assertEquals(0, counting.dispatches - base, "断言拦截本身不该投递")
+      assertEquals(0, counting.dispatches - base, "the assertion guard itself must not dispatch")
 
       // 已经在归属 dispatcher 上：裸读就地返回、零投递
       val (value, extra) =
@@ -317,20 +317,6 @@ class PointerTest {
         }
       assertEquals(0x1234L, value)
       assertEquals(0, extra)
-    }
-
-  @Test
-  fun withPtrDispatchesToOwnerAndHandsOverHandle() =
-    withCountingOwner { counting ->
-      val probe = runBlocking(counting) { Probe(0x1234L, counting) }
-
-      // 从别的上下文调用：块要被搬到归属 dispatcher 上，句柄当参数交到手里
-      val base = counting.dispatches
-      val (handle, ranOn) = runBlocking { probe.withPtr { it to Thread.currentThread() } }
-
-      assertEquals(0x1234L, handle)
-      assertEquals(counting.thread, ranOn)
-      assertEquals(1, counting.dispatches - base, "a cross-context call must dispatch exactly once")
     }
 
   @Test
@@ -392,16 +378,20 @@ class PointerTest {
    * [Pointer.withPtrSync]：同步版 [Pointer.withPtr]，判据是 `isOnCurrentThread`
    * （[Pointer.withPtr] 现在也用同一个判据 —— 见类文档「归属 dispatcher + 归属线程」）。
    *
-   * 两句都要成立：从别的线程调要投递到归属线程上跑；已经在归属线程上就**就地执行**。
+   * 三句都要成立：从别的线程调要**恰好投递一次**、句柄当参数交到手里、并在归属线程上跑；
+   * 已经在归属线程上就**就地执行**。挂起门 [Pointer.withPtr] 的那三句由它一并覆盖 ——
+   * `withPtr` 在归属线程上的短路分支另有 [withPtrDoesNotRedispatchOnOwner] 盯着。
    */
   @Test
   fun withPtrSyncDispatchesToOwnerThread() =
     withCountingOwner { counting ->
       val probe = runBlocking(counting) { Probe(0x5151L, counting) }
 
+      val base = counting.dispatches
       val (handle, ranOn) = probe.withPtrSync { it to Thread.currentThread() }
       assertEquals(0x5151L, handle)
       assertEquals(counting.thread, ranOn)
+      assertEquals(1, counting.dispatches - base, "a cross-thread call must dispatch exactly once")
 
       val (inner, extra) =
         runBlocking {
@@ -502,12 +492,12 @@ class PointerTest {
   }
 
   /**
-   * [Pointer.initPtr] 的**求值线程**：首次读句柄那一下被搬到归属线程上，所以覆写体
-   * （`QuickJS` 里就是 `initContext`，含 `JS_NewRuntime` / `JS_SetMaxStackSize` 记下的
-   * `stack_top` 基准）一定跑在归属线程上 —— 挂起门与同步门两条路都钉。
+   * [Pointer.initPtr] 的**求值线程与次数**：首次读句柄那一下被搬到归属线程上，且只算一次，
+   * 所以覆写体（`QuickJS` 里就是 `initContext`，含 `JS_NewRuntime` / `JS_SetMaxStackSize` 记下的
+   * `stack_top` 基准）一定跑在归属线程上、且不会多建一个 runtime —— 挂起门与同步门两条路都钉。
    *
-   * 这条性质**不是 `by lazy` 给的**：惰性只管「首次读才求值、只算一次」，线程归属是
-   * 另外几条凑出来的 —— [Pointer.withPtr] 把 `ptr` 读在 `withContext(d) { … }` 的**块内**、
+   * 线程归属**不是 `by lazy` 给的**：惰性只管「首次读才求值、只算一次」，归属是另外几条凑出来的
+   * —— [Pointer.withPtr] 把 `ptr` 读在 `withContext(d) { … }` 的**块内**、
    * [Pointer.withPtrSync] 读在 `runBlocking(d) { … }` 的**块内**。改动任一条，本用例先红。
    */
   @Test
@@ -523,35 +513,18 @@ class PointerTest {
         "this case only makes sense when the owner thread differs from the caller",
       )
       assertTrue(viaSuspend.initPtrThread === owner, "initPtr must run on the owner thread")
-      assertEquals(1, viaSuspend.initPtrCalls)
+      // 「只算一次」也在这里：多调一次的后果是多建一个 runtime（QuickJS 的覆写体就是 initContext），
+      // 前一个既没句柄、也没人销毁。再读一次句柄，计数不能涨。
+      assertEquals(2560L, runBlocking { viaSuspend.withPtr { it } })
+      assertEquals(1, viaSuspend.initPtrCalls, "initPtr must be evaluated exactly once")
 
       // 同步门同理（JNI 回调链走的那条）
       val viaSync = runBlocking(counting) { ComputedHandle(7L, counting) }
       assertEquals(70L, viaSync.withPtrSync { it })
+      assertEquals(70L, viaSync.withPtrSync { it })
       assertTrue(viaSync.initPtrThread === owner, "sync gate must also land on the owner thread")
+      assertEquals(1, viaSync.initPtrCalls, "sync gate must evaluate initPtr exactly once")
     }
-
-  /**
-   * [Pointer.initPtr] **只被调一次** —— 基类把结果记在 [Pointer.ptr] 里（`by lazy`）。
-   *
-   * 对 `QuickJS` 这是硬要求：它的覆写体就是 `initContext`，多调一次就是多建一个 runtime
-   * （前一个既没有句柄、也没人销毁）。
-   */
-  @Test
-  fun initPtrIsCalledOnce() {
-    var calls = 0
-    val probe =
-      object : Pointer() {
-        override fun initPtr(): Long {
-          calls++
-          return 0xC0FFEEL
-        }
-
-        override suspend fun releaseImpl(ptr: Long) = Unit
-      }
-    repeat(3) { assertEquals(0xC0FFEEL, probe.withPtrSync { it }) }
-    assertEquals(1, calls)
-  }
 
   /**
    * 覆写路径返回 `0` = **建句柄失败**，基类当场 `check` 出来。`0` 不是合法的 native

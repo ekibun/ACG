@@ -21,7 +21,7 @@ object Http {
    * 闲置超时用尽：`HttpIO.read` 把它当普通故障（打印栈 + 返回 -1），与「作废」区分开 ——
    * 作废是调用方要求的、静默；这个是服务端真死了。
    */
-  class IdleTimeoutException : RuntimeException("HTTP idle timeout: 服务端 ${SOCKET_TIMEOUT_MS}ms 未出字节")
+  class IdleTimeoutException : RuntimeException("HTTP idle timeout: no bytes for ${SOCKET_TIMEOUT_MS}ms")
 
   /**
    * 一条**活着的**流式响应（= 一条连接）。

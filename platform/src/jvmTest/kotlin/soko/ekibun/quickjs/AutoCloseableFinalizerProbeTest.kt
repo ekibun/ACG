@@ -3,7 +3,7 @@ package soko.ekibun.quickjs
 import kotlinx.coroutines.runBlocking
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
-import kotlin.test.assertTrue
+import kotlin.test.assertEquals
 
 /**
  * 探针：JS 侧丢掉一个 [AutoCloseable] 之后，宿主侧能不能收到 `close()`。
@@ -50,6 +50,9 @@ import kotlin.test.assertTrue
  * **别删分支**：会造成死代码、编译失败，于是验证根本没发生）后，
  * `gcCollectedAutoCloseableCallsCloseOnce` 报「实际 0 次」变红，
  * `finalizerLeavesNonAutoCloseableAlone` 仍绿。
+ *
+ * 探针自己也要干净：`identity()` 返回的 `JSFunction` 必须显式归还，否则关 runtime 时
+ * `collectLeaks` 会把它列进泄漏报告 —— 那份报告是别的用例的判据，不能在这里制造噪音。
  */
 class AutoCloseableFinalizerProbeTest {
   private class Counted : AutoCloseable {
@@ -60,7 +63,7 @@ class AutoCloseableFinalizerProbeTest {
     }
   }
 
-  /** 造一个身份函数；返回的 [JSFunction] 由调用方持有。 */
+  /** 造一个身份函数；返回的 [JSFunction] 由调用方持有并负责归还。 */
   private suspend fun identity(q: QuickJS): JSFunction {
     val fn = q.evaluate("(function(x) { return x; })", "<probe>")
     @Suppress("UNCHECKED_CAST")
@@ -71,13 +74,19 @@ class AutoCloseableFinalizerProbeTest {
   fun gcCollectedAutoCloseableCallsCloseOnce() {
     val counted = Counted()
     val q = QuickJS()
-    // 传一次实参 ⇒ `jsCallImpl` 的 finally 归还那一票 ⇒ 引用归零。
-    runBlocking { identity(q) }.invoke(counted)
-    // 关 runtime ⇒ 析构回调必然跑一遍（链见类 KDoc）。
-    q.close()
-    assertTrue(
-      counted.closes.get() >= 1,
-      "runtime 销毁时 finalizer 应替 JS 调 close，实际 ${counted.closes.get()} 次",
+    runBlocking {
+      // 传一次实参 ⇒ `jsCallImpl` 的 finally 归还那一票 ⇒ 引用归零。
+      // `identity` 返回的那个 JSFunction 是**另一张票**，用完要自己还 —— 不还的话
+      // `collectLeaks` 会在关 runtime 时把它列进泄漏报告（那份报告是别的用例的判据，
+      // 不能在这里制造常驻噪音）。
+      identity(q).use { fn -> fn.invoke(counted) }
+      // 关 runtime ⇒ 析构回调必然跑一遍（链见类 KDoc）。
+      q.close()
+    }
+    assertEquals(
+      1,
+      counted.closes.get(),
+      "the finalizer should call close once for JS when the runtime is destroyed, got ${counted.closes.get()} call(s)",
     )
   }
 
@@ -87,7 +96,9 @@ class AutoCloseableFinalizerProbeTest {
     // （IsInstanceOf 为假 ⇒ 不调 close、只放引用）。没抛异常即达标。
     class Plain
     val q = QuickJS()
-    runBlocking { identity(q) }.invoke(Plain())
-    q.close()
+    runBlocking {
+      identity(q).use { fn -> fn.invoke(Plain()) }
+      q.close()
+    }
   }
 }

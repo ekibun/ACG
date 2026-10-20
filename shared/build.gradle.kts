@@ -46,6 +46,10 @@ kotlin {
     }
     jvmTest.dependencies {
       implementation(libs.kotlin.test)
+      // 健康检查的「宿主不可用」要靠 JUnit4 的 assumption 才能记成 skipped —— kotlin-test 的
+      // JUnit4 门面只带 @Ignore，println + 早退在 XML 里是 passed。版本由 Kotlin plugin 按
+      // 同一版本 pin 好了，这里引裸坐标不会引入第二个 junit。
+      implementation("junit:junit:4.13.2")
       // dev 控制条（DevStrip）的**编译期** Compose API：ComposePanel / material3 在 ui-desktop
       // 与 desktop 变体里。运行时它经子 ClassLoader（parent-first）用的是**应用自己的**
       // Compose 拷贝 —— 这份依赖只喂编译，不进任何生产打包。
@@ -64,7 +68,6 @@ tasks.named<ProcessResources>("jvmTestProcessResources") {
   }
 }
 
-// 临时调试：把 webview.cpp 的日志打开
 tasks.named<Test>("jvmTest") {
   // 进程级崩溃（native 段的访问违例之类）时，HotSpot 的现场报告默认落在**进程工作目录**，
   // 也就是本模块目录 —— 每崩一次就多一个待提交的未跟踪文件。指到 build/ 下，

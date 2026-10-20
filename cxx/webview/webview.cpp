@@ -67,12 +67,12 @@ static HWND awtHwndOf(JNIEnv* env, jobject component) {
   JAWT awt{};
   awt.version = JAWT_VERSION_1_4;
   if (!JAWT_GetAWT(env, &awt)) {
-    WV_LOG("JAWT_GetAWT 失败");
+    WV_LOG("JAWT_GetAWT failed");
     return nullptr;
   }
   JAWT_DrawingSurface* ds = awt.GetDrawingSurface(env, component);
   if (!ds) {
-    WV_LOG("GetDrawingSurface 返回 null（组件还没 displayable？）");
+    WV_LOG("GetDrawingSurface returned null (AWT peer missing)");
     return nullptr;
   }
   HWND hwnd = nullptr;
@@ -87,7 +87,7 @@ static HWND awtHwndOf(JNIEnv* env, jobject component) {
     }
     ds->Unlock(ds);
   } else {
-    WV_LOG("DrawingSurface lock 失败 (0x%08X)", static_cast<unsigned>(lock));
+    WV_LOG("DrawingSurface lock failed (0x%08X)", static_cast<unsigned>(lock));
   }
   awt.FreeDrawingSurface(ds);
   return hwnd;
@@ -818,9 +818,10 @@ class WebviewContext
     const DWORD rootTid = root ? GetWindowThreadProcessId(root, nullptr) : 0;
     if (!rootTid || rootTid == selfTid) return;  // 同线程不用接
     if (AttachThreadInput(selfTid, rootTid, TRUE)) {
-      WV_LOG("输入队列已接到 AWT 线程 (%lu -> %lu)", selfTid, rootTid);
+      WV_LOG("input queue attached to AWT thread (%lu -> %lu)", selfTid,
+             rootTid);
     } else {
-      WV_LOG("AttachThreadInput 失败 (%lu -> %lu) err=%lu", selfTid, rootTid,
+      WV_LOG("AttachThreadInput failed (%lu -> %lu) err=%lu", selfTid, rootTid,
              GetLastError());
     }
   }

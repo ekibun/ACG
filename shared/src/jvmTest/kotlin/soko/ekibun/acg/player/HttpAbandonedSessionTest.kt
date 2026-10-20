@@ -9,31 +9,6 @@ import kotlin.test.assertTrue
 
 class HttpAbandonedSessionTest {
   /**
-   * 一次**可能永久阻塞**的 [AvIO.read]，丢到**守护线程**上跑并给 `join` 带上超时。
-   *
-   * 测试不许被它吊死 —— 一次没回来的读会让整个构建挂住。超时就把线程栈打出来再失败，
-   * 站在报告里能直接看出卡在哪。
-   */
-  private fun readBounded(
-    io: AvIO,
-    size: Int,
-    timeoutMs: Long = 10_000,
-  ): Int {
-    val result = AtomicInteger(Int.MIN_VALUE)
-    val reader =
-      Thread { result.set(io.read(ByteArray(size))) }.apply {
-        isDaemon = true
-        start()
-      }
-    reader.join(timeoutMs)
-    if (reader.isAlive) {
-      println("[diag] read($size) 在 ${timeoutMs}ms 内没返回，栈：\n" + reader.stackTrace.joinToString("\n"))
-      throw AssertionError("read($size) 在 ${timeoutMs}ms 内没有返回（见 stdout 的栈）")
-    }
-    return result.get()
-  }
-
-  /**
    * 服务端**完全忽略 Range**、一路 200 从 0 重发。`getRange` 建好响应之后如果在前推途中抛出
    * （abort 正好落在前推中间），那条响应不能没人关 —— 它已经挂到 `cachedRsp` 上了，读自己的
    * `catch` 必须摘掉并关掉，否则那条连接一直吊在服务端。
@@ -54,7 +29,7 @@ class HttpAbandonedSessionTest {
       val handler = HttpIO.Handler()
       val io = handler.open(server.url)
       // 先读一次让会话存在，再把它丢掉：`cachedRsp` 变 null。
-      assertTrue(readBounded(io, 4096) > 0, "first read")
+      assertTrue(io.readBounded(4096) > 0, "first read")
       io.close()
 
       // 逻辑 offset 拉得很远；`cachedRsp` 是 null，所以下一次读必须在网络游标 0 上新建一条

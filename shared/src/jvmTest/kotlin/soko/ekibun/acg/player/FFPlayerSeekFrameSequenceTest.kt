@@ -10,7 +10,6 @@ import soko.ekibun.ffmpeg.AVMediaType
 import soko.ekibun.ffmpeg.AvCodec
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvFrame
-import soko.ekibun.ffmpeg.AvSurfaceContext
 import soko.ekibun.ffmpeg.FFPlayer
 import java.util.Collections
 import kotlin.test.Test
@@ -30,59 +29,49 @@ import kotlin.test.assertTrue
  */
 class FFPlayerSeekFrameSequenceTest {
   /**
-   * 空播放设备：不送显不送声，只把每次送显的 RGBA 整帧哈希记下来。
+   * 送显侧的观测：每次送显把整帧 RGBA 的哈希记下来。
    *
    * 顺序与 [FFPlayer.Event.Frame] 一一对应 —— 送显之后必回调一次，回调的正是刚送显那一帧。
+   * 音频不记（判据全在视频侧）。
    */
-  private class Sink : AvSurfaceContext() {
-    private val hashes = Collections.synchronizedList(ArrayList<Int>())
+  private class HashSink {
+    val hashes: MutableList<Int> = Collections.synchronizedList(ArrayList<Int>())
 
     val size: Int get() = hashes.size
 
     fun hashAt(index: Int): Int = hashes[index]
-
-    override val sampleRate: Int = 48_000
-    override val channels: Int = 2
-    override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_S16
-
-    override suspend fun flushFrameImpl(
-      codecType: Int,
-      frame: AvFrame,
-      getBuffer: () -> ByteArray?,
-    ): Long {
-      when (codecType) {
-        AVMediaType.AUDIO -> return 0
-        AVMediaType.VIDEO -> getBuffer() ?.let { hashes += fnv1a(it) }
-      }
-      return -1
-    }
-
-    override suspend fun resume() = Unit
-
-    override suspend fun pause() = Unit
-
-    override suspend fun stop() = Unit
-
-    private fun fnv1a(buf: ByteArray): Int {
-      var h = 0x811c9dc5.toInt()
-      for (b in buf) {
-        h = (h xor b.toInt()) * 0x01000193
-      }
-      return h
-    }
   }
+
+  private fun newSink(): Pair<TestSurface, HashSink> {
+    val recorded = HashSink()
+    return TestSurface(onVideo = { buf -> recorded.hashes += fnv1a(buf) }) to recorded
+  }
+
+  private fun fnv1a(buf: ByteArray): Int {
+    var h = 0x811c9dc5.toInt()
+    for (b in buf) {
+      h = (h xor b.toInt()) * 0x01000193
+    }
+    return h
+  }
+
+  /** 像素正本（帧时间戳 → 整帧哈希）。跨用例共用，见 [referencePixelsOnce]。 */
+  private val referencePixelsLock = Any()
+
+  @Volatile
+  private var referencePixelsMemo: Map<Long, Int>? = null
 
   /** 从 `frames` 里截出**本次动作新增**的那些非 null 时间戳。 */
   private fun List<Long?>.since(mark: Int): List<Long> = drop(mark).filterNotNull()
 
   private fun openPlayer(
-    sink: Sink,
+    surface: TestSurface,
     frames: MutableList<Long?>,
   ): FFPlayer =
     FFPlayer(
       TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART).toString(),
       FileIO.Handler(),
-      sink,
+      surface,
     ) { if (it is FFPlayer.Event.Frame) frames.add(it.pts) }
 
   /**
@@ -107,7 +96,7 @@ class FFPlayerSeekFrameSequenceTest {
   /** 顺序解完整条视频流，返回「帧时间戳 → 该帧 RGBA 整帧哈希」—— 像素身份的正本。 */
   private fun referencePixels(): Map<Long, Int> =
     runBlocking {
-      val sink = Sink()
+      val (sink, hashes) = newSink()
       val format =
         AvFormat(
           TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART).toString(),
@@ -123,7 +112,7 @@ class FFPlayerSeekFrameSequenceTest {
             frames.forEach { frame ->
               sink.postFrame(AVMediaType.VIDEO, frame)
               sink.flushFrame(AVMediaType.VIDEO, frame)
-              pixels[frame.timeStamp] = sink.hashAt(sink.size - 1)
+              pixels[frame.timeStamp] = hashes.hashAt(hashes.size - 1)
               frame.close()
             }
           while (true) {
@@ -142,17 +131,32 @@ class FFPlayerSeekFrameSequenceTest {
       }
     }
 
+  /**
+   * 像素正本只解一遍：它只由素材决定，同一进程里各用例拿到的是同一张表。
+   *
+   * 没有用 `by lazy`：那个委托只在首次求值时同步，**并发用例**（本类将来若开 fork 并行）
+   * 会重复解一遍；这里用显式锁把「解一次」钉死，代价只有一次分支判断。
+   */
+  private fun referencePixelsOnce(): Map<Long, Int> {
+    synchronized(referencePixelsLock) {
+      referencePixelsMemo?.let { return it }
+      val computed = referencePixels()
+      referencePixelsMemo = computed
+      return computed
+    }
+  }
+
   /** 断言每一帧送显的像素都是**这一帧自己的** —— 对不上就是「画面与时间戳不符」（花屏）。 */
   private fun assertPixelsMatch(
     shown: List<Long>,
     pixels: List<Int>,
     reference: Map<Long, Int>,
   ) {
-    assertEquals(shown.size, pixels.size, "每次送显都应当对应一个 Frame 事件")
+    assertEquals(shown.size, pixels.size, "every flush should correspond to one Frame event")
     val bad = shown.zip(pixels).filter { (ts, hash) -> reference[ts] != hash }
     assertTrue(
       bad.isEmpty(),
-      "这些帧送显的像素不属于它自己的时间戳（花屏）：${bad.map { it.first }}",
+      "these frames carry pixels from another frame's timestamp (corrupt picture): ${bad.map { it.first }}",
     )
   }
 
@@ -167,7 +171,7 @@ class FFPlayerSeekFrameSequenceTest {
   fun stepBackFromKeyframeLanding() {
     val frames: MutableList<Long?> = Collections.synchronizedList(ArrayList<Long?>())
     runBlocking {
-      val player = openPlayer(Sink(), frames)
+      val player = openPlayer(newSink().first, frames)
       try {
         playUntilFramesShown(player, frames, count = 3)
 
@@ -175,20 +179,20 @@ class FFPlayerSeekFrameSequenceTest {
         val landing = 4_000_000L
         val mark = frames.size
         player.seekTo(landing)
-        assertEquals(listOf(landing), frames.since(mark), "seek 应当落在关键帧上、且只显示那一帧")
+        assertEquals(listOf(landing), frames.since(mark), "seek should land on the keyframe and show only that frame")
 
         // 空探那一跳会先把当前帧再显示一次（画面不动），所以取这一轮**最后**显示的那帧。
         val back =
           (0 until 2).map {
             val m = frames.size
-            assertTrue(player.stepBack(), "落点在关键帧上时退帧也要成功")
+            assertTrue(player.stepBack(), "stepBack must succeed when the landing is a keyframe")
             frames.since(m).lastOrNull()
-              ?: error("stepBack 应当至少显示一帧，实际新增 ${frames.since(m)}")
+              ?: error("stepBack should show at least one frame, got ${frames.since(m)}")
           }
         assertEquals(
           listOf(landing - 40_000, landing - 80_000),
           back,
-          "退帧应当一帧一帧往回走（帧间隔 40_000µs）",
+          "stepping back should walk one frame at a time (frame interval 40_000us)",
         )
       } finally {
         player.closeAsync()
@@ -207,7 +211,7 @@ class FFPlayerSeekFrameSequenceTest {
   @Test(timeout = 180_000)
   fun stepBackFromKeyframeLandingOnColdStart() {
     val frames: MutableList<Long?> = Collections.synchronizedList(ArrayList<Long?>())
-    val sink = Sink()
+    val (sink, _) = newSink()
     runBlocking {
       val player = openPlayer(sink, frames)
       try {
@@ -217,7 +221,7 @@ class FFPlayerSeekFrameSequenceTest {
         sink.setSpeedRatio(0.01f)
         playUntilFramesShown(player, frames, count = 1)
         // 「还没量到间隔」是本用例的全部前提，当场钉住：多显示一帧就退化成上面那条用例了。
-        assertEquals(1, frames.count { it != null }, "冷启动要求只显示过一帧，实际 $frames")
+        assertEquals(1, frames.count { it != null }, "cold start requires exactly one frame shown, got $frames")
 
         val landing = 4_000_000L
         player.seekTo(landing)
@@ -226,14 +230,14 @@ class FFPlayerSeekFrameSequenceTest {
         val back =
           (0 until 2).map {
             val m = frames.size
-            assertTrue(player.stepBack(), "冷启动 + 落点在关键帧上时退帧也要成功")
+            assertTrue(player.stepBack(), "stepBack must succeed on cold start when the landing is a keyframe")
             frames.since(m).lastOrNull()
-              ?: error("stepBack 应当至少显示一帧，实际新增 ${frames.since(m)}")
+              ?: error("stepBack should show at least one frame, got ${frames.since(m)}")
           }
         assertEquals(
           listOf(landing - 40_000, landing - 80_000),
           back,
-          "退帧应当一帧一帧往回走（帧间隔 40_000µs）",
+          "stepping back should walk one frame at a time (frame interval 40_000us)",
         )
       } finally {
         player.closeAsync()
@@ -249,9 +253,9 @@ class FFPlayerSeekFrameSequenceTest {
    */
   @Test(timeout = 180_000)
   fun playAfterSeekShowsEachOwnFrame() {
-    val reference = referencePixels()
+    val reference = referencePixelsOnce()
     val frames: MutableList<Long?> = Collections.synchronizedList(ArrayList<Long?>())
-    val sink = Sink()
+    val (sink, hashes) = newSink()
     runBlocking {
       val player = openPlayer(sink, frames)
       try {
@@ -262,7 +266,7 @@ class FFPlayerSeekFrameSequenceTest {
         // 播放中跳转：上一轮的读包还在飞，新一轮就起跑。seekTo 自己会挂到这一轮结束，所以也要 launch。
         val from = 4_000_000L
         val mark = frames.size
-        val hashMark = sink.size
+        val hashMark = hashes.size
         val seekJob = launch { player.seekTo(from) }
         withTimeout(60_000) { while ((frames.lastOrNull { it != null } ?: 0L) < 6_000_000L) delay(5) }
         player.pause()
@@ -272,11 +276,11 @@ class FFPlayerSeekFrameSequenceTest {
         // 跳转前那一轮可能还漏出几帧（时间戳小于落点），两条列表一起丢掉，保持一一对应。
         val stale = frames.since(mark).takeWhile { it < from }.size
         val shown = frames.since(mark).drop(stale)
-        val pixels = (hashMark + stale until sink.size).map { sink.hashAt(it) }
+        val pixels = (hashMark + stale until hashes.size).map { hashes.hashAt(it) }
         assertEquals(
           (100..150).map { it * 40_000L },
           shown.take(51),
-          "跳转后连续播放应当一帧不落（4.0s..6.0s 正好 51 帧）",
+          "continuous playback after the seek must not drop a frame (4.0s..6.0s is exactly 51 frames)",
         )
         assertPixelsMatch(shown, pixels, reference)
       } finally {
@@ -288,9 +292,9 @@ class FFPlayerSeekFrameSequenceTest {
   /** 跳转之后连续前进一帧：每按一次只走一帧，且送显的像素属于那一帧。 */
   @Test(timeout = 180_000)
   fun stepForwardAfterSeekShowsEachOwnFrame() {
-    val reference = referencePixels()
+    val reference = referencePixelsOnce()
     val frames: MutableList<Long?> = Collections.synchronizedList(ArrayList<Long?>())
-    val sink = Sink()
+    val (sink, hashes) = newSink()
     runBlocking {
       val player = openPlayer(sink, frames)
       try {
@@ -301,17 +305,17 @@ class FFPlayerSeekFrameSequenceTest {
         val steps =
           (1..30).map {
             val mark = frames.size
-            val hashMark = sink.size
+            val hashMark = hashes.size
             player.stepForward()
             val ts =
               frames.since(mark).singleOrNull()
-                ?: error("stepForward 应当恰好显示一帧，实际新增 ${frames.since(mark)}")
-            ts to sink.hashAt(hashMark)
+                ?: error("stepForward should show exactly one frame, got ${frames.since(mark)}")
+            ts to hashes.hashAt(hashMark)
           }
         assertEquals(
           (1..30).map { from + it * 40_000L },
           steps.map { it.first },
-          "每按一次前进一帧都应当只走一帧",
+          "each stepForward must advance exactly one frame",
         )
         assertPixelsMatch(steps.map { it.first }, steps.map { it.second }, reference)
       } finally {

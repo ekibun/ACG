@@ -6,9 +6,7 @@ import soko.ekibun.TestMedia
 import soko.ekibun.TestMediaServer
 import soko.ekibun.ffmpeg.AVMediaType
 import soko.ekibun.ffmpeg.AvFormat
-import soko.ekibun.ffmpeg.AvFrame
 import soko.ekibun.ffmpeg.AvStream
-import soko.ekibun.ffmpeg.AvSurfaceContext
 import soko.ekibun.ffmpeg.FFPlayer
 import java.io.File
 import java.nio.file.Files
@@ -16,7 +14,6 @@ import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertTrue
-import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * 「播放到一半断掉」的现场：服务端**发到一半停住不关**（关掉等于告诉客户端 body 结束了，那叫
@@ -27,8 +24,7 @@ import kotlin.time.Duration.Companion.milliseconds
  * `withTimeout`。这里卡在**播到一半**（已经有帧送显了），走的正是取包循环那条路。
  *
  * 冻住之后考察的是这一串：
- * 1. 服务端不再发字节（[TestMediaServer.served] 不再涨）且**总长大于已发**（数据确实还没发完）——
- *    确认「网络真的在播放中途停了」；
+ * 1. 服务端停笔（[TestMediaServer.served] 停在断点）——确认「网络真的在播放中途停了」；
  * 2. 读作业卡在 [AvFormat.getPacket] 里那次 `getPacketNative` → [HttpIO.read] 的 `runBlocking`
  *    上（[HttpIO.readSuspend] 当前是**无限重试**），那根**单线程** `formatDispatcher`
  *    （`ThreadDispatcher`，`Executors.newSingleThreadExecutor`）正被它 park 住；
@@ -39,7 +35,7 @@ import kotlin.time.Duration.Companion.milliseconds
  *    随后**不加退避**地重试 —— 一轮就是 `withTimeout` 本身），
  *    并经 [FFPlayer.onEvent] 上报 [FFPlayer.Event.ReadTimeout]。
  *    **轮次不因此结束** —— `resumeImpl` 那里是 `continue` 而不是 `break`，网络恢复后能接着取包。
- *    `pause()` 仍能返回，但要等当前那个循环轮次走完（实测 7～108 ms，不是毫秒级）。
+ *    `pause()` 仍能返回，但要等当前那个循环轮次走完（实测 7～108 ms）。
  *
  * 读作业**自己不会收场**：[HttpIO.readSuspend] 遇闲置超时是**不限次数**地换会话接着读
  * （真到流尾由 [HttpIO.getResponseBlocking] 返回 null 收场），把「读了多久还没东西」这件事
@@ -54,8 +50,7 @@ import kotlin.time.Duration.Companion.milliseconds
  * 判据有**四条**，缺一条就漏掉一段：
  *
  * 1. **`pause()` 能不能在有限时间内返回** —— [FFPlayer.pause] 会 join 播放轮次，轮次卡在
- *    `getPacket` 上就 join 不回来。这比断言帧数更直接：帧数停了只说明缓冲耗尽，而 `pause()`
- *    返回不了才是真的挂死。
+ *    `getPacket` 上就 join 不回来。这比断言帧数更直接。
  * 2. **`closeAsync()` 能不能在有限时间内返回** —— 它比 `pause()` 多一步：既要结束读作业
  *    （`resetChannel()` → `io.abort()`），又要等 `releaseImpl` 在 `formatDispatcher` 上真的落地。
  *    少了这条断言，上面那个自锁就没人盯着（`pause()` 压根不碰 avformat，它绿着而 `closeAsync` 挂着）。
@@ -98,8 +93,9 @@ import kotlin.time.Duration.Companion.milliseconds
  * | 段 | 预算 | 依据 |
  * | --- | --- | --- |
  * | 读素材进内存 | 感知不到 | 443 KB，随源码入库 |
- * | 开流 + 等首帧 | 10 s 上限 | 本地环回 + faststart，通常 1～2 s；上限只防「压根没播起来」 |
- * | 等停滞 | 8 s 上限，**连续 1.5 s 不出新帧就提前走** | 这才是「已经卡在网络上」的判据。**不要**改成固定时长死等 |
+ * | 开流 + 等首帧 | 10 s 上限 | 本地环回 + faststart，通常 < 0.1 s；上限只防「压根没播起来」 |
+ * | 等断点发满 | 10 s 上限 | 断点由服务器累计量决定，通常 < 0.1 s |
+ * | 等取包超时事件 | 8 s 上限，**事件一到就往下走** | 取包 `withTimeout(100ms)` 到点即发事件（实测冻结后 < 0.1 s）。**别**改回「等帧数停滞」：通道里的预读包会让帧继续按墙钟推进约 7 s，那是白等 |
  * | [FFPlayer.pause] 探测 | 5 s 上限，另有 **1 s 量级上界** | 置 `playing = false` 后要等当前那个循环轮次走完（实测 7～108 ms）|
  * | [FFPlayer.closeAsync] 探测（冻住时） | 5 s | 判据之一；自锁没解开时这条会吃满预算 |
  * | closeAsync 收场 | 5 s | 排在 `server.close()` 之后，只为不让构建吊死，不参与判据 |
@@ -148,41 +144,10 @@ class FFPlayerStallMidPlaybackTest {
   }
 
   /**
-   * 空播放设备：只记帧数，不送显不送声（`flushFrameImpl` 的 VIDEO 分支不碰像素，AUDIO 分支
-   * 按采样数 `delay` 当声卡节拍，让播放按真实时长推进）。不碰 SDL / 声卡 ⇒ jvmTest 里能跑。
+   * 空播放设备：音频分支按采样数 `delay` 当**声卡节拍**（让播放按真实时长推进），视频只记帧数。
+   * 不碰 SDL / 声卡 ⇒ jvmTest 里能跑。
    */
-  private class Sink : AvSurfaceContext() {
-    override val sampleRate: Int = 48_000
-    override val channels: Int = 2
-    override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_S16
-
-    private val frames = Collections.synchronizedList(ArrayList<Long>())
-
-    override suspend fun flushFrameImpl(
-      codecType: Int,
-      frame: AvFrame,
-      getBuffer: () -> ByteArray?,
-    ): Long {
-      when (codecType) {
-        AVMediaType.AUDIO ->
-          getBuffer()?.let { buf ->
-            val samples = buf.size / (channels * 2)
-            if (samples > 0) delay((samples * 1000L / sampleRate).coerceAtLeast(1).milliseconds)
-            return 0
-          }
-        AVMediaType.VIDEO -> frames.add(System.nanoTime())
-      }
-      return -1
-    }
-
-    override suspend fun resume() = Unit
-
-    override suspend fun pause() = Unit
-
-    override suspend fun stop() = Unit
-
-    fun frameCount(): Int = synchronized(frames) { frames.size }
-  }
+  private fun newSink(): TestSurface = TestSurface(paceAudio = true)
 
   /**
    * 把一段**可能永不返回**的挂起调用丢到守护线程上跑，[join] 带超时。
@@ -199,7 +164,7 @@ class FFPlayerStallMidPlaybackTest {
     val thread =
       Thread {
         runCatching { runBlocking { block() } }
-          .onFailure { Diag.log("$label 抛了 ${it.javaClass.simpleName}: ${it.message}") }
+          .onFailure { Diag.log("$label threw ${it.javaClass.simpleName}: ${it.message}") }
         done.set(1)
       }.apply {
         isDaemon = true
@@ -208,7 +173,7 @@ class FFPlayerStallMidPlaybackTest {
       }
     thread.join(timeoutMs)
     if (thread.isAlive) {
-      Diag.log("$label 在 ${timeoutMs}ms 内没返回。线程快照：\n" + threadSnapshot())
+      Diag.log("$label did not return within ${timeoutMs}ms. Thread snapshot:\n" + threadSnapshot())
       return false
     }
     return done.get() == 1
@@ -231,7 +196,7 @@ class FFPlayerStallMidPlaybackTest {
     val traces = Thread.getAllStackTraces().filterKeys { !it.name.startsWith("DestroyJavaVM") }
     val out = StringBuilder()
 
-    out.append("### 摘要（每根线程一行）\n")
+    out.append("### summary (one line per thread)\n")
     traces.forEach { (t, stack) ->
       val top =
         stack.take(3).joinToString(" <- ") { "${it.className.substringAfterLast('.')}.${it.methodName}" }
@@ -242,7 +207,7 @@ class FFPlayerStallMidPlaybackTest {
         .append(t.state)
         .append(", ")
         .append(stack.size)
-        .append("帧] ")
+        .append(" frames] ")
         .append(top)
         .append('\n')
     }
@@ -251,7 +216,7 @@ class FFPlayerStallMidPlaybackTest {
     // 「pool-N-thread-1」按名字认不准（playerDispatcher 与本用例的服务器池可能撞名），
     // 所以第三根**不按名挑** —— 池里凡栈顶是 LinkedBlockingQueue.take / ThreadPoolExecutor.getTask
     // 的都是「空闲的单线程池 worker」，一并打出来让人认。
-    out.append("\n### 归属线程的完整栈\n")
+    out.append("\n### full stack of owner threads\n")
     traces.forEach { (t, stack) ->
       val named = t.name == "avformat" || t.name == "avcodec"
       val idlePoolWorker =
@@ -266,7 +231,7 @@ class FFPlayerStallMidPlaybackTest {
         .append(t.state)
         .append(") ---\n")
       stack.take(20).forEach { out.append("    ").append(it).append('\n') }
-      if (stack.size > 20) out.append("    ...（还有 ").append(stack.size - 20).append(" 帧）\n")
+      if (stack.size > 20) out.append("    ... (").append(stack.size - 20).append(" more frames)\n")
     }
     return out.toString()
   }
@@ -284,7 +249,7 @@ class FFPlayerStallMidPlaybackTest {
   ): Thread =
     Thread {
       runCatching { runBlocking { player.play(streams) } }
-        .onFailure { Diag.log("play() 抛了 ${it.javaClass.simpleName}: ${it.message}") }
+        .onFailure { Diag.log("play() threw ${it.javaClass.simpleName}: ${it.message}") }
     }.apply {
       isDaemon = true
       name = "probe-play"
@@ -292,38 +257,28 @@ class FFPlayerStallMidPlaybackTest {
     }
 
   /**
-   * 等到**帧数停滞**：连续 [flatMs] 内没有新帧。
+   * 等到 [timeoutEvents] 里出现满足 [predicate] 的事件（上限 [timeoutMs]）。
    *
-   * 这才是「读作业已经卡在网络上」的判据 —— 固定时长死等是白等（健康时早该走了），而帧数一停
-   * 就可以立刻进下一步。
+   * 判据是**事件本身**而不是「帧数停了多久」：取包 `withTimeout(100ms)` 一到点就发
+   * [FFPlayer.Event.ReadTimeout]，那一刻就是「已经卡在网络上」的直接证据。
    */
-  private suspend fun awaitFrameStall(
-    sink: Sink,
-    flatMs: Long,
-    timeoutMs: Long,
-  ): Pair<Int, Long> {
+  private suspend fun awaitEvent(
+    events: List<FFPlayer.Event>,
+    timeoutMs: Long = 8_000,
+    predicate: (FFPlayer.Event) -> Boolean,
+  ): Boolean {
     val deadline = System.currentTimeMillis() + timeoutMs
-    var last = sink.frameCount()
-    var flatSince = System.currentTimeMillis()
-    val stallStart = System.currentTimeMillis()
     while (System.currentTimeMillis() < deadline) {
-      delay(100)
-      val now = sink.frameCount()
-      if (now != last) {
-        Diag.log("  帧数 $last -> $now")
-        last = now
-        flatSince = System.currentTimeMillis()
-      } else if (System.currentTimeMillis() - flatSince >= flatMs) {
-        break
-      }
+      if (synchronized(events) { events.any(predicate) }) return true
+      delay(20)
     }
-    return sink.frameCount() to (System.currentTimeMillis() - stallStart)
+    return synchronized(events) { events.any(predicate) }
   }
 
   /** 播到一半断掉 ⇒ **收场要能从 stall 里出来**。分段与时间预算见类 KDoc 的表。 */
   @Test(timeout = 90_000)
   fun playbackStalledMidStreamDoesNotHangForever() {
-    Diag.log("=== 开跑 ===")
+    Diag.log("=== start ===")
     val bytes = Files.readAllBytes(TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART))
     runStallScenario(bytes)
   }
@@ -331,7 +286,7 @@ class FFPlayerStallMidPlaybackTest {
   private fun runStallScenario(bytes: ByteArray) {
     // 断点由**服务器**定，不靠媒体够大（见类 KDoc）：累计写出 [SERVED_LIMIT] 字节后停笔。
     TestMediaServer(bytes, chunkSize = 16 * 1024, servedLimit = SERVED_LIMIT).use { server ->
-      val sink = Sink()
+      val sink = newSink()
       // 只收取包超时事件（帧事件每帧都来，与判据无关）。
       val timeoutEvents: MutableList<FFPlayer.Event> =
         Collections.synchronizedList(ArrayList<FFPlayer.Event>())
@@ -343,50 +298,46 @@ class FFPlayerStallMidPlaybackTest {
         runBlocking {
           // ---- 第一段：先确认播得起来，否则「后面没反应」分不清是 stall 造成的 ----
           // getStreams() 只读头部的 moov（faststart）。
-          Diag.log("第一段：getStreams() 开始（faststart，moov 在头部）")
+          Diag.log("phase 1: getStreams() starting (faststart, moov at head)")
           val video = player.getStreams().first { it.codecType == AVMediaType.VIDEO }
           Diag.log(
-            "第一段：getStreams() 回来，video index=${video.index} ${video.width}x${video.height}；" +
-              "已发 ${server.served}/${bytes.size} 字节，请求 ${server.requests} 次",
+            "phase 1: getStreams() returned, video index=${video.index} ${video.width}x${video.height}; " +
+              "served ${server.served}/${bytes.size} bytes, ${server.requests} requests",
           )
 
           val playThread = startPlayback(player, mapOf(AVMediaType.VIDEO to video))
           val framesBeforeStop = awaitFirstFrame(sink, 10_000)
           Diag.log(
-            "第一段：首帧出现，帧数=$framesBeforeStop，已发 ${server.served}/${bytes.size} 字节",
+            "phase 1: first frame shown, frameCount=$framesBeforeStop, served ${server.served}/${bytes.size} bytes",
           )
           assertTrue(
             framesBeforeStop > 0,
-            "断流之前就该已经出过一帧（实际 0）—— 这说明用例没测到「播到一半」这个现场。" +
-              "服务端已发 ${server.served}/${bytes.size} 字节，请求 ${server.requests} 次",
+            "a frame should have been shown before the stream stalled (got 0) -- " +
+              "this case did not reach the mid-playback state. " +
+              "served ${server.served}/${bytes.size} bytes, ${server.requests} requests",
           )
 
-          // ---- 第二段：等服务器发满断点（首帧出现时它可能还没到）----
-          // **等**而不是假设「首帧一出现就过了断点」：断点在开流值之上、且播放期累计量是渐涨的，
-          // 两者之间没有固定先后。等它自然越过后再进判据，断点取值就不必卡在某个窄缝里。
+          // ---- 第二段：等服务器发满断点并**等到取包超时真的发生** ----
+          // **等**而不是假设「首帧一出现就过了断点」：断点在开流值之上、且播放期累计量是渐涨的。
+          // 判据是 [FFPlayer.Event.ReadTimeout]：冻结之后取包 `withTimeout(100ms)` 至多 0.1s 就到点
+          // （实测冻结后准时触发）。**别改回「等帧数停滞」** —— 通道里已预读的包要先吃完，
+          // 那段时间帧还在按墙钟推进（实测约 7s），等它停是白等。
           awaitServed(server, SERVED_LIMIT, 10_000)
           val servedAtStop = server.served
           val requestsAtStop = server.requests
+          val timeoutSeen = timeoutEvents.count { it is FFPlayer.Event.ReadTimeout }
           Diag.log(
-            "第二段：服务器已停在 $servedAtStop/${bytes.size} 字节（断点 $SERVED_LIMIT）/" +
-              "请求 $requestsAtStop 次，开始等帧数停滞",
+            "phase 2: server stopped at $servedAtStop/${bytes.size} bytes (servedLimit $SERVED_LIMIT)/" +
+              "requests $requestsAtStop, read-timeout events=$timeoutSeen",
           )
           assertTrue(
-            servedAtStop >= SERVED_LIMIT,
-            "等了 10s 服务端也只发到 $servedAtStop 字节，没够断点 $SERVED_LIMIT —— " +
-              "这个用例没测到「播到一半」",
+            awaitEvent(timeoutEvents) { it is FFPlayer.Event.ReadTimeout },
+            "no [FFPlayer.Event.ReadTimeout] within 8s after the cut-off -- the read-timeout branch is " +
+              "not running, so the timing assertion below would not measure 'waiting for one withTimeout to fire'. " +
+              "This case would be testing nothing.",
           )
-
-          val (framesAfterStop, stalledFor) = awaitFrameStall(sink, flatMs = 1_500, timeoutMs = 8_000)
           Diag.log(
-            "第二段：等了 ${stalledFor}ms，帧数 $framesBeforeStop -> $framesAfterStop；" +
-              "服务端已发 ${server.served}/$servedAtStop（总长 ${bytes.size}），" +
-              "请求数 ${server.requests}/$requestsAtStop",
-          )
-          assertTrue(
-            server.served - servedAtStop < bytes.size / 8,
-            "断流之后服务端还在猛发字节（多了 ${server.served - servedAtStop}）⇒ " +
-              "servedLimit 没生效，这个用例没测到 stall",
+            "phase 2: read-timeout event received, frames=${sink.frameCount}, served ${server.served}/$servedAtStop",
           )
 
           // ---- 第三段：判据。pause() 会 join 播放轮次，轮次卡在 getPacket 上就 join 不回来 ----
@@ -394,32 +345,30 @@ class FFPlayerStallMidPlaybackTest {
           // 之后再调 `pause()` 只是对已关的 player 置个 flag，**毫秒级返回是必然的、测不到任何东西**
           // ⇒ 先探 pause()、后探 closeAsync()。
 
-          // 探测前先钉住前提：**此刻确实处在取包超时进行中**。少了它，下面那条耗时断言
-          // 就是空的 —— 不在超时中时 pause() 本来就毫秒级返回，那种返回证明不了任何事。
-          // 为什么此刻必然已到：帧数已停 >= 1.5 s（awaitFrameStall 的 flatMs），取包
-          // withTimeout 至多 0.1 s 就到点并发出事件（实测冻结后准时触发）。
+          // 探测前先钉住前提：**此刻确实处在取包超时进行中**（第二段已经等到事件了，这里只是
+          // 复述一遍）。少了它，下面那条耗时断言就是空的 —— 不在超时中时 pause() 本来就毫秒级返回，
+          // 那种返回证明不了任何事。
           assertTrue(
             FFPlayer.Event.ReadTimeout in timeoutEvents,
-            "帧数停滞 1.5 s 后还没收到 [FFPlayer.Event.ReadTimeout] —— 取包超时分支没在跑。" +
-              "那样 pause() 本来就毫秒级返回，下面那条耗时断言量到的不是「等一个 withTimeout 到点」，" +
-              "这条用例就白测了。",
+            "the read-timeout event disappeared -- the premise of this case no longer holds.",
           )
-          Diag.log("第三段：探测 pause() 前已收到取包超时事件")
-          Diag.log("第三段：探测 pause()（网络仍冻着，5s 上限）")
+          Diag.log("phase 3: read-timeout event seen before probing pause()")
+          Diag.log("phase 3: probing pause() (network still frozen, 5s budget)")
           // 计时在**探针外面**量：probeBounded 自己只返回布尔（两个调用点共用），
           // 改它的签名会牵动 closeAsync 那两处 ⇒ 这里包一层计时，不动它。
           val pauseStart = System.currentTimeMillis()
           val pauseReturned = probeBounded("FFPlayer.pause", 5_000) { player.pause() }
           val pauseCostMs = System.currentTimeMillis() - pauseStart
-          Diag.log("第三段：pause() 5s 内返回=$pauseReturned，耗时 ${pauseCostMs}ms，此时帧数=${sink.frameCount()}")
+          Diag.log("phase 3: pause() returned=$pauseReturned, took ${pauseCostMs}ms, frames=${sink.frameCount}")
           assertTrue(
             pauseReturned,
-            "网络在播放中途停住之后，[FFPlayer] 的播放轮次收不回来 —— pause() 5 s 都没返回。" +
-              "根因链：读作业卡在 getPacketNative → HttpIO.read 的 runBlocking 上，park 住了" +
-              "formatDispatcher 那根单线程（ThreadDispatcher 是 newSingleThreadExecutor，纯排队）。" +
-              "取包超时能不能救回来，取决于消费侧要不要跟那根线程抢：AvFormat.getPacket 的" +
-              "`for (v in channel)` 挂在调用方自己线程上，withPtr 只包着后台读作业 ⇒ 抢不到，" +
-              "于是 withTimeout 第一次就生效。",
+            "[FFPlayer] could not wind down its playback round after the network stalled mid-playback -- " +
+              "pause() did not return within 5s. Root cause chain: the read job is parked in " +
+              "getPacketNative -> HttpIO.read's runBlocking, blocking the single-threaded formatDispatcher " +
+              "(ThreadDispatcher is newSingleThreadExecutor, pure queueing). Whether the read timeout can " +
+              "save it depends on the consumer competing for that thread: AvFormat.getPacket's " +
+              "`for (v in channel)` runs on the caller's own thread and withPtr only wraps the background " +
+              "read job, so there is no contention and the first withTimeout fires.",
           )
 
           // 耗时上界：pause() 的 join 只等「当前那个循环轮次走完」⇒ 机制上界是**一个轮次**，不是
@@ -427,10 +376,11 @@ class FFPlayerStallMidPlaybackTest {
           // 加回 delay(100) 会变成 200 ms 上下、仍在预算内，要钉精确值得另写判据。
           assertTrue(
             pauseCostMs < 1_000,
-            "pause() 在取包超时进行中耗时 ${pauseCostMs}ms，超了 1_000ms 预算 —— " +
-              "它的上界应该只是「等当前那个循环轮次走完」。显著变慢说明" +
-              "取包循环里多了别的东西（额外 delay？更长的 withTimeout？），轮次不再能被" +
-              "及时收回来。实测是个跨度（7～108 ms），不是定值。",
+            "pause() took ${pauseCostMs}ms during an in-flight read timeout, over the 1_000ms budget -- " +
+              "its upper bound should only be 'wait for the current loop round to finish'. " +
+              "A significant slowdown means the read loop gained something (an extra delay? a longer " +
+              "withTimeout?) and the round can no longer be wound down promptly. Measured range is " +
+              "7-108 ms, not a fixed value.",
           )
 
           // 取包超时经 [FFPlayer.onEvent] 报上来这件事，上面的前提断言已钉过；这里钉另一半：
@@ -438,25 +388,27 @@ class FFPlayerStallMidPlaybackTest {
           // 那条耗时断言量的是「等一个超时轮次走完」，不是「等到网络恢复」。
           assertTrue(
             FFPlayer.Event.ReadTimeoutResume !in timeoutEvents,
-            "pause() 返回之前网络已恢复（收到了 [FFPlayer.Event.ReadTimeoutResume]）⇒ " +
-              "耗时断言量到的不是「等一个超时轮次走完」。断点应由服务器一直冻到收场。",
+            "the network recovered before pause() returned ([FFPlayer.Event.ReadTimeoutResume] arrived) -- " +
+              "the timing assertion is not measuring 'waiting for one timeout round to finish'. " +
+              "The server cut-off should stay frozen until teardown.",
           )
 
           // closeAsync 要在**掀服务端之前**探：排到 `server.close()` 之后，挂着的响应体被掀、读作业
           // 自然 unwind ⇒ 那一刻返回 true 只说明「掀得动」。它比 pause() 多一截（结束读作业 + 等
           // `releaseImpl` 落地），而 pause() 不碰 avformat ⇒ 这条是唯一盯着那段自锁的。
-          Diag.log("第三段：探测 closeAsync 之前的线程快照：\n" + threadSnapshot())
-          Diag.log("第三段：探测 closeAsync（网络仍冻着，5s 上限）")
-          val closeWhileStalled = probeBounded("FFPlayer.closeAsync(冻住时)", 5_000) { player.closeAsync() }
-          Diag.log("第三段：closeAsync 在冻住时 5s 内返回=$closeWhileStalled")
+          Diag.log("phase 3: thread snapshot before probing closeAsync:\n" + threadSnapshot())
+          Diag.log("phase 3: probing closeAsync (network still frozen, 5s budget)")
+          val closeWhileStalled = probeBounded("FFPlayer.closeAsync(stalled)", 5_000) { player.closeAsync() }
+          Diag.log("phase 3: closeAsync returned within 5s while stalled=$closeWhileStalled")
           assertTrue(
             closeWhileStalled,
-            "网络在播放中途停住之后，closeAsync() 5 s 都没返回 —— 关不掉一个已经没网络的流。" +
-              "根因链：作废读轮的 io.abort() 若在 formatDispatcher 之内调（或经 closeDeferred() 的" +
-              "submit{} 排进它的队列），就排在读作业的 HttpIO.read 的 runBlocking 后面 ——" +
-              "ThreadDispatcher 是 newSingleThreadExecutor、纯排队，没有 event loop 能借道。" +
-              "解法是让 resetChannel() 在 playerDispatcher 上就地发出 abort、不排队，" +
-              "并且不能靠 releaseImpl 兜底（它也排在同一根线程后面）。",
+            "closeAsync() did not return within 5s after the network stalled mid-playback -- cannot close " +
+              "a stream that has already lost its network. Root cause chain: if the round-invalidating " +
+              "io.abort() is issued inside formatDispatcher (or queued through closeDeferred()'s " +
+              "submit{}), it lands behind the read job's HttpIO.read runBlocking -- ThreadDispatcher is " +
+              "newSingleThreadExecutor with pure queueing and no event loop to borrow. The fix is for " +
+              "resetChannel() to abort in place on playerDispatcher without queueing, and it cannot rely " +
+              "on releaseImpl as a fallback (that queues behind the same thread too).",
           )
           playThread.interrupt()
         }
@@ -464,16 +416,16 @@ class FFPlayerStallMidPlaybackTest {
         // 收场顺序有讲究：**先掀服务端**（parked 的响应体被 close ⇒ 那次读拿到 IOException，
         // 读作业 unwind、通道关闭、播放轮次自然结束），再等 close。
         // 反过来先 close 的话，播放轮次还卡在读里，close 自己就 join 不回来了。
-        Diag.log("收场：先掀服务端")
+        Diag.log("teardown: taking down the server first")
         server.close()
         // 这里测的就是「可能永不结束」，所以收场也只等得起有限时间：等不到就打印栈放过，
         // 不能把整个构建吊死。
-        Diag.log("收场：探测 closeAsync（5s 上限）")
+        Diag.log("teardown: probing closeAsync (5s budget)")
         val closed = probeBounded("FFPlayer.closeAsync", 5_000) { player.closeAsync() }
-        Diag.log("收场：closeAsync 5s 内返回=$closed")
+        Diag.log("teardown: closeAsync returned within 5s=$closed")
       }
     }
-    Diag.log("=== 跑完 ===")
+    Diag.log("=== done ===")
   }
 
   /** 等服务器累计发出到 [target] 字节（上限 [timeoutMs]）—— 断点生效的时点不确定，等它到。 */
@@ -490,14 +442,14 @@ class FFPlayerStallMidPlaybackTest {
 
   /** 只等第一帧（上限 [timeoutMs]）：区分「压根没播起来」与「播到一半才卡」。 */
   private suspend fun awaitFirstFrame(
-    sink: Sink,
+    sink: TestSurface,
     timeoutMs: Long,
   ): Int {
     val deadline = System.currentTimeMillis() + timeoutMs
-    while (sink.frameCount() == 0 && System.currentTimeMillis() < deadline) {
+    while (sink.frameCount == 0 && System.currentTimeMillis() < deadline) {
       delay(50)
     }
-    return sink.frameCount()
+    return sink.frameCount
   }
 
   private companion object {

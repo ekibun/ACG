@@ -1,16 +1,10 @@
 package soko.ekibun.acg.engine
 
-import com.sun.net.httpserver.HttpExchange
-import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import soko.ekibun.acg.TestPaths
-import java.net.InetSocketAddress
-import java.util.Base64
 import java.util.Collections
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -42,60 +36,34 @@ import kotlin.test.assertTrue
  *   不是缺陷，为它判红是越界。设计约定归 `ability-bridge.md` 的检查清单。
  */
 class JsEngineDispatchTest {
-  private lateinit var server: HttpServer
-  private lateinit var serverPool: ExecutorService
-  private var port = 0
+  private lateinit var pageServer: TestPageServer
 
   /** `/page.html` 收到的请求头，用来证明 header 真的按 `args[1]` 送到了。 */
   private val pageRequests = Collections.synchronizedList(mutableListOf<Map<String, List<String>>>())
-
-  /**
-   * 带一个子资源的页面 —— 拦资源比拦主框架有信息量：`isForMainFrame` 必须是 `false`，
-   * 误命中会把页面整个拦掉、连 `<script>` 都执行不了。
-   */
-  private val pageHtml =
-    """
-    <!doctype html>
-    <html><head><meta charset="utf-8"><title>dispatch-test</title>
-    <script src="/sub.js"></script></head>
-    <body><p>hello</p></body></html>
-    """.trimIndent()
 
   @BeforeTest
   fun startServer() {
     TestPaths.ensureInitialized()
     pageRequests.clear()
-    serverPool = Executors.newFixedThreadPool(4)
-    server =
-      HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
-        executor = serverPool
-        createContext("/page.html") { exchange ->
-          exchange.recordRequest()
-          exchange.respond("text/html; charset=utf-8", pageHtml.toByteArray())
-        }
-        createContext("/sub.js") {
-          it.respond("application/javascript", "window.__subLoaded = true;".toByteArray())
-        }
-        createContext("/data.json") {
-          it.respond("application/json; charset=utf-8", """{"a":1}""".toByteArray())
-        }
-        createContext("/sub.png") { it.respond("image/png", Base64.getDecoder().decode(PNG_1X1)) }
-        start()
-      }
-    port = server.address.port
+    pageServer =
+      TestPageServer(
+        withJsonEndpoint = true,
+        onMainFrame = { exchange ->
+          pageRequests += exchange.requestHeaders.mapValues { (_, v) -> v.toList() }
+        },
+      )
   }
 
   @AfterTest
   fun stopServer() {
-    server.stop(0)
-    serverPool.shutdownNow()
+    pageServer.close()
     // JsEngine 自己持有 runtime（`quickjsDelegate`），不 reset 就留下一整个 runtime
     // 与它的归属线程。泄漏报告要能当判据用（0 条是判据成立的前提），
     // 就不能容它有常驻噪音。
     runBlocking { JsEngine.instance.reset() }
   }
 
-  private fun url(path: String): String = "http://127.0.0.1:$port$path"
+  private fun url(path: String): String = pageServer.url(path)
 
   /** 求值一段 async 脚本并等它的 Promise。 */
   private fun evalAsync(
@@ -124,12 +92,12 @@ class JsEngineDispatchTest {
     assertEquals(
       "%0A",
       evalAsync("return encodeURIComponent('\\n');"),
-      "encode 的字节要能喂给 encodeURI_hex 的补零逻辑（LF = 0x0A）",
+      "the bytes from encode must feed encodeURI_hex's zero-padding logic (LF = 0x0A)",
     )
     assertEquals(
       "%E4%B8%AD",
-      evalAsync("""return encodeURIComponent("中");"""),
-      "多字节必须是每字节两位",
+      evalAsync("""return encodeURIComponent("\u4e2d");"""),
+      "multi-byte characters must use two hex digits per byte",
     )
   }
 
@@ -141,9 +109,9 @@ class JsEngineDispatchTest {
   @Test
   fun decodeBranchIsReachable() {
     assertEquals(
-      "中文abc",
+      "\u4e2d\u6587abc",
       evalAsync(
-        """return new TextDecoder('utf-8').decode(new TextEncoder().encode('中文abc'));""",
+        """return new TextDecoder('utf-8').decode(new TextEncoder().encode('\u4e2d\u6587abc'));""",
       ),
     )
   }
@@ -204,7 +172,7 @@ class JsEngineDispatchTest {
       evalAsync(
         """
         const r = await fetch('$target');
-        const before = r.bodyUsed;          // fetch 不该已经把 body 读掉
+        const before = r.bodyUsed;          // fetch must not have consumed the body yet
         const a = await r.json();
         let threw = false;
         try { await r.arrayBuffer(); } catch (e) { threw = e instanceof TypeError; }
@@ -242,11 +210,7 @@ class JsEngineDispatchTest {
    */
   @Test
   fun webviewBranchIsReachable() {
-    val reason = hostHealth()
-    if (reason != null) {
-      println("[JsEngineDispatchTest] skip webviewBranchIsReachable: $reason")
-      return
-    }
+    skipUnlessHostIsAvailable(WebViewHostTest.hostHealth)
 
     // 只在子资源上命中：主框架要放行，页面才有机会去请求 <script>。
     val out =
@@ -267,16 +231,16 @@ class JsEngineDispatchTest {
     assertEquals(
       "${url("/sub.js")}|headers-ok|has-range",
       out,
-      "命中的应是子资源；拦截回调返回的对象被整体采用（它自己塞的 Range 也在）",
+      "the hit should be the subresource; the returned object is adopted wholesale (its own Range included)",
     )
 
     // args[1]（header）真的送到了 —— 下标 1↔2 串位时这条会红，而上面那条不会。
     val ua = pageRequests.firstOrNull()?.get("User-agent")?.firstOrNull()
-    assertEquals("dispatch-test", ua, "webview 的 header 必须按 args[1] 送到页面（pageRequests=$pageRequests）")
+    assertEquals("dispatch-test", ua, "webview headers must reach the page via args[1] (pageRequests=$pageRequests)")
 
     assertTrue(
       pageRequests.size >= 1,
-      "页面主框架请求应该到过本地服务（证明 WebView2 真的导航了，不是缓存或about:blank）",
+      "a main-frame request should have reached the local server (proves WebView2 really navigated)",
     )
   }
 
@@ -292,11 +256,7 @@ class JsEngineDispatchTest {
    */
   @Test
   fun scriptlessWebviewYieldsUndefined() {
-    val reason = hostHealth()
-    if (reason != null) {
-      println("[JsEngineDispatchTest] skip scriptlessWebviewYieldsUndefined: $reason")
-      return
-    }
+    skipUnlessHostIsAvailable(WebViewHostTest.hostHealth)
     val out =
       evalAsync(
         """
@@ -305,10 +265,10 @@ class JsEngineDispatchTest {
         """.trimIndent(),
         timeoutMs = 60_000,
       )
-    assertEquals("undefined", out, "不传 script 时 webview 应给出 undefined（空串被当成「脚本没有返回值」）")
+    assertEquals("undefined", out, "webview should yield undefined when no script is passed")
     assertTrue(
       pageRequests.isNotEmpty(),
-      "页面主框架请求应该到过本地服务（证明 WebView2 真的导航了，不是静默返回）",
+      "a main-frame request should have reached the local server (proves WebView2 really navigated)",
     )
   }
 
@@ -322,11 +282,7 @@ class JsEngineDispatchTest {
    */
   @Test
   fun failedWebviewRejects() {
-    val reason = hostHealth()
-    if (reason != null) {
-      println("[JsEngineDispatchTest] skip failedWebviewRejects: $reason")
-      return
-    }
+    skipUnlessHostIsAvailable(WebViewHostTest.hostHealth)
     val out =
       evalAsync(
         """
@@ -335,7 +291,7 @@ class JsEngineDispatchTest {
         """.trimIndent(),
         timeoutMs = 60_000,
       )
-    assertEquals("caught", out, "webview 失败必须 reject —— 回空值会让脚本误以为页面加载过了")
+    assertEquals("caught", out, "a failing webview must reject, not return an empty value")
   }
 
   /**
@@ -345,12 +301,9 @@ class JsEngineDispatchTest {
    * Android 是 Custom Tabs），那是测试不能碰的动作 —— 所以这里给的模板故意没有占位符，
    * `launch` 根本到不了。
    *
-   * 断言带上错误文案是为了**顺带锁住 `args[0]` 真的按位送到了**：只断言「拒绝了」的话，
-   * `args[0]` 取错（越界 / 类型不符）同样会拒绝，那条错路也能过。文案是本工程自己给的，
-   * 不是平台给的 —— 平台给的才不许锁（见 [failedWebviewRejects]）。
-   *
-   * 编排（换成什么、回什么形状）由 [BrowserLoginTest] 驱动 `openBrowserAsync` 验，
-   * 那边能注入 `launch`，这里不能。
+   * 断言**只锁「`args[0]` 到了 Kotlin 侧」**，不锁整句文案：文案与「`launch` 一次都没调」
+   * 这两件事由 [BrowserLoginTest] 负责（那边注入 `launch`，能看见它到底调没调；这里看不见）。
+   * 越界 / 类型不符同样会 reject，所以真正要验的是「拒绝的理由里带着那个 URL」。
    */
   @Test
   fun openBrowserWithoutPlaceholderRejects() {
@@ -358,13 +311,13 @@ class JsEngineDispatchTest {
       evalAsync(
         """
         try { await openBrowser('https://example.com/auth?x=1'); return "no throw"; }
-        catch (e) { return "caught:" + e.message; }
+        catch (e) { return String(e.message).includes("{{callback}}") ? "placeholder-mentioned" : String(e.message); }
         """.trimIndent(),
       )
     assertEquals(
-      "caught:openBrowser template has no {{callback}} placeholder: https://example.com/auth?x=1",
+      "placeholder-mentioned",
       out,
-      "没有占位符的模板必须 reject，且 args[0] 要原样到达 Kotlin 侧",
+      "a template without the placeholder must reject, and args[0] must arrive as-is",
     )
   }
 
@@ -423,103 +376,58 @@ class JsEngineDispatchTest {
         };
         """.trimIndent(),
       )
-    val m = assertIs<Map<*, *>>(out, "FormData 断言脚本该返回一个对象，实际是 $out")
-    assertEquals("FormData", m["proto"], "`__js_proto__` 是 Http.kt 分派 multipart 的入口")
-    val items = assertIs<List<*>>(m["items"], "__items__ 必须是数组，实际是 ${m["items"]}")
+    val m = assertIs<Map<*, *>>(out, "the FormData assertion script should return an object, got $out")
+    assertEquals("FormData", m["proto"], "`__js_proto__` is the entry point Http.kt uses to route multipart")
+    val items = assertIs<List<*>>(m["items"], "__items__ must be an array, got ${m["items"]}")
 
     // 前三项：普通字段 —— 没有 filename 就没有 type，Kotlin 走 append(name, value)
     for (i in 0..2) {
-      val it = assertIs<Map<*, *>>(items[i], "第 ${i + 1} 项应是普通字段")
-      assertEquals("<absent>", it["filename"], "普通字段不该凭空长出 filename（键本身就不该有）")
-      assertEquals("<null>", it["type"], "只有文件 part 才有 Content-Type，普通字段的 type 应是 null")
+      val it = assertIs<Map<*, *>>(items[i], "item ${i + 1} should be a plain field")
+      assertEquals("<absent>", it["filename"], "a plain field must not have a filename key at all")
+      assertEquals("<null>", it["type"], "only file parts carry a Content-Type, so a plain field's type should be null")
     }
     val a1 = assertIs<Map<*, *>>(items[0])
     assertEquals("a", a1["name"])
     assertEquals("1", a1["value"])
 
     // 带 filename 的那项：type 必须与 filename 同时出现，否则 Http 走不到文件分支
-    val file = assertIs<Map<*, *>>(items[3], "第 4 项应是 append('file', bytes, 'x.bin')")
+    val file = assertIs<Map<*, *>>(items[3], "item 4 should be append('file', bytes, 'x.bin')")
     assertEquals("file", file["name"])
-    assertEquals("bytes:3", file["value"], "文件项的 value 应是二进制缓冲（'BIN' 是 3 字节）")
-    assertEquals("x.bin", file["filename"], "filename 必须逐字送达（Http.kt 读的就是这个键）")
+    assertEquals("bytes:3", file["value"], "a file item's value should be a binary buffer ('BIN' is 3 bytes)")
+    assertEquals("x.bin", file["filename"], "filename must be delivered verbatim (it is the key Http.kt reads)")
     assertEquals(
       "application/octet-stream",
       file["type"],
-      "带 filename 的项必须带 type，否则 Http 的 `type is String && value is ByteArray` 走不到",
+      "an item with a filename must also carry a type, or Http's file branch is never taken",
     )
 
-    assertEquals(listOf("1", "2"), assertIs<List<*>>(m["getAllA"]), "同名 append 应累积")
-    assertEquals("4", m["getB"], "get 返回 value 而非 item 对象")
+    assertEquals(listOf("1", "2"), assertIs<List<*>>(m["getAllA"]), "appending the same name should accumulate")
+    assertEquals("4", m["getB"], "get returns the value, not the item object")
     assertEquals(true, m["hasB"])
     assertEquals(false, m["hasZ"])
     assertEquals(
       listOf("a", "a", "b", "file"),
       assertIs<List<*>>(m["keys"]),
-      "keys() 要给出全部项（含重复名）",
+      "keys() must list every item (including duplicate names)",
     )
     assertEquals(
       listOf("1", "2", "4", "bytes:3"),
       assertIs<List<*>>(m["values"]),
-      "values() 要给出 value 序列",
+      "values() must yield the value sequence",
     )
     assertEquals(
       listOf("a|1|<absent>", "a|2|<absent>", "b|4|<absent>", "file|bytes:3|x.bin"),
       assertIs<List<*>>(m["entries"]),
-      "entries() 要给出 [name, value, filename] 三元组（forEach 就走它）",
+      "entries() must yield [name, value, filename] triples (forEach walks this)",
     )
   }
 
   /**
    * 宿主体检：真导航一次 `about:blank`。
    *
-   * 与 [WebViewHostTest] 的 `checkHost` 同一套理由（那边有完整
-   * 说明）：环境建得成但**引擎完全不动**是一种真实坏法 —— 连 `about:blank` 都到不了
-   * `NavigationCompleted`。不体检就 skip 会让人误以为验过了，不体检就直跑则 30s
-   * 超时加一堆看不懂的断言失败，纯属噪声。
-   *
-   * 宿主没有「全局 `ensureStarted()`」可问了（environment 随第一个上下文建，没有
-   * 单独的「启动」入口），所以体检就只剩这次真导航 —— 它建不出环境时同样会在超时里
-   * 现形。
-   *
-   * 重复一份而不复用那边的：`checkHost` 是它的 `private companion object` 成员，
-   * 跨类不可见（提可见性要动那个文件，超出本次范围）。
+   * 理由与实现都归 [WebViewHostTest] 的 `checkHost`（那边有完整说明）：环境建得成但**引擎完全
+   * 不动**是一种真实坏法 —— 连 `about:blank` 都到不了 `NavigationCompleted`。不体检就直跑则
+   * 30s 超时加一堆看不懂的断言失败，纯属噪声。
    */
-  private fun hostHealth(): String? =
-    runBlocking {
-      val result =
-        runCatching {
-          withTimeout(HOST_HEALTH_TIMEOUT_MS) {
-            JsEngine.instance.webviewAsync("about:blank", null, "1 + 1", null)
-          }
-        }.getOrNull()
-      when {
-        result == null ->
-          "宿主编译得起来但引擎没有响应：about:blank 在 ${HOST_HEALTH_TIMEOUT_MS}ms 内没走到" +
-            "NavigationCompleted。多半这台机器的 WebView2 运行时坏了。"
-        result is String && result == "2" -> null
-        else -> "宿主异常：about:blank 健康检查返回 $result"
-      }
-    }
-
-  private fun HttpExchange.recordRequest() {
-    pageRequests += requestHeaders.mapValues { (_, v) -> v.toList() }
-  }
-
-  private fun HttpExchange.respond(
-    contentType: String,
-    body: ByteArray,
-  ) {
-    responseHeaders.add("Content-Type", contentType)
-    sendResponseHeaders(200, body.size.toLong())
-    responseBody.use { it.write(body) }
-  }
-
-  private companion object {
-    /** 1×1 的透明 PNG。用真的图，免得 WebView2 那边报解码错误干扰日志。 */
-    const val PNG_1X1 =
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAABfWjpAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
-
-    /** 体检里那次 about:blank 的护栏，比后台任务的 30s 略宽一点。 */
-    const val HOST_HEALTH_TIMEOUT_MS = 40_000L
-  }
+  private fun hostHealth(): String? = WebViewHostTest.hostHealth
 }

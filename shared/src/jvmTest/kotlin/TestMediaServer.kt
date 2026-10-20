@@ -22,7 +22,11 @@ import java.util.concurrent.atomic.AtomicLong
  * - [heartbeat]：body 发完不关、每 [HEARTBEAT_MS]ms 续 1 字节 —— 客户端撒手时服务端要**尽快**
  *   察觉到（否则 exited 永远追不上 entered），而「读到流尾就算完」的客户端会一直挂在心跳上；
  * - [frozen]：冻结 —— 在途响应立刻停笔、新请求只发响应头就停住，且**不 close**（close 等于
- *   告诉客户端 body 结束，那叫「截断」不叫「卡住」）。「播放中途断网」的现场就靠它。
+ *   告诉客户端 body 结束，那叫「截断」不叫「卡住」）。「播放中途断网」的现场就靠它；
+ * - [hangFirstResponse]：**只有第一条**响应停住（后续正常发完）—— 「卡在请求里，abort 之后下一次读
+ *   要能重连」的现场；
+ * - [cutAfterBytes]：发到这么多字节后直接**掐断**连接（既不 close 也不结束会话）—— 「body 没发完
+ *   就断链」的现场，客户端读会抛而不是读到流尾。
  *
  * 计数器是判据的一部分：[requests]（开过几条会话 —— 「换了几次会话」的直接证据）、
  * [entered] / [exited]（handler 进出场，exited < entered 即有连接被漏下）、
@@ -72,6 +76,10 @@ internal class TestMediaServer(
    * 实测定（取值示范见 `FFPlayerStallMidPlaybackTest` 的 `SERVED_LIMIT`）。
    */
   private val servedLimit: Long? = null,
+  /** 只让**第一条**响应停住（只发响应头、body 一个字节不给），后续请求正常发完。 */
+  private val hangFirstResponse: Boolean = false,
+  /** 发到这么多字节就掐断连接（`close()` 响应体但不给足长度）。null = 不掐。 */
+  private val cutAfterBytes: Int? = null,
 ) : AutoCloseable {
   /** 冻结 —— 在途响应停笔、新请求只发响应头就停住（类 KDoc 的 frozen 档）。dev 可经 /__control 热改。 */
   @Volatile var frozen: Boolean = false
@@ -109,8 +117,11 @@ internal class TestMediaServer(
 
   val url: String get() = "http://127.0.0.1:${server.address.port}/media"
 
+  /** 第一条响应已经只发头就停住 —— 用例要等它「客户端已进到等待里」的时点。 */
+  val firstResponseHanging = CountDownLatch(1)
+
   private fun handle(exchange: HttpExchange) {
-    requestCount.incrementAndGet()
+    val index = requestCount.getAndIncrement()
     enteredCount.incrementAndGet()
     try {
       val rangeStart =
@@ -124,17 +135,22 @@ internal class TestMediaServer(
           ?: 0
       // 已经发满上限：这条会话只发响应头，正文一个字节都不写（见 [servedLimit]）。
       val cutOff = servedLimit != null && servedBytes.get() >= servedLimit
+      val hangFirst = hangFirstResponse && index == 0
       val status = if (rangeStart > 0) 206 else 200
       if (status == 206) {
         exchange.responseHeaders.add("Content-Range", "bytes $rangeStart-${body.size - 1}/${body.size}")
       }
-      exchange.sendResponseHeaders(status, if (declareLength) (body.size - rangeStart).toLong() else 0L)
+      // 挂住第一条时务必用分块传输：声明了固定长度却一个字节不发，客户端读到的是「连接异常」
+      // 而不是「等数据」。
+      val declaredLength = if (declareLength && !hangFirst) (body.size - rangeStart).toLong() else 0L
+      exchange.sendResponseHeaders(status, declaredLength)
       val out = exchange.responseBody
       try {
         if (firstChunkDelayMs > 0) Thread.sleep(firstChunkDelayMs)
         // 越过断点：响应头照发（客户端得先认下这条会话），body 一个字节都不写、也**不 close**
         // —— close 等于告诉客户端 body 结束（那是「截断」），而这里要制造的是「数据永远不来」。
-        if (cutOff) {
+        if (cutOff || hangFirst) {
+          if (hangFirst) firstResponseHanging.countDown()
           parkForever(out)
         } else {
           writeBody(out, rangeStart)
@@ -181,6 +197,9 @@ internal class TestMediaServer(
     // 限速基准按**本条响应**算：每条 range 请求从头计时，客户端感知到的就是一个恒定速率的流。
     val startedAt = System.nanoTime()
     var sentHere = 0L
+    // 掐断的现场与正常收场不同：`out.close()` 正是「不给你剩下的字节」这个信号，
+    // 由 handle 的 finally 再关一次也无害（close 幂等），不必另立标志位。
+    val cutAt = cutAfterBytes
     while (position < body.size) {
       if (!awaitWhileFrozen(out)) break
       val limit = servedLimit
@@ -188,9 +207,14 @@ internal class TestMediaServer(
         parkForever(out)
         return
       }
+      if (cutAt != null && sentHere >= cutAt) {
+        runCatching { out.close() }
+        return
+      }
       var n = minOf(chunkSize, body.size - position)
       // 一次不许越过上限：断点落在块中间时只发到上限为止。
       if (limit != null) n = minOf(n, (limit - servedBytes.get()).toInt().coerceAtLeast(1))
+      if (cutAt != null) n = minOf(n, (cutAt - sentHere).toInt().coerceAtLeast(1))
       out.write(body, position, n)
       out.flush()
       position += n

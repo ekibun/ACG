@@ -61,7 +61,7 @@ class DevToolsAgent {
             ?.let { pid -> runCatching { ProcessHandle.of(pid).ifPresent { it.destroy() } } }
           val deadline = System.currentTimeMillis() + 3_000
           while (portBusy(port) && System.currentTimeMillis() < deadline) Thread.sleep(100)
-          check(!portBusy(port)) { "端口 $port 被别的进程占用，且不是上一轮的 devMediaServer" }
+          check(!portBusy(port)) { "port $port is held by another process that is not the previous devMediaServer" }
         }
         pidFile.delete()
 

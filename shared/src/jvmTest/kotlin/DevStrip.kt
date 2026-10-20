@@ -84,7 +84,7 @@ object DevStrip {
             .readText()
             .trim()
             .also { conn.disconnect() }
-        }.getOrElse { "服务未响应（$action）" }
+        }.getOrElse { "service not responding ($action)" }
     }
 
     val poller = Timer(1_000) { send("status") }
@@ -101,10 +101,10 @@ object DevStrip {
         verticalAlignment = Alignment.CenterVertically,
       ) {
         Text("HttpServer:$port", color = Color(0xFF9CDCFE), fontSize = 12.sp)
-        Action("冻结") { send("freeze") }
-        Action("恢复") { send("resume") }
-        Action("限速") { send("throttle?bps=30000") }
-        Action("不限") { send("throttle?bps=0") }
+        Action("Freeze") { send("freeze") }
+        Action("Resume") { send("resume") }
+        Action("Throttle") { send("throttle?bps=30000") }
+        Action("Unthrottle") { send("throttle?bps=0") }
         // 定宽 + 单行截断：文本变化不改布局尺寸，行高恒定。
         Text(
           status,

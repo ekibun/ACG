@@ -16,10 +16,12 @@ import soko.ekibun.common.monoTimeMs
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
- * **seek 一定会回到关键帧** —— 容器索引的物理限制，不是靠调 `min_ts`/`max_ts` 窗口能绕开的
- * （`SeekWindowSemanticsTest` 钉着）。所以「平滑」要分两步（照 ffplay 的做法），**两者缺一不可**：
+ * **seek 一定会回到关键帧** —— 容器索引的物理限制，不是靠调 `min_ts`/`max_ts` 窗口能绕开的。
+ * 所以「平滑」要分两步（照 ffplay 的做法），**两者缺一不可**：
  * 落关键帧后立刻把主时钟拨到目标（`PTS(relate = ts)`），**再丢掉**关键帧→目标之间的帧
- * （[resumeImpl] 的 `resyncTo`）。判据与依据见 `docs/development/playback-invariants.md`。
+ * （[resumeImpl] 的 `resyncTo`）。丢帧判据本身的单位由 `SeekWindowSemanticsTest` 钉着，
+ * 端到端（真帧序 + 真像素）由 `:shared` 的 `FFPlayerSeekFrameSequenceTest` 钉着；
+ * 依据见 `docs/development/playback-invariants.md`。
  *
  * 播放入口只能在 [playerDispatcher] 上调：读 [pts] 与随后的检查必须落在同一段不被打断的序列里
  * （见那条字段的文档）。

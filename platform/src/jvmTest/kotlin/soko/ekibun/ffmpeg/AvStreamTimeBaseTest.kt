@@ -14,7 +14,8 @@ import kotlin.test.assertEquals
  * 上层要算出「比半格大」的步长，就非得先知道一格多大。
  *
  * 用合成 WAV 钉：PCM 走 `avpriv_set_pts_info(st, 64, 1, sample_rate)`（libavformat/wavdec.c），
- * 时基就是 **1 / 采样率**，刻度算得出来，不用依赖任何成品素材。
+ * 时基就是 **1 / 采样率**，刻度算得出来，不用依赖任何成品素材。素材时长为 1 s，与
+ * [AvFormatDurationTest] 的 2 s 各用各的（后者要的是「总时长那段窗口足够宽」）。
  */
 class AvStreamTimeBaseTest {
   @Test
@@ -23,11 +24,11 @@ class AvStreamTimeBaseTest {
       withTimeout(30_000) {
         AvFormat("memory:test.wav", TestIo(WavMedia.bytes(durationSec = 1))).use { format ->
           val stream = format.getStreams().single()
-          assertEquals(1, stream.timeBaseNum, "PCM WAV 的时基分子恒为 1")
+          assertEquals(1, stream.timeBaseNum, "a PCM WAV time base numerator is always 1")
           assertEquals(
             WavMedia.SAMPLE_RATE,
             stream.timeBaseDen,
-            "PCM WAV 的时基分母是采样率（8 kHz ⇒ 一格 125µs）",
+            "a PCM WAV time base denominator is the sample rate (8 kHz means one tick is 125us)",
           )
         }
       }

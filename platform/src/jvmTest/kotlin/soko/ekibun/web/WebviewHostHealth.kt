@@ -10,20 +10,20 @@ import kotlinx.coroutines.withTimeoutOrNull
  * 与 `:shared` 那侧 `WebViewHostTest.checkHost` 是同一套理由（那边有完整说明）：这台机器上
  * 实测到过一种坏法 —— 环境建得成、控制器建得成、`Navigate` 也返回 S_OK，但**引擎完全不动**，
  * 连 `about:blank` 都到不了完成事件。这种坏法下用例会卡满超时、再报一堆看不懂的断言失败，
- * 纯属噪声；体检一次、打印清楚原因、几个用例一起跳过，才对得起看构建的人。
+ * 纯属噪声；体检一次、说清原因、几个用例一起记成 skipped，才对得起看构建的人。
  *
  * 之所以不走驱动（`webviewAsync`）：`:platform` 的测试**不该依赖 `:shared`**，
  * 依赖方向反了。这里就用平台自己那套 —— 建上下文 → 给尺寸 → 挂 `onEvent` → 导航 → 等
  * `PageFinished` → `evaluate("1 + 1")` → 归还。
  *
- * @return null 表示健康；否则是给人看的跳过原因。
+ * @return null 表示健康；否则是给人看的跳过原因（由 [skipUnlessHostIsAvailable] 记成 skipped）。
  */
 internal fun webviewHostHealth(): String? =
   runBlocking {
     // `Webview2Context` 的伴生初始化要从 `Paths` 取 user data folder：先补注入。
     TestPaths.ensureInitialized()
     val ctx =
-      runCatching { Webview2Context() }.getOrElse { return@runBlocking "宿主起不来：${it.message ?: it}" }
+      runCatching { Webview2Context() }.getOrElse { return@runBlocking "host failed to start: ${it.message ?: it}" }
     try {
       val loaded = CompletableDeferred<Unit>()
       val json =
@@ -38,11 +38,11 @@ internal fun webviewHostHealth(): String? =
         }
       when {
         json == null ->
-          "宿主编译得起来但引擎没有响应：about:blank 在 ${HOST_HEALTH_TIMEOUT_MS}ms 内" +
-            "没有走到 PageFinished。多半是这台机器上的 WebView2 运行时坏了" +
-            "（重装 Evergreen Runtime 通常能好）。"
+          "the host builds but the engine never responds: about:blank did not reach " +
+            "PageFinished within ${HOST_HEALTH_TIMEOUT_MS}ms. Most likely the WebView2 runtime on this " +
+            "machine is broken (reinstalling the Evergreen Runtime usually fixes it)."
         json == "2" -> null
-        else -> "宿主异常：about:blank 健康检查返回 $json"
+        else -> "host failure: the about:blank health check returned $json"
       }
     } finally {
       // dispose() 非挂起：底层 Pointer 自己把销毁派发到归属线程，调用方不必包 NonCancellable。

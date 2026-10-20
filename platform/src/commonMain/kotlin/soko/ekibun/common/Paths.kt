@@ -17,10 +17,10 @@ data class Paths(
     private var instance: Paths? = null
 
     /** 同 [Paths.dataDir]。 */
-    val dataDir: String get() = instance?.dataDir ?: error("Paths.init() 还没调用")
+    val dataDir: String get() = instance?.dataDir ?: error("Paths.init() not called")
 
     /** 同 [Paths.cacheDir]。 */
-    val cacheDir: String get() = instance?.cacheDir ?: error("Paths.init() 还没调用")
+    val cacheDir: String get() = instance?.cacheDir ?: error("Paths.init() not called")
 
     /** 只能成功一次：重复调用时 DataStore 与 WebView2 已按第一份打开。 */
     fun init(paths: Paths) {

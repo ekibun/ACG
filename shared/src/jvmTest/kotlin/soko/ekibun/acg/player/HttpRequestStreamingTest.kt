@@ -36,21 +36,21 @@ class HttpRequestStreamingTest {
           Http.request(mapOf("url" to server.url))
         }
       try {
-        assertEquals(200, rsp.status, "status 应当是那条 200 响应")
+        assertEquals(200, rsp.status, "status should be the 200 response")
         assertTrue(
           rsp.headers.any { (name, values) ->
             name.equals("Transfer-Encoding", ignoreCase = true) &&
               values.any { it.equals("chunked", ignoreCase = true) }
           },
-          "headers 应当带着服务端的头（这里服务端用 chunked 发）",
+          "headers should carry the server's headers (the server sends chunked here)",
         )
-        assertEquals(server.url, rsp.url, "响应的 URL 要对得上")
+        assertEquals(server.url, rsp.url, "the response URL must match")
         // 网络游标起点由 `Content-Range` 推（200 = 服务端从头给 ⇒ 起点 0），
         // 见 [Http.Response.offset] 的 KDoc。
-        assertEquals(0, rsp.offset, "服务端回 200 ⇒ 起点按 0 记")
+        assertEquals(0, rsp.offset, "a 200 from the server means the start offset is 0")
         // contentLength 从响应头推 —— 这里服务端用 chunked 发
         // （sendResponseHeaders(200, 0)），没有 Content-Length，所以按契约是 -1。
-        assertEquals(-1L, rsp.contentLength, "没有 Content-Length/Content-Range 时总长未知，按契约是 -1")
+        assertEquals(-1L, rsp.contentLength, "no Content-Length/Content-Range means unknown length, -1 by contract")
       } finally {
         rsp.close()
       }
@@ -74,10 +74,10 @@ class HttpRequestStreamingTest {
         try {
           val buf = ByteArray(4096)
           val n = rsp.read(buf)
-          assertTrue(n > 0, "应当能读到字节（返回原始 Int，不做 AVERROR 翻译）")
+          assertTrue(n > 0, "should be able to read bytes (raw Int, no AVERROR translation)")
           // 连读两次，确认通道能复用（`offset` 对外只读，这里只证明「读得动、读得下去」）。
           val n2 = rsp.read(buf)
-          assertTrue(n2 >= 0, "通道应当可以连续读（-1 表示读完了，一次性数据不该在这里出现）")
+          assertTrue(n2 >= 0, "the stream should stay readable (-1 means EOF, which streaming data must not hit)")
         } finally {
           rsp.close()
         }
@@ -100,7 +100,7 @@ class HttpRequestStreamingTest {
     ).use { server ->
       val rsp = runBlocking { Http.request(mapOf("url" to server.url)) }
       val buf = ByteArray(4096)
-      assertTrue(runBlocking { rsp.read(buf) } > 0, "先读到数据，证明连接真的在用")
+      assertTrue(runBlocking { rsp.read(buf) } > 0, "read some data first to prove the connection is in use")
       rsp.close()
 
       // 静默期：等服务端 handler 察觉到撒手并出场。
@@ -109,9 +109,9 @@ class HttpRequestStreamingTest {
       assertEquals(
         server.entered,
         server.exited,
-        "close() 之后连接仍挂着（entered>exited）：块没被放回去、传输层没 cleanup",
+        "connection still held after close() (entered>exited): the transport did not clean up",
       )
-      assertEquals(1, server.requests, "整个过程只该开一条会话")
+      assertEquals(1, server.requests, "the whole run should open exactly one session")
     }
   }
 }

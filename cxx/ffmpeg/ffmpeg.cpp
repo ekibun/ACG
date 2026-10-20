@@ -309,7 +309,7 @@ Java_soko_ekibun_ffmpeg_AvFormat_getPacketNative(JNIEnv* env, jobject thiz,
   // 的错误另有 read 回调里那一条（那层才是 AvIO 契约的边界）。
   if (ret < 0 && ret != AVERROR_EOF)
     av_log(nullptr, AV_LOG_ERROR,
-           "av_read_frame error ret=%d（调用方按 EOF 折叠收场）\n", ret);
+           "av_read_frame error ret=%d (folded to EOF by caller)\n", ret);
   return ret ? fmin(ret, -1) : ((AVPacket*)packet)->stream_index;
 }
 extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvCodec_initNative(
@@ -397,15 +397,16 @@ Java_soko_ekibun_ffmpeg_AvCodec_sendPacketAndGetFramesNative(
     // 收帧重发都收不进去：**如实表错**。这一包会被调用方 close 掉，
     // 也就是参考链从此刻断——没有日志的话，外面只会看到"画面花了"。
     av_log(ctx, AV_LOG_ERROR,
-           "avcodec_send_packet 连续 %d 次 EAGAIN，包被丢弃：stream=%d size=%d "
-           "（此后到下一个关键帧的画面都会是错的）\n",
+           "avcodec_send_packet EAGAIN x%d, packet dropped: stream=%d size=%d "
+           "(frames until the next keyframe will be wrong)\n",
            kMaxSendRetry, pstream->index,
            packet ? ((AVPacket*)packet)->size : 0);
   } else if (ret < 0 && ret != AVERROR_EOF) {
-    av_log(ctx, AV_LOG_ERROR,
-           "avcodec_send_packet 失败 ret=%d（stream=%d，本批已解出 %d "
-           "帧，照样交出）\n",
-           ret, pstream->index, (int)out.size());
+    av_log(
+        ctx, AV_LOG_ERROR,
+        "avcodec_send_packet failed ret=%d (stream=%d, %d frame(s) handed out "
+        "anyway)\n",
+        ret, pstream->index, (int)out.size());
   }
 
   receiveAll();

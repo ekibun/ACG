@@ -1,7 +1,6 @@
 package soko.ekibun.acg.player
 
 import soko.ekibun.TestMediaServer
-import soko.ekibun.ffmpeg.AvIO
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -13,38 +12,18 @@ import kotlin.test.assertTrue
  * 判据用「第一次读的耗时 vs 整包下发时长」比：服务端把 body 分若干块下发、块间固定间隔，整包要约
  * 「块数 × 每块间隔」ms；第一次读只要**远早于**它（< 一半）就说明没在等整包。整包缓冲是这层最容易
  * 退回去的形态（实测见 `docs/development/playback-invariants.md` 的「流式读取」一节）。
+ *
+ * 一次**可能永久阻塞**的读走 `readBounded`（守护线程 + join 超时，定义见 `TestSurface.kt`）：
+ * 测试不许被它吊死，用例再带 `@Test(timeout = …)` 兜一层。
  */
 class HttpStreamingTest {
-  /**
-   * 一次**可能永久阻塞**的 [AvIO.read]，丢到**守护线程**上跑并给 `join` 带上超时。
-   *
-   * 测试不许被它吊死 —— 一次没回来的读会让整个构建挂住。超时就把线程栈打出来再失败，
-   * 站在报告里能直接看出卡在哪。
-   */
-  private fun readBounded(
-    io: AvIO,
-    size: Int,
-    timeoutMs: Long = 10_000,
-  ): Int {
-    val result = AtomicInteger(Int.MIN_VALUE)
-    val reader =
-      Thread { result.set(io.read(ByteArray(size))) }.apply {
-        isDaemon = true
-        start()
-      }
-    reader.join(timeoutMs)
-    if (reader.isAlive) {
-      println("[diag] read($size) 在 ${timeoutMs}ms 内没返回，栈：\n" + reader.stackTrace.joinToString("\n"))
-      throw AssertionError("read($size) 在 ${timeoutMs}ms 内没有返回（见 stdout 的栈）")
-    }
-    return result.get()
-  }
-
   @Test(timeout = 60_000)
   fun firstReadReturnsLongBeforeTheWholeBodyArrives() {
-    val chunks = 20
+    // 整包下发期 = 块数 × 块间隔。判据是「首读 < 一半」，所以块数/间隔只要够区分就行 ——
+    // 20 块 × 50ms 那种一个整秒的下发期是白等（实测 1.2 s 里 1 s 是这里）。
+    val chunks = 6
     val chunkSize = 4096
-    val delayMs = 50L
+    val delayMs = 30L
     val totalMs = chunks * delayMs
     TestMediaServer(
       body = ByteArray(chunks * chunkSize) { (it % 251).toByte() },
@@ -55,18 +34,18 @@ class HttpStreamingTest {
       val io = HttpIO.Handler().open(server.url)
       try {
         val t0 = System.nanoTime()
-        val first = readBounded(io, chunkSize)
+        val first = io.readBounded(chunkSize)
         val firstMs = (System.nanoTime() - t0) / 1_000_000
-        assertTrue(first > 0, "第一次读应当拿到已到达的那一块，而不是等整包")
+        assertTrue(first > 0, "the first read should get the arrived chunk, not wait for the whole body")
         assertTrue(
           firstMs < totalMs / 2,
-          "第一次读用了 ${firstMs}ms —— 整包要约 ${totalMs}ms，这就不是流式了",
+          "the first read took ${firstMs}ms -- the whole body takes about ${totalMs}ms, this is not streaming",
         )
 
         // 把剩下的读完，字节数要对得上（流式不等于丢数据）。
         var got = first
-        while (got < chunks * chunkSize) got += readBounded(io, chunkSize)
-        assertEquals(chunks * chunkSize, got, "读完应当正好拿到全部字节")
+        while (got < chunks * chunkSize) got += io.readBounded(chunkSize)
+        assertEquals(chunks * chunkSize, got, "reading to the end should yield exactly all the bytes")
       } finally {
         io.close()
       }
@@ -93,15 +72,15 @@ class HttpStreamingTest {
       val handler = HttpIO.Handler()
       val io = handler.open(server.url)
       try {
-        assertTrue(readBounded(io, 4096) > 0, "第一次读应当拿到数据")
-        assertEquals(1, server.requests, "第一次读应当只开一条会话")
+        assertTrue(io.readBounded(4096) > 0, "the first read should get data")
+        assertEquals(1, server.requests, "the first read should open exactly one session")
 
         // 「本轮作废」—— 但上一次读早就返回了（没有读在等）。
         // 信号只活在一次 read 里，此刻没读在跑 ⇒ abort 是 no-op。
         handler.abort()
 
-        assertTrue(readBounded(io, 4096) > 0, "作废之后仍应当能继续读到数据")
-        assertEquals(1, server.requests, "没人在等时 abort 不该把会话关掉、重发请求")
+        assertTrue(io.readBounded(4096) > 0, "reads should still work after the abort")
+        assertEquals(1, server.requests, "abort with nobody waiting must not drop the session and resend")
       } finally {
         io.close()
       }
@@ -138,20 +117,21 @@ class HttpStreamingTest {
           }
         // 服务端还没发第一块，所以此刻它确实在「进行中」。
         Thread.sleep(100)
-        assertTrue(reader.isAlive, "此刻应当在读里")
+        assertTrue(reader.isAlive, "the read should still be in flight at this point")
 
         handler.abort()
         reader.join(5_000)
-        assertTrue(!reader.isAlive, "abort 必须把等待中的读叫醒")
+        assertTrue(!reader.isAlive, "abort must wake up the waiting read")
         assertEquals(
           4096,
           result.get(),
-          "被作废的读应当报「读满 buf.size」的正数：让 demuxer 当场收手、不再重读（见 HttpIO.read）",
+          "an aborted read must report the positive 'read a full buf.size' value so the demuxer stops at once " +
+            "instead of reading again (see HttpIO.read)",
         )
 
         // 下一次 read 自带全新信号（且手上那条会话已作废）⇒ 重发一条、接着读。
-        assertTrue(readBounded(io, 4096) > 0, "作废之后应当能继续读到数据")
-        assertEquals(2, server.requests, "作废掀掉了那条会话，下一次读必须重发")
+        assertTrue(io.readBounded(4096) > 0, "reads should keep working after the abort")
+        assertEquals(2, server.requests, "the abort dropped that session, so the next read must resend")
       } finally {
         io.close()
       }

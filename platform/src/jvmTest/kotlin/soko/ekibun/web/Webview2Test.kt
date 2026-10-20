@@ -1,13 +1,8 @@
 package soko.ekibun.web
 
-import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import java.net.InetSocketAddress
-import java.util.Base64
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -17,75 +12,38 @@ import kotlin.test.assertTrue
 /**
  * [Webview2Context] 的**直构**用例：不走驱动，直接建上下文、导航、执行脚本。
  *
- * 这里收的是「验平台这一侧自己的管道」的那几条 —— 冒烟（能建、能导航、事件通）与
- * `evaluate` 的收件人接上了。**任务级**的用例（拦截、cookie 跨任务共享、整轮放行）验的是
- * 驱动骨架，已随驱动搬去 `:shared` 的 `soko.ekibun.acg.engine.WebViewHostTest`：那边能直接用
- * `webviewAsync`，而 `:platform` 的测试不该反向依赖 `:shared`。
+ * 这里收的是「验平台这一侧自己的管道」的那几条 —— 上下文能建、能导航、`evaluate` 的收件人
+ * 接上了。**任务级**的用例（拦截、cookie 跨任务共享、整轮放行）验的是驱动骨架，已随驱动
+ * 搬去 `:shared` 的 `soko.ekibun.acg.engine.WebViewHostTest`：那边能直接用 `webviewAsync`，
+ * 而 `:platform` 的测试不该反向依赖 `:shared`。
+ *
+ * 「建上下文 → 挂回调 → 导航 → 归还」那半个冒烟不单独跑：它没有任何断言，唯一能证明的
+ * 「导航真的发生了」下面这条用例已经用真页面证明了。
  *
  * **不自己调 [Webview2Context.prepareEnvironment]**：伴生对象的 `init` 已经用产品那套
  * （浏览器参数 + user data folder）备好了环境；再调一次 `prepareEnvironment(null, null)` 会把
  * **浏览器参数清空**、并把 user data folder 换成 WebView2 的默认值 —— 那就不是在测产品配置了。
  *
- * 宿主坏掉时（WebView2 运行时不行）两条用例都跳过：跳过前会先跑一次
- * [webviewHostHealth] 体检并把原因打到 stdout，静默跳过会让人误以为「验过了」。
+ * 宿主坏掉时（WebView2 运行时不行）用例跳过（记成 skipped，不是 passed）：跳过前会先跑一次
+ * [webviewHostHealth] 体检，原因原样进跳过消息 —— 静默跳过会让人误以为「验过了」。
  */
 class Webview2Test {
-  private lateinit var server: HttpServer
-  private lateinit var serverPool: ExecutorService
-  private var port = 0
-
-  private val pageHtml =
-    """
-    <!doctype html>
-    <html><head><meta charset="utf-8"><title>webview2-test</title>
-    <script src="/sub.js"></script></head>
-    <body><img src="/sub.png"><p>hello</p></body></html>
-    """.trimIndent()
+  private lateinit var pageServer: TestPageServer
 
   @BeforeTest
   fun startServer() {
     TestPaths.ensureInitialized()
-    serverPool = Executors.newFixedThreadPool(4)
-    server =
-      HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
-        executor = serverPool
-        createContext("/page.html") { it.respond("text/html; charset=utf-8", pageHtml.toByteArray()) }
-        createContext("/sub.js") {
-          it.respond("application/javascript", "window.__subLoaded = true;".toByteArray())
-        }
-        createContext("/sub.png") {
-          it.respond("image/png", Base64.getDecoder().decode(PNG_1X1))
-        }
-        start()
-      }
-    port = server.address.port
+    pageServer = TestPageServer()
   }
 
   @AfterTest
   fun stopServer() {
-    server.stop(0)
-    serverPool.shutdownNow()
+    pageServer.close()
   }
 
-  private fun url(path: String): String = "http://127.0.0.1:$port$path"
+  private fun url(path: String): String = pageServer.url(path)
 
   private suspend fun <T> guarded(block: suspend () -> T): T = withTimeout(60_000) { block() }
-
-  /** 冒烟：建上下文 → 挂两个回调 → 导航 → 归还。 */
-  @Test
-  fun initWebview2Context() {
-    runBlocking {
-      Webview2Context().use { ctx ->
-        ctx.onEvent = { event -> println("onEvent($event)") }
-        ctx.onInterceptor = { url, headers, method, isForMainFrame ->
-          println("onWebResourceRequested($url, $method $isForMainFrame ${headers.toList()})")
-          false
-        }
-        ctx.navigate("https://www.google.com")
-        Thread.sleep(10000)
-      }
-    }
-  }
 
   /**
    * 可见视图上的 `evaluate` —— 和后台任务同一个 `ExecuteScript`，只是收件人换成了
@@ -106,11 +64,7 @@ class Webview2Test {
   @Test
   fun visibleViewEvaluateReturnsScriptResult() =
     runBlocking {
-      val reason = webviewHostHealth()
-      if (reason != null) {
-        println("[Webview2Test] skip visibleViewEvaluateReturnsScriptResult: $reason")
-        return@runBlocking
-      }
+      skipUnlessHostIsAvailable(webviewHostHealth())
 
       val ctx = Webview2Context()
       val loaded = CompletableDeferred<Unit>()
@@ -132,25 +86,10 @@ class Webview2Test {
         assertEquals(
           "null",
           ctx.evaluate("undefined"),
-          "没有返回值的脚本应该给 JSON 的 null 字符串",
+          "a script without a return value should yield the JSON string null",
         )
       } finally {
         ctx.close()
       }
     }
-
-  private fun com.sun.net.httpserver.HttpExchange.respond(
-    contentType: String,
-    body: ByteArray,
-  ) {
-    responseHeaders.add("Content-Type", contentType)
-    sendResponseHeaders(200, body.size.toLong())
-    responseBody.use { it.write(body) }
-  }
-
-  private companion object {
-    /** 1×1 的透明 PNG。用真的图，免得 WebView2 那边报解码错误干扰日志。 */
-    const val PNG_1X1 =
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
-  }
 }

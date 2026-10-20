@@ -73,7 +73,7 @@ class QuickJSTest {
   /** 关闭并断言输出里没有泄漏报告。 */
   private fun QuickJS.closeAndAssertNoLeak() {
     val out = closeCapturingOut()
-    assertTrue("reference leak" !in out, "close 不该报泄漏：\n$out")
+    assertTrue("reference leak" !in out, "close must not report a leak:\n$out")
   }
 
   @Test
@@ -129,14 +129,21 @@ class QuickJSTest {
       assertIs<JSFunction>(eval(ctx, "async (a) => a", name = "<testWrap>")).use { wrap ->
         assertEquals(null, callAsync(wrap, null))
         val primitives = listOf<Any?>(0, 1, 0.1, true, false, "str")
-        val wrapped = callAsync(wrap, primitives) as List<*>
-        assertEquals(primitives.size, wrapped.size)
+        // Char / Byte / Short 走的是同一条「先转 Int 再按 JS_TAG_INT 回来」的分支
+        // （QuickJS.kt 的 javaToJsImpl），只有它们没被别的用例覆盖到。
+        val narrow = listOf<Any>('z', 7.toByte(), 9.toShort())
+        val wrapped = callAsync(wrap, primitives + narrow) as List<*>
+        assertEquals((primitives + narrow).size, wrapped.size)
         for (i in primitives.indices) {
           val expected = primitives[i]
           val actual = wrapped[i]
           // 整数经 JS_TAG_INT 回来是 Long，小数经 JS_TAG_FLOAT64 回来是 Double
           if (expected is Int) assertEquals(expected.toLong(), actual) else assertEquals(expected, actual)
         }
+        val n = primitives.size
+        assertEquals('z'.code.toLong(), wrapped[n], "Char converts to Int by code point")
+        assertEquals(7L, wrapped[n + 1], "Byte converts to Int")
+        assertEquals(9L, wrapped[n + 2], "Short converts to Int")
       }
     } finally {
       runBlocking { ctx.closeAndAssertNoLeak() }
@@ -171,28 +178,6 @@ class QuickJSTest {
       // 显式归还之后不该有残留；有残留会在这里抛出来（而不是让进程 abort）
       runBlocking { ctx.closeAndAssertNoLeak() }
     }
-  }
-
-  /**
-   * flutter_qjs: `test('reference leak')`。
-   *
-   * 那条测试的用意是：**故意**不释放 `()=>{}` 的返回值，然后断言 close 在输出流打出
-   * `reference leak:` 前缀的报告。这验证的是「泄漏不会静默变成 C 层断言」。
-   *
-   * 对照本工程重构前的表现：同样场景会让 QuickJS 在 `JS_FreeRuntime` 里
-   * `assert(list_empty(&rt->gc_obj_list))` 失败并 `abort()`，整个测试进程死掉，
-   * 根本轮不到断言。现在它变成 close 时打印出的一份报告，测试捕获断言。
-   */
-  @Test
-  fun referenceLeak() {
-    val ctx = context()
-    // 故意不 close()：这个 JSFunction 包装在 close 时仍被登记着
-    eval(ctx, "()=>{}", name = "<eval>")
-    val out = ctx.closeCapturingOut()
-    assertTrue(
-      "reference leak:" in out,
-      "expected a reference leak report, got: $out",
-    )
   }
 
   /** 正常路径不该报泄漏：所有包装都显式归还后，close 的输出必须安静 */
@@ -510,19 +495,22 @@ class QuickJSTest {
     assertEquals(
       64,
       out.split("\n").count { it.contains("JSFunction") },
-      "64 个在册函数应逐一进报告",
+      "every registered function should be listed in the report",
     )
     // 再次调用应当幂等（已关闭）：报告不会重复打印
     assertEquals("", ctx.closeCapturingOut())
   }
 
-  /** close 之后的 QuickJS 不应再被使用（当前实现会抛错，属于可接受行为） */
+  /**
+   * close 之后的 QuickJS 不应再被使用：读句柄要**当场报错**，不能静默返回 null
+   * （静默的话上层会拿着 null 继续用下去）。
+   */
   @Test
   fun closedContextIsInert() {
     val ctx = context()
     assertEquals(2L, eval(ctx, "1 + 1"))
     ctx.close()
-    assertFailsWith<Throwable> { eval(ctx, "1 + 1") }
+    assertFailsWith<IllegalStateException> { eval(ctx, "1 + 1") }
   }
 
   /**

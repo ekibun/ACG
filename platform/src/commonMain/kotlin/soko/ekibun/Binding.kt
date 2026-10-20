@@ -314,7 +314,7 @@ abstract class Pointer protected constructor(
    * 出来 —— 总好过把 `0` 静默当合法句柄一路用到 native 里。
    */
   internal open fun initPtr(): Long =
-    throw IllegalStateException("$simpleClassName 既没在构造参数里交出句柄，也没覆写 Pointer.initPtr()")
+    throw IllegalStateException("$simpleClassName has no handle and does not override Pointer.initPtr()")
 
   /**
    * 在**归属 dispatcher 上**、带着句柄跑一段挂起代码 —— native 调用的标准形态。

@@ -79,6 +79,10 @@ kotlin {
     }
     jvmTest.dependencies {
       implementation(libs.kotlin.test)
+      // 健康检查的「宿主不可用」要靠 JUnit4 的 assumption 才能记成 skipped —— kotlin-test 的
+      // JUnit4 门面只带 @Ignore，println + 早退在 XML 里是 passed。版本由 Kotlin plugin 按
+      // 同一版本 pin 好了，这里引裸坐标不会引入第二个 junit。
+      implementation("junit:junit:4.13.2")
     }
   }
 }

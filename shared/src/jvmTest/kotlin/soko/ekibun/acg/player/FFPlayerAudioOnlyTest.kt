@@ -6,12 +6,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import soko.ekibun.TestMedia
 import soko.ekibun.ffmpeg.AVMediaType
-import soko.ekibun.ffmpeg.AvFormat
-import soko.ekibun.ffmpeg.AvFrame
-import soko.ekibun.ffmpeg.AvSurfaceContext
 import soko.ekibun.ffmpeg.FFPlayer
 import java.util.Collections
-import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
@@ -22,49 +18,21 @@ import kotlin.time.Duration.Companion.milliseconds
  * 防的是：续播判据若闸在「有无视频轨」上，纯音频输入 `play()` 不读任何包（无声）、
  * `seekTo()` 停住不续播（seek 的续播与 play 走同一个门）。
  *
- * 不必为这件事专门造一个纯音频文件：**打开一份普通素材、只把音频那条 [AvFormat.getStreams]
+ * 不必为这件事专门造一个纯音频文件：**打开一份普通素材、只把音频那条 `getStreams()`
  * 出来的流交给 `play()`**，`pts.streams` 里就只有音频，走的正是那条分支。取包侧同样只看
  * 传进去的流 —— `AvFormat.getPacket` 会把不属于这些流的包**就地丢掉**（见那边的注释），
  * 所以视频包根本不会流进来。
  *
  * 素材用随源码入库的 [TestMedia.BBB_640X360_12S_FASTSTART]（含音轨，AAC 44.1kHz 立体声）。
- * 假声卡 [FakeSurfaceContext] 只数「音频帧到达平台侧」的次数，不排真声卡 —— 音频路径没有实时节流
+ * 假声卡（[TestSurface]）只数「音频帧到达平台侧」的次数，不排真声卡 —— 音频路径没有实时节流
  * （等时钟的 `delay` 只在视频分支），整轮会以解码速度跑完。
  */
 class FFPlayerAudioOnlyTest {
-  private class FakeSurfaceContext : AvSurfaceContext() {
-    val flushes = AtomicInteger(0)
-
-    // 声明给 native 的重采样目标，取素材自己的规格（BBB = AAC 44.1kHz 立体声）——
-    // 与判据无关，只决定 native 要输出成什么格式，别的取值照样能跑。
-    override val sampleRate: Int = 44_100
-    override val channels: Int = 2
-    override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_S16
-
-    override suspend fun flushFrameImpl(
-      codecType: Int,
-      frame: AvFrame,
-      getBuffer: () -> ByteArray?,
-    ): Long {
-      if (codecType == AVMediaType.AUDIO) {
-        flushes.incrementAndGet()
-        // 返回 0 = 没有重采样前导偏移，时间戳原样上屏（见 AvSurfaceContext.flushFrame）。
-        return 0
-      }
-      return -1
-    }
-
-    override suspend fun resume() {}
-
-    override suspend fun pause() {}
-
-    override suspend fun stop() {}
-  }
-
   @Test(timeout = 120_000)
   fun audioOnlyPlayRunsToEof() {
     val events: MutableList<Long?> = Collections.synchronizedList(mutableListOf<Long?>())
-    val playback = FakeSurfaceContext()
+    // 重采样目标取素材自己的规格（BBB = AAC 44.1kHz 立体声）；与判据无关，别的取值照样能跑。
+    val playback = TestSurface(rate = 44_100)
     val media = TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART)
     runBlocking {
       val player =
@@ -82,7 +50,7 @@ class FFPlayerAudioOnlyTest {
         withTimeout(30_000.milliseconds) {
           while (events.isEmpty() || events.last() != null) delay(10.milliseconds)
         }
-        assertTrue(playback.flushes.get() > 0, "audio frames must reach the platform side")
+        assertTrue(playback.audioFrameCount > 0, "audio frames must reach the platform side")
         assertTrue(events.contains(null), "EOF must be signaled via Event.Frame(null)")
       } finally {
         player.closeAsync()

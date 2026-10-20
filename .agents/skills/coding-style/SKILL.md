@@ -27,6 +27,16 @@ description: Use when 新增或修改 shared/ 下的 Kotlin 与 Compose 代码�
 
 > **DO：** 改到旧注释就顺手改成中文；一个文件改完**整篇过一遍**注释，不只改手上碰的那一处。
 
+> **DO：** **代码里的非 UI 文本一律用英文**，保证控制台与日志输出都是 ASCII —— 异常 message、
+> `check` / `error` 的提示、`println` / `av_log` / `WV_LOG` 日志、断言消息、错误事件里的 reason
+> 都算。Windows 控制台按代码页编解码，非 ASCII 直接变乱码。
+>
+> **DO：** **用户可见的界面文案保持中文**（`@Composable` 里的 `Text(...)`、`label`、`text =`，
+> 以及 `CallbackServer` 那类给用户看的 HTML 页）。这是本地化内容，不是诊断输出，不要"顺手统一"。
+>
+> **判断标准：谁读它。** 开发者读的（日志 / 异常 / 断言）→ 英文；用户读的（界面）→ 中文。
+> 注释仍用中文（上一条），三者不冲突。
+
 ## 二、本项目与官方/工具不同的特例
 
 > **DO：** `@Composable` 且返回 `Unit` 的函数用 UpperCamelCase 名词（Compose 官方基线，App 档 MUST）。
@@ -48,6 +58,5 @@ description: Use when 新增或修改 shared/ 下的 Kotlin 与 Compose 代码�
 
 > **DO：** C++ 注释写完**必须跑 `clang-format -i`**：`ReflowComments` 会把中英混排注释按列宽重排，
 > 句中断行被换成空格、句子被切开。回修姿势是**塌成一条物理行**再 `-i`（逐行删空格无效）；
-> 收敛判据是再跑一次 `diff` 为空。写在 C++ 里的中文注释要短（`ColumnLimit: 80` 按显示宽度算，
-> 一行约 38 个汉字顶格）。实测数据见
-> [`docs/development/format-config-rationale.md`](../../../docs/development/format-config-rationale.md)。
+> 收敛判据是再跑一次 `diff` 为空。写在 C++ 里的中文注释要**短**，长句会在句中被折断；
+> 宽度依据见 [`docs/development/format-config-rationale.md`](../../../docs/development/format-config-rationale.md)。

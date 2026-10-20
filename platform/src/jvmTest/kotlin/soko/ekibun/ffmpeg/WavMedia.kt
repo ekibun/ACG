@@ -28,7 +28,7 @@ internal object WavMedia {
     bytes.putInt(36 + data.capacity())
     bytes.put("WAVE".toByteArray(Charsets.US_ASCII))
     bytes.put("fmt ".toByteArray(Charsets.US_ASCII))
-    bytes.putInt(16) // PCM fmt chunk 大小
+    bytes.putInt(16) // size of the PCM fmt chunk
     bytes.putShort(1) // PCM
     bytes.putShort(CHANNELS.toShort())
     bytes.putInt(SAMPLE_RATE)

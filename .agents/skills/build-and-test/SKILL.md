@@ -6,19 +6,20 @@ description: >-
 
 # 构建与验收
 
-## 核心规则
+> **DO：** `gradlew` 是唯一的调用单位，**前后都不许接东西**（不接 `$env:X=...;`、`cd`、管道、`2>&1`、`;` 串接）。要留证据让 Gradle 自己落盘，跑完再单独读文件。
+> 原因：`gradlew` 在 `dsh-sandbox-allowlist` 里是 `opaque` 能力类，多一段未知程序就降级为 `delegate`，审批弹窗回来。
 
-> **DO：** 构建依赖 `JAVA_HOME` 启动 `gradlew`；`gradlew` 据当前环境变量（如 `MSYS2_BIN`）自动完成编译与测试。若所需环境变量缺失导致无法构建，**直接停下报告，不要自行寻找路径或绕过**。
+> **DO：** `gradlew` 一律带沙箱提权（`sandbox_permissions: danger-full-access`）。Gradle 要写工作区外的 `~/.gradle`，不提权必在 `.zip.lck` 上 `AccessDeniedException`；规则只批准提权，不会自己发起。
 
-> **DO：** 验收纪律（定点 `jvmTest`、提交前才跑四条编译闸门 / 全量测试 / lint）以根 [`AGENTS.md`](../../../AGENTS.md) §2.5 为正本；本技能只给具体命令。
+> **DO：** `JAVA_HOME` / `MSYS2_BIN` 由 `gradlew` 自己带入；环境缺失就**停手报告**，不要自己找路径或绕过。
+
+> **DO：** 验收纪律以根 [`AGENTS.md`](../../../AGENTS.md) §2.5 为正本，各文件只给命令。Windows 上 `./gradlew` 即 `.\gradlew.bat`。
 
 ## 按场景查
 
 | 要做什么 | 读哪份 |
 |---|---|
-| 构建桌面 / Android 包、产物与 ABI 核对 | [`references/build.md`](./references/build.md) |
-| 调试播放（dev 媒体服务器、在线测试流、本地生成） | [`docs/development/debug-playback.md`](../../../docs/development/debug-playback.md) |
-| 四条编译闸门的任务名与覆盖面 | [`references/gates.md`](./references/gates.md) |
+| 编译门禁（六条）、native（JNI 层 / `cxx/`）、打桌面与 Android 包 | [`references/build.md`](./references/build.md) |
 | ktlint / clang-format 与 pre-commit hook | [`references/lint.md`](./references/lint.md) |
 | 定点 / 全量 `jvmTest`、`--rerun`、结果读 XML | [`references/test.md`](./references/test.md) |
 

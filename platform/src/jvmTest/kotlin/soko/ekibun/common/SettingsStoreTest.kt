@@ -15,7 +15,11 @@ class SettingsStoreTest {
   @Test
   fun readsEmptyBeforeAnyWrite() =
     runBlocking {
-      assertEquals(emptyMap(), tempStore().read(), "文件还不存在时读回来是空表，不是错误")
+      assertEquals(
+        emptyMap(),
+        tempStore().read(),
+        "reading a file that does not exist yet yields an empty map, not an error",
+      )
     }
 
   @Test
@@ -23,7 +27,7 @@ class SettingsStoreTest {
     runBlocking {
       val dataDir = Files.createTempDirectory("acg-settings").resolve("nested")
       val path = dataDir.resolve("settings.preferences_pb")
-      assertTrue(!Files.exists(dataDir), "前提：父目录还没建")
+      assertTrue(!Files.exists(dataDir), "precondition: the parent directory does not exist yet")
       val store = createSettingsStore(path.toString())
 
       store.write(mapOf("bgm.client_id" to "client-1", "bgm.client_secret" to "s3cret"))
@@ -33,11 +37,11 @@ class SettingsStoreTest {
       )
       assertTrue(
         Files.size(path) > 0,
-        "写完文件得真的落盘 —— 父目录由 DataStore 自己建出来（首次运行就是这种）",
+        "the write must land on disk -- DataStore creates the parent directory itself on a first run",
       )
 
       store.write(mapOf("bgm.client_id" to null))
-      assertEquals(mapOf("bgm.client_secret" to "s3cret"), store.read(), "值为 null 是删键")
+      assertEquals(mapOf("bgm.client_secret" to "s3cret"), store.read(), "a null value deletes the key")
 
       store.write(mapOf("bgm.client_secret" to null))
       assertEquals(emptyMap(), store.read())

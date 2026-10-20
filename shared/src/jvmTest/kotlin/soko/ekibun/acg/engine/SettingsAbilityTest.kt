@@ -31,7 +31,7 @@ class SettingsAbilityTest {
         return await Settings.get("probe.client_id");
         """,
       ),
-      "写必须 await —— 不 await 的话下一句读与它并发，谁先落盘不确定",
+      "the write must be awaited -- without await the next read races it and the persist order is undefined",
     )
   }
 
@@ -46,7 +46,10 @@ class SettingsAbilityTest {
         """,
       )
 
-    assertNull(afterDelete, "值为 null 是删键，读回来该是 null（不是空串、也不是 undefined）")
+    assertNull(
+      afterDelete,
+      "a null value deletes the key, so reading back yields null (not an empty string, not undefined)",
+    )
   }
 
   @Test

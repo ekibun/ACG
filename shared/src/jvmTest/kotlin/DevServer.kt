@@ -33,9 +33,9 @@ fun main(args: Array<String>) {
   var index = 0
   while (index < args.size) {
     when (args[index]) {
-      "--port" -> port = args.getOrNull(++index)?.toIntOrNull() ?: error("--port 需要一个数字")
-      "--media" -> mediaPath = Path.of(args.getOrNull(++index) ?: error("--media 需要一个路径"))
-      else -> error("不认识的参数：${args[index]}（可用 --port <n> / --media <path>）")
+      "--port" -> port = args.getOrNull(++index)?.toIntOrNull() ?: error("--port needs a number")
+      "--media" -> mediaPath = Path.of(args.getOrNull(++index) ?: error("--media needs a path"))
+      else -> error("unknown argument: ${args[index]} (available: --port <n> / --media <path>)")
     }
     index++
   }
@@ -43,12 +43,12 @@ fun main(args: Array<String>) {
   val source =
     mediaPath
       ?: TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART).also {
-        println("未指定 --media，用入库测试媒体：$it")
+        println("no --media given, using the bundled test media: $it")
       }
-  println("素材：$source")
+  println("media: $source")
 
   val bytes = Files.readAllBytes(source)
-  println("供流字节数：${bytes.size}")
+  println("bytes served: ${bytes.size}")
 
   val server =
     try {
@@ -59,12 +59,15 @@ fun main(args: Array<String>) {
         control = true,
       )
     } catch (_: BindException) {
-      System.err.println("端口 $port 已被占用（可能已有一个 devMediaServer 在跑）：换 --port，或先结束已有实例。")
+      System.err.println(
+        "port $port is already in use (a devMediaServer may already be running): " +
+          "pick another --port, or stop the existing instance first.",
+      )
       exitProcess(1)
     }
   val base = server.url.removeSuffix("/media")
-  println("供流地址：${server.url}")
-  println("控制端点：$base/__control/{freeze,resume,throttle?bps=<n>,shutdown}")
+  println("serving at: ${server.url}")
+  println("control endpoints: $base/__control/{freeze,resume,throttle?bps=<n>,shutdown}")
 
   // 常驻直到 Ctrl-C / /__control/shutdown：显式挂住主线程，不依赖 HttpServer 线程的 daemon 与否。
   Thread.currentThread().join()

@@ -323,7 +323,7 @@ flowchart LR
 
 > **DON'T:** 相信「本桥 `import()` 会让进程 `abort()`」这类老说法（本文档与 `init.js` 里都曾写过）。
 > 实测是通的，`init.js` / 本文都已更正；插件机制就建立在它上面。加新插件的第一步是跑一次
-> `ModuleImportProbeTest` 这类探测用例，不要靠二手结论去设计绕路方案。
+> 插件通路的用例（`PluginHostTest`），不要靠二手结论去设计绕路方案。
 
 ```mermaid
 sequenceDiagram

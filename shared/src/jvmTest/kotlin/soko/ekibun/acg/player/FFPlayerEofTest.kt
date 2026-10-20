@@ -7,9 +7,6 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import soko.ekibun.TestMedia
 import soko.ekibun.ffmpeg.AVMediaType
-import soko.ekibun.ffmpeg.AvFormat
-import soko.ekibun.ffmpeg.AvFrame
-import soko.ekibun.ffmpeg.AvSurfaceContext
 import soko.ekibun.ffmpeg.FFPlayer
 import java.util.Collections
 import kotlin.test.Test
@@ -24,42 +21,16 @@ import kotlin.test.assertTrue
  * 其他用例都只播到第一帧就暂停，撞不到它。
  *
  * 观测点是 [FFPlayer.Event.Frame]：`FFPlayer` 播完会以 `pts = null` 回调 ——
- * 这既是「真的播到片尾了」的公开信号，也是本用例的计时起点。从片尾前 3s 起播（不是从头），
- * 让用例几秒就能跑到 END，而不是干等整段素材。
+ * 这既是「真的播到片尾了」的公开信号，也是本用例的计时起点。从片尾前 1s 起播（不是从头），
+ * 让用例一秒就能跑到 END，而不是干等整段素材。
  *
  * 素材用随源码入库的 [TestMedia.BBB_640X360_12S_FASTSTART]（12s / 300 帧），换台机器 / CI 也真跑。
  */
 class FFPlayerEofTest {
-  /**
-   * 空播放设备：只收集 [FFPlayer.Event.Frame] 的时间戳（含末尾的 `null`），不送显不送声。
-   */
-  private class Sink : AvSurfaceContext() {
-    override val sampleRate: Int = 48_000
-    override val channels: Int = 2
-    override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_S16
-
-    override suspend fun flushFrameImpl(
-      codecType: Int,
-      frame: AvFrame,
-      getBuffer: () -> ByteArray?,
-    ): Long {
-      if (codecType == AVMediaType.AUDIO) {
-        return 0
-      }
-      return -1
-    }
-
-    override suspend fun resume() = Unit
-
-    override suspend fun pause() = Unit
-
-    override suspend fun stop() = Unit
-  }
-
   @Test(timeout = 120_000)
   fun playToEofThenPauseAndCloseReturn() {
     val media = TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART)
-    val sink = Sink()
+    val sink = TestSurface()
     val frames: MutableList<Long?> = Collections.synchronizedList(ArrayList<Long?>())
     runBlocking {
       val player =
@@ -68,10 +39,10 @@ class FFPlayerEofTest {
         }
       try {
         val video = player.getStreams().first { it.codecType == AVMediaType.VIDEO }
-        // 从片尾前 3 秒起播。`duration` 是 **AV_TIME_BASE 微秒**
-        // （native 侧是 `stream->duration * av_q2d(time_base) * AV_TIME_BASE`，见 cxx/ffmpeg/ffmpeg.cpp），
-        // 与 play(seek) / resumeImpl 里那些时间戳同单位。
-        val start = maxOf(video.duration - 3_000_000, 0)
+        // 从片尾前 1 秒起播：够走到 EOF 那条收场路径，又不必按墙钟干等 3 秒。
+        // `duration` 是 **AV_TIME_BASE 微秒**（native 侧是 `stream->duration * av_q2d(time_base) * AV_TIME_BASE`，
+        // 见 cxx/ffmpeg/ffmpeg.cpp），与 play(seek) / resumeImpl 里那些时间戳同单位。
+        val start = maxOf(video.duration - 1_000_000, 0)
         // play() 要一直挂到整个播放轮次结束（withContext 会等自己的子协程，而轮次就是那个子协程），
         // 所以不能 await —— UI 里也是 fire-and-forget 地 launch。
         val playJob = launch { player.play(mapOf(AVMediaType.VIDEO to video), start) }
@@ -88,7 +59,7 @@ class FFPlayerEofTest {
         // null 之前必须真有帧显示过（否则「null」可能来自开播即失败的假路径）。
         assertTrue(
           frames.any { it != null },
-          "片尾收场前应当显示过帧，实际 frames=${frames.take(5)}…",
+          "a frame should have been shown before the EOF teardown, got frames=${frames.take(5)}...",
         )
       } finally {
         // withTimeoutOrNull：本用例失败时（例如又退回挂死那版）不许把整个测试进程拖住

@@ -32,11 +32,11 @@ class CallbackSessionTest {
     try {
       val uri = URI(session.callbackUrl)
       assertEquals("http", uri.scheme, session.callbackUrl)
-      assertEquals("127.0.0.1", uri.host, "只绑回环：同网段的别人不该能替用户完成登录")
-      assertTrue(uri.port in 1..65535, "端口由 OS 分配：${session.callbackUrl}")
+      assertEquals("127.0.0.1", uri.host, "loopback only: nobody else on the network may complete the login")
+      assertTrue(uri.port in 1..65535, "the port is assigned by the OS: ${session.callbackUrl}")
       assertTrue(
         uri.path.removePrefix("/").matches(Regex("[0-9a-f]{24}")),
-        "路径段应是十六进制的会话 id：${session.callbackUrl}",
+        "the path segment should be a hex session id: ${session.callbackUrl}",
       )
       // 这两条是给换 token 用的：redirect_uri 要逐字回传，多一个 `?code=…` 或尾斜杠就不是它了。
       assertNull(uri.query, session.callbackUrl)
@@ -54,7 +54,7 @@ class CallbackSessionTest {
       assertEquals(
         first.origin(),
         second.origin(),
-        "服务器是进程级单例：端口复用，会话靠路径区分",
+        "the server is a process-wide singleton: the port is reused and sessions are distinguished by path",
       )
       assertNotEquals(first.path(), second.path())
     } finally {
@@ -74,12 +74,12 @@ class CallbackSessionTest {
         val target = session.path() + "?code=4808dfb7&state=probe%2B1&x=%E4%B8%AD"
         val response = request(session.origin(), target)
         assertEquals(200, response.status)
-        assertTrue(response.body.contains("登录完成"), response.body)
+        assertTrue(response.body.isNotEmpty(), "the callback page should have a body: ${response.body}")
 
         assertEquals(
           "${session.origin()}$target",
           session.awaitCallback(),
-          "交付的必须是原样的 request-target —— 解码归插件按段做",
+          "the delivered value must be the verbatim request-target -- decoding is the plugin's job, segment by segment",
         )
       } finally {
         session.close()
@@ -94,7 +94,7 @@ class CallbackSessionTest {
       try {
         assertEquals(200, request(second.origin(), second.path() + "?code=second").status)
         assertEquals("${second.origin()}${second.path()}?code=second", second.awaitCallback())
-        assertFailsWith<TimeoutCancellationException>("第一个会话不该被第二个的回调兑现") {
+        assertFailsWith<TimeoutCancellationException>("the first session must not be fulfilled by the second") {
           withTimeout(500) { first.awaitCallback() }
         }
       } finally {
@@ -109,7 +109,7 @@ class CallbackSessionTest {
     val origin = session.origin()
     val target = session.path() + "?code=after-close"
     session.close()
-    assertEquals(404, request(origin, target).status, "撤掉的会话不该还能被兑现")
+    assertEquals(404, request(origin, target).status, "a closed session must not be fulfillable anymore")
   }
 
   private data class Response(

@@ -35,7 +35,7 @@ class BgmSourceMappingTest {
     assertEquals("ニンジャバットマン対ヤクザリーグ", first.name)
     assertEquals("忍者蝙蝠侠对极道联盟", first.nameCn)
     assertEquals("https://lain.bgm.tv/r/100/pic/cover/l/65/fb/497110_X6ZIL.jpg", first.coverUrl)
-    assertEquals(6.9, first.score, "小数走 JS_TAG_FLOAT64")
+    assertEquals(6.9, first.score, "a fractional value comes back as JS_TAG_FLOAT64")
     assertEquals(2876, first.rank)
     assertEquals(1, first.eps)
     assertEquals(0, first.epStatus)
@@ -50,7 +50,7 @@ class BgmSourceMappingTest {
     assertEquals(7.0, second.score)
     assertEquals(12, second.eps)
     assertEquals(5, second.epStatus)
-    assertNull(second.nameCn, "name_cn 是空串：按「没有中文名」处理，让界面回退到原名")
+    assertNull(second.nameCn, "an empty name_cn means 'no localized name', so the UI falls back to the original name")
   }
 
   @Test
@@ -69,7 +69,7 @@ class BgmSourceMappingTest {
     // 没有 subject / 没有 id 的项画不出来，跳过而不是塞一个空壳进列表。
     val page = bgmCollectionPageOf(evalFixture("""{"data":[{"rate":5},{"subject":{"id":0}}],"total":2}"""))
 
-    assertTrue(page.items.isEmpty(), "实际留下：${page.items}")
+    assertTrue(page.items.isEmpty(), "items left behind: ${page.items}")
   }
 
   @Test

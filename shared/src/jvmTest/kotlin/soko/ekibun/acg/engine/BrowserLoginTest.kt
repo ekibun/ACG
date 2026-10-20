@@ -39,10 +39,10 @@ class BrowserLoginTest {
         }
 
       val authorizeUrl = launched.await()
-      assertFalse(authorizeUrl.contains("{{callback}}"), "占位符必须被换掉：$authorizeUrl")
+      assertFalse(authorizeUrl.contains("{{callback}}"), "the placeholder must be substituted: $authorizeUrl")
       assertTrue(
         authorizeUrl.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A"),
-        "换进去的要是百分号编码形式（授权链接把它放在查询串里）：$authorizeUrl",
+        "the substituted value must be percent-encoded (the authorize URL puts it in the query string): $authorizeUrl",
       )
 
       val callbackUrl =
@@ -58,7 +58,7 @@ class BrowserLoginTest {
       assertEquals(
         "$origin$target",
         login.await(),
-        "插件拿到的是浏览器实际请求的那个完整 URL：原样、未解码（解码归插件按段做）",
+        "the plugin receives the exact URL the browser requested: verbatim, not decoded (decoding is the plugin's job, segment by segment)",
       )
     }
 
@@ -67,11 +67,13 @@ class BrowserLoginTest {
     runBlocking {
       val failure =
         assertFailsWith<JSError> {
-          JsEngine.instance.openBrowserAsync("https://example.com/auth?x=1") { _ -> error("不该开浏览器") }
+          JsEngine.instance.openBrowserAsync("https://example.com/auth?x=1") { _ -> error("must not open the browser") }
         }
+      // 文案里带不带那段原文归派发层（JsEngineDispatchTest 锁「args[0] 真到了」）——
+      // 这里只钉住「拒绝了」，以及上面那个注入的 `launch` 一次都没被调。
       assertTrue(
-        failure.message.orEmpty().contains("{{callback}}"),
-        "拒绝的理由要说清是缺占位符：${failure.message}",
+        failure.message.orEmpty().isNotEmpty(),
+        "a rejection must carry a reason: ${failure.message}",
       )
     }
 

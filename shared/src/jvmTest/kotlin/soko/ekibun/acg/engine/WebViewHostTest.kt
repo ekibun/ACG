@@ -1,15 +1,10 @@
 package soko.ekibun.acg.engine
 
-import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import soko.ekibun.acg.TestPaths
-import java.net.InetSocketAddress
-import java.util.Base64
 import java.util.Collections
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -45,12 +40,12 @@ private data class SeenRequest(
  *    命中即 `Stop()`，整轮加载当场中止，那条时序不可达 —— 见
  *    [releasingEveryRequestLetsPageFinish]。）
  *
- * 环境不满足时这几个用例都跳过：这测的是集成，不是环境。跳过前会先跑一次
- * [checkHost] 体检（真导航一个 `about:blank`），并把原因打到 stdout ——
+ * 环境不满足时这几个用例都跳过（记成 skipped，不是 passed）：跳过前会先跑一次
+ * [checkHost] 体检（真导航一个 `about:blank`），原因原样进跳过消息 ——
  * 静默跳过容易让人误以为「验过了」。
  *
  * 注意 [webviewAsync] 内部用的是 `30.seconds` 护栏（约 30s），
- * 这里外面再套一层 60s 的护栏，免得真出问题把构建挂死。
+ * 这里外面再套一层 35s 的护栏，免得真出问题把构建挂死。
  *
  * 正因为不走 `_binding`，本类证明不了 `JsEngine` 的 `when` 派发改对了 ——
  * 那一路由同包的 [JsEngineDispatchTest] 管（零桩、真 `JsEngine`）。两类合起来才
@@ -62,59 +57,38 @@ private data class SeenRequest(
  * （`platform/jvmTest/.../web/Webview2Test.kt`、`WebViewCookieManagerTest.kt`）。
  */
 class WebViewHostTest {
-  private lateinit var server: HttpServer
-  private lateinit var serverPool: ExecutorService
-  private var port = 0
-
-  private val pageHtml =
-    """
-    <!doctype html>
-    <html><head><meta charset="utf-8"><title>webview-test</title>
-    <script src="/sub.js"></script></head>
-    <body><img src="/sub.png"><p>hello</p></body></html>
-    """.trimIndent()
+  private lateinit var pageServer: TestPageServer
 
   @BeforeTest
   fun startServer() {
     // WebView2 的 user data folder 由 `Paths` 决定：后台任务建上下文之前必须注入。
     TestPaths.ensureInitialized()
-    serverPool = Executors.newFixedThreadPool(4)
-    server =
-      HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
-        executor = serverPool
-        createContext("/page.html") { it.respond("text/html; charset=utf-8", pageHtml.toByteArray()) }
-        createContext("/sub.js") {
-          it.respond("application/javascript", "window.__subLoaded = true;".toByteArray())
-        }
-        createContext("/sub.png") {
-          it.respond("image/png", Base64.getDecoder().decode(PNG_1X1))
-        }
-        start()
-      }
-    port = server.address.port
+    pageServer =
+      TestPageServer(
+        onRespond = { println("[WebViewHostTest] server got ${it.requestMethod} ${it.requestURI}") },
+      )
   }
 
   @AfterTest
   fun stopServer() {
-    server.stop(0)
-    serverPool.shutdownNow()
+    pageServer.close()
   }
 
-  private fun url(path: String): String = "http://127.0.0.1:$port$path"
+  private fun url(path: String): String = pageServer.url(path)
 
-  private fun webViewReady(): Boolean {
-    val reason = hostHealth ?: return true
-    println("[WebViewHostTest] skip: $reason")
-    return false
-  }
+  private fun webViewReady() = skipUnlessHostIsAvailable(hostHealth)
 
-  private suspend fun <T> guarded(block: suspend () -> T): T = withTimeout(60_000) { block() }
+  /**
+   * `webviewAsync` 内部是 `30.seconds` 的护栏，外面只多留 5 s：
+   * 真挂住时不必让构建多等 25 s，正常路径也不受这条上限影响。
+   */
+  private suspend fun <T> guarded(block: suspend () -> T): T = withTimeout(35_000) { block() }
 
   /** `<script src="/sub.js">` 这种子资源必须出现在拦截回调里，且字段是真的。 */
   @Test
   fun subResourcesAreVisibleToInterceptor() =
     runBlocking {
-      if (!webViewReady()) return@runBlocking
+      webViewReady()
 
       val seen = Collections.synchronizedList(mutableListOf<SeenRequest>())
       val result =
@@ -134,15 +108,16 @@ class WebViewHostTest {
 
       // 回调可能还在别的线程上追加，读之前必须整份拷出来，否则边迭代边改。
       val seenSnapshot = synchronized(seen) { seen.toList() }
+      val seenUrls = seenSnapshot.map { it.url }
       val hit =
         assertIs<Map<*, *>>(
           result,
-          "子资源 /sub.js 没被拦下来（结果是 $result）。看到的请求：${seenSnapshot.map { it.url }}",
+          "the subresource /sub.js was not intercepted (result is $result). Seen: $seenUrls",
         )
-      val hitUrl = assertIs<String>(hit["url"], "命中结果应带回被拦请求的 url")
+      val hitUrl = assertIs<String>(hit["url"], "an interception result should carry back the intercepted request url")
       assertTrue(
         hitUrl.endsWith("/sub.js"),
-        "命中的应该是子资源：$hitUrl",
+        "the interception should hit the subresource: $hitUrl",
       )
 
       val main = seenSnapshot.firstOrNull { it.url.endsWith("/page.html") }
@@ -154,7 +129,7 @@ class WebViewHostTest {
       assertTrue(!sub.isForMainFrame, "<script src> is not a main frame")
       assertTrue(
         sub.headers.isNotEmpty(),
-        "子资源的请求头应该是真的（WebView2 的 ICoreWebView2HttpRequestHeaders）",
+        "subresource request headers should be real (WebView2's ICoreWebView2HttpRequestHeaders)",
       )
     }
 
@@ -162,7 +137,7 @@ class WebViewHostTest {
   @Test
   fun scriptResultReflectsLoadedPage() =
     runBlocking {
-      if (!webViewReady()) return@runBlocking
+      webViewReady()
 
       val result =
         guarded {
@@ -176,7 +151,7 @@ class WebViewHostTest {
           )
         }
 
-      val json = assertIs<String>(result, "应该走到脚本分支，实际是 $result")
+      val json = assertIs<String>(result, "this should take the script branch, got $result")
       assertTrue(json.contains("\"sub\":true"), "the external script should have run: $json")
       assertTrue(json.contains("\"imgs\":1"), "the image subresource should be in the DOM: $json")
     }
@@ -198,7 +173,7 @@ class WebViewHostTest {
   @Test
   fun releasingEveryRequestLetsPageFinish() =
     runBlocking {
-      if (!webViewReady()) return@runBlocking
+      webViewReady()
 
       val seen = Collections.synchronizedList(mutableListOf<SeenRequest>())
       val result =
@@ -220,27 +195,30 @@ class WebViewHostTest {
       val urls = seenSnapshot.map { it.url }
       assertTrue(
         seenSnapshot.any { it.url.endsWith("/page.html") && it.isForMainFrame },
-        "主框架请求应该在回调里：$urls",
+        "the main-frame request should be in the callback: $urls",
       )
       assertTrue(
         seenSnapshot.any { it.url.endsWith("/sub.js") && !it.isForMainFrame },
-        "<script> 应该到过：$urls",
+        "the <script> request should have been seen: $urls",
       )
-      assertTrue(seenSnapshot.size >= 2, "回调应该在每个请求上都被调用一次，实际只调了 ${seenSnapshot.size} 次：$urls")
+      assertTrue(
+        seenSnapshot.size >= 2,
+        "the callback should fire for every request, but it fired only ${seenSnapshot.size} time(s): $urls",
+      )
 
       // 全程放行 ⇒ 没有任何一次命中 ⇒ 整轮必须以「脚本跑完」收场。
       val json =
         assertIs<String>(
           result,
-          "全程不命中（放行）不该产生 Intercepted：实际是 $result",
+          "releasing everything must not produce an Intercepted outcome, got $result",
         )
       assertTrue(
         json.contains("\"sub\":true"),
-        "放行之后 <script> 应该真的执行了（这是「放行」这个结局的证据）：$json",
+        "after releasing, the <script> should really have executed (this is the evidence for the 'released' outcome): $json",
       )
       assertTrue(
         json.contains("\"imgs\":1"),
-        "放行之后 <img> 子资源也该加载进 DOM（证明放行不是只对主框架有效）：$json",
+        "after releasing, the <img> subresource should also have been loaded into the DOM (proves releasing is not main-frame-only): $json",
       )
     }
 
@@ -267,7 +245,7 @@ class WebViewHostTest {
   @Test
   fun cookiesAreSharedAcrossTasks() =
     runBlocking {
-      if (!webViewReady()) return@runBlocking
+      webViewReady()
 
       val wrote =
         guarded {
@@ -281,8 +259,8 @@ class WebViewHostTest {
         }
       assertEquals(
         "true",
-        assertIs<String>(wrote, "写 cookie 的任务没走到脚本分支：$wrote"),
-        "cookie 应该写得进去",
+        assertIs<String>(wrote, "the cookie writer did not take the script branch: $wrote"),
+        "the cookie should be writable",
       )
 
       val read =
@@ -291,30 +269,16 @@ class WebViewHostTest {
         }
       assertEquals(
         "true",
-        assertIs<String>(read, "读 cookie 的任务没走到脚本分支：$read"),
-        "另一个视图应该看得到上一个视图写的 cookie —— 否则两端就不是同一份存储",
+        assertIs<String>(read, "the cookie reader did not take the script branch: $read"),
+        "another view should see the cookie written by the previous view -- otherwise the two are not sharing one store",
       )
     }
 
-  private fun com.sun.net.httpserver.HttpExchange.respond(
-    contentType: String,
-    body: ByteArray,
-  ) {
-    println("[WebViewHostTest] server got $requestMethod $requestURI")
-    responseHeaders.add("Content-Type", contentType)
-    sendResponseHeaders(200, body.size.toLong())
-    responseBody.use { it.write(body) }
-  }
-
-  private companion object {
-    /** 1×1 的透明 PNG。用真的图，免得 WebView2 那边报解码错误干扰日志。 */
-    const val PNG_1X1 =
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
-
+  internal companion object {
     /** 体检里那次 about:blank 的护栏，比 `30.seconds` 稍宽一点。 */
     const val HOST_HEALTH_TIMEOUT_MS = 40_000L
 
-    /** 环境体检结果，`null` 表示健康。各用例共用，别重复跑。 */
+    /** 环境体检结果，`null` 表示健康。各用例共用，别重复跑 —— [JsEngineDispatchTest] 也读这一份。 */
     val hostHealth: String? by lazy { checkHost() }
 
     /**
@@ -333,9 +297,9 @@ class WebViewHostTest {
      * 所以是 **WebView2 运行时自己坏了**，不是我们的宿主（重装 Evergreen Runtime 通常能好）。
      *
      * 这种坏法下这几个用例都会卡满 30s 再报一堆看不懂的断言失败，纯属噪声；
-     * 体检一次、打印清楚原因、这几个一起跳过，才对得起看构建的人。
+     * 体检一次、说清原因、这几个一起记成 skipped，才对得起看构建的人。
      *
-     * 想绕开体检直接看原始失败，把 [hostHealth] 改成 `null` 即可
+     * 想绕开体检直接看原始失败，跑测试时加 `-Dacg.test.skipUnavailableHost=false`
      * （或直接看 `cxx/webview/webview.cpp` 的原生日志）。
      *
      * @return null 表示健康；否则是给人看的跳过原因。
@@ -352,11 +316,11 @@ class WebViewHostTest {
         }
       return when {
         result == null ->
-          "宿主编译得起来但引擎没有响应：about:blank 在 ${HOST_HEALTH_TIMEOUT_MS}ms 内" +
-            "没有走到 NavigationCompleted。多半是这台机器上的 WebView2 运行时坏了" +
-            "（重装 Evergreen Runtime 通常能好）。"
+          "the host builds but the engine never responds: about:blank did not reach " +
+            "NavigationCompleted within ${HOST_HEALTH_TIMEOUT_MS}ms. Most likely the WebView2 runtime on " +
+            "this machine is broken (reinstalling the Evergreen Runtime usually fixes it)."
         result is String && result == "2" -> null
-        else -> "宿主异常：about:blank 健康检查返回 $result"
+        else -> "host failure: the about:blank health check returned $result"
       }
     }
   }

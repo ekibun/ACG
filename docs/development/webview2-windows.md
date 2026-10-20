@@ -104,6 +104,8 @@ WebView2 支持两种方式，且会**合并**：环境变量 / 注册表的值�
 **fix（DO/DON'T）**：
 - **DO**：任何参数结论都必须在真宿主里复测，那里才有已知可用的基线（例如 `about:blank` 能成功）。
 - **DO**：始终保留一个健康检查用例，导航一个极简页面并断言脚本结果 —— 这样"引擎死了"会被报成一次 skip，而不是 N 个超时。
+  判据要落在 **skipped 计数**上：`println` + 早退在 XML 里是 passed，等于"全绿"与"一条都没验"分不开。实现用
+  `skipUnlessHostIsAvailable`（抛 JUnit4 的 `TestAbortedException`），见 `WebviewHostHealth.kt` 与 `HostSkip.kt`。
 
 ---
 

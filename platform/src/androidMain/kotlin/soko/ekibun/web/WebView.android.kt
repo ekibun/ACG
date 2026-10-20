@@ -52,7 +52,7 @@ actual suspend fun createWebviewContext(isHeadless: Boolean): WebviewContext {
     try {
       AndroidWebviewContext(WebView(hostApplicationContext), isHeadless)
     } catch (e: Throwable) {
-      throw IllegalStateException("WebView 创建失败：$e", e)
+      throw IllegalStateException("WebView creation failed: $e", e)
     }
   }
 }

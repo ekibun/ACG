@@ -6,9 +6,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import soko.ekibun.TestMedia
 import soko.ekibun.ffmpeg.AVMediaType
-import soko.ekibun.ffmpeg.AvFormat
-import soko.ekibun.ffmpeg.AvFrame
-import soko.ekibun.ffmpeg.AvSurfaceContext
 import soko.ekibun.ffmpeg.FFPlayer
 import java.util.Collections
 import kotlin.test.Test
@@ -29,39 +26,12 @@ import kotlin.test.assertTrue
  * 素材用随源码入库的 [TestMedia.BBB_640X360_12S_FASTSTART]（h264 25fps），换台机器 / CI 也真跑。
  */
 class FFPlayerStepTest {
-  /**
-   * 空播放设备：不送显不送声；[FFPlayer.Event.Frame] 序列由测试侧的回调收进自己的列表。
-   */
-  private class Sink : AvSurfaceContext() {
-    override val sampleRate: Int = 48_000
-    override val channels: Int = 2
-    override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_S16
-
-    override suspend fun flushFrameImpl(
-      codecType: Int,
-      frame: AvFrame,
-      getBuffer: () -> ByteArray?,
-    ): Long {
-      when (codecType) {
-        AVMediaType.AUDIO -> return 0
-      }
-      return -1
-    }
-
-    override suspend fun resume() = Unit
-
-    override suspend fun pause() = Unit
-
-    override suspend fun stop() = Unit
-  }
-
-  /** 从 `frames` 里截出**本次动作新增**的那些非 null 时间戳。 */
   private fun List<Long?>.since(mark: Int): List<Long> = drop(mark).filterNotNull()
 
   @Test(timeout = 120_000)
   fun stepForwardAndBackWalkFrames() {
     val media = TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART)
-    val sink = Sink()
+    val sink = TestSurface()
     val frames: MutableList<Long?> = Collections.synchronizedList(ArrayList<Long?>())
     runBlocking {
       val player =
@@ -86,31 +56,31 @@ class FFPlayerStepTest {
             val mark = frames.size
             player.stepForward()
             frames.since(mark).singleOrNull()
-              ?: error("stepForward 应当恰好显示一帧，实际新增 ${frames.since(mark)}")
+              ?: error("stepForward should show exactly one frame, got ${frames.since(mark)}")
           }
         forward.zipWithNext().forEach { (a, b) ->
-          assertTrue(b > a, "步进的时间戳必须前进：$a -> $b")
+          assertTrue(b > a, "step timestamps must move forward: $a -> $b")
         }
         // 步长应当是恒定的帧间隔（这条素材 25fps ⇒ 40000µs）。
         val step = forward[1] - forward[0]
         forward.zipWithNext().forEach { (a, b) ->
-          assertEquals(step, b - a, "帧间隔应当恒定：$forward")
+          assertEquals(step, b - a, "frame interval must be constant: $forward")
         }
 
         // 连续后退：沿原路一帧一帧走回去，每一步的显示帧都要等于前进时的对应帧。
         val back =
           (0 until 4).map {
             val mark = frames.size
-            assertTrue(player.stepBack(), "stepBack 应当成功")
+            assertTrue(player.stepBack(), "stepBack should succeed")
             frames.since(mark).singleOrNull()
-              ?: error("stepBack 应当恰好显示一帧，实际新增 ${frames.since(mark)}")
+              ?: error("stepBack should show exactly one frame, got ${frames.since(mark)}")
           }
         assertEquals(
           forward.dropLast(1).asReversed(),
           back,
-          "后退应当沿前进的原路一帧一帧走回去：forward=$forward back=$back",
+          "stepping back should retrace the forward path one frame at a time: forward=$forward back=$back",
         )
-        assertTrue(frames.size > beforeSteps, "步进应当持续产生 Frame 事件")
+        assertTrue(frames.size > beforeSteps, "stepping should keep producing Frame events")
       } finally {
         player.closeAsync()
       }

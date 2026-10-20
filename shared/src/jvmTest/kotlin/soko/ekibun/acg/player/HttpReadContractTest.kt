@@ -30,7 +30,11 @@ class HttpReadContractTest {
     val reference = decodeVideoPts(AvFormat(media.toString(), FileIO.Handler()))
     TestMediaServer(Files.readAllBytes(media), chunkDelayMs = 10).use { server ->
       val overHttp = decodeVideoPts(AvFormat(server.url, HttpIO.Handler()))
-      assertEquals(reference, overHttp, "HTTP 源必须解出与本地文件完全相同的视频帧序列")
+      assertEquals(
+        reference,
+        overHttp,
+        "an HTTP source must decode the exact same video frame sequence as the local file",
+      )
     }
   }
 
@@ -73,14 +77,14 @@ class HttpReadContractTest {
           }
         }
       // seek 落到 2s 关键帧，此后还剩 10s × 25fps = 250 帧。
-      assertTrue(afterSeek.size > 200, "seek 之后应当还读到两百多帧，实际 ${afterSeek.size}")
+      assertTrue(afterSeek.size > 200, "more than 200 frames should remain after the seek, got ${afterSeek.size}")
       // 必须正好是参考序列的一个连续后缀：丢一个 sample 就会在这里断开。
       val startIndex = reference.indexOf(afterSeek.first())
-      assertTrue(startIndex >= 0, "seek 后的首帧 ${afterSeek.first()} 不在参考序列里")
+      assertTrue(startIndex >= 0, "the first frame after seek ${afterSeek.first()} is not in the reference sequence")
       assertEquals(
         reference.drop(startIndex),
         afterSeek,
-        "HTTP 源在向前 seek 之后必须一帧都不缺",
+        "an HTTP source must not drop a single frame after a forward seek",
       )
     }
   }
@@ -122,8 +126,8 @@ class HttpReadContractTest {
               codec.sendPacketAndGetFrames(packet).forEach { it.close() }
               decoded++
             }
-            assertEquals(25, decoded, "顺序读应当能解满 25 帧（这条素材 300 帧）")
-            assertEquals(1, server.requests, "顺序读期间不该重开会话")
+            assertEquals(25, decoded, "sequential reads should decode all 25 frames (this media has 300)")
+            assertEquals(1, server.requests, "sequential reads must not reopen the session")
 
             // 收益：2s 落回 2s 关键帧，要跳的那段已在通道里 ⇒ 零网络成本 ⇒ 不该重开。
             format.seekTo(2_000_000)
@@ -131,8 +135,8 @@ class HttpReadContractTest {
             assertEquals(
               1,
               server.requests,
-              "2s 落点在通道存量之内、零网络成本，不该重开会话 —— " +
-                "涨了就说明判据把「通道里已有的部分」也当成了网络代价。",
+              "a 2s landing point is inside the buffered range with zero network cost and must not reopen " +
+                "the session -- a new request means the criterion counted the already-buffered bytes as network cost.",
             )
 
             // 边界：再多跳 1s 越过存量 ⇒ 真要从网络取 ⇒ 必须重开一条落在新落点上的会话。
@@ -141,7 +145,8 @@ class HttpReadContractTest {
             assertEquals(
               2,
               server.requests,
-              "3s 越过通道存量、得真从网络取，应当换一条会话（本次是第 2 条）。",
+              "a 3s landing point is beyond the buffered range and really needs the network, so a new " +
+                "session must be opened (this is the 2nd one).",
             )
           } finally {
             codec.closeDeferred().join()

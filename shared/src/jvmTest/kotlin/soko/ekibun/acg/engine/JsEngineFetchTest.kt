@@ -73,12 +73,12 @@ class JsEngineFetchTest {
       )
     assertEquals(200L, status)
 
-    val seen = assertNotNull(recorded.get(), "服务端没收到请求")
-    assertEquals("POST", seen.method, "fetch 的 method 必须落到发出请求的方法上")
+    val seen = assertNotNull(recorded.get(), "the server never received a request")
+    assertEquals("POST", seen.method, "the fetch method must propagate to the outgoing request method")
     assertEquals(
       "application/x-www-form-urlencoded",
       seen.contentType?.substringBefore(';'),
-      "显式给的 Content-Type 不能被 body 的默认类型盖掉",
+      "an explicit Content-Type must not be overridden by the body's default type",
     )
     assertEquals("grant_type=authorization_code&code=probe", seen.body)
   }

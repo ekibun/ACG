@@ -133,12 +133,12 @@ class AvSurfaceContextBufferReuseTest {
       sink.videoBuffers.size >= 2,
       "at least 2 frames must reach the sink, got ${sink.videoBuffers.size}",
     )
-    // ByteArray 的相等就是引用相等：同一块数组才会被去成一份
-    val distinct = sink.videoBuffers.distinct()
-    assertEquals(
-      1,
-      distinct.size,
-      "the frame buffer must be one reused array, got ${distinct.size} arrays for ${sink.videoBuffers.size} frames",
+    // 判据是**引用相等**（同一块数组），不是内容相等：内容相等在「每帧新建一块、但像素恰好一样」
+    // 时也成立，那样这条用例就真成了摆设。
+    val buffers = sink.videoBuffers
+    assertTrue(
+      buffers.zipWithNext().all { (first, second) -> first === second },
+      "the frame buffer must be one reused array, got ${buffers.distinct().size} arrays for ${buffers.size} frames",
     )
     assertEquals(
       WIDTH * HEIGHT * 4L * sink.videoBuffers.size,
