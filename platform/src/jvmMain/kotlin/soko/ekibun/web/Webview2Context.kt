@@ -5,9 +5,9 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import soko.ekibun.Pointer
 import soko.ekibun.ThreadDispatcher
+import soko.ekibun.common.Paths
 import soko.ekibun.loadLibrary
 import java.awt.Component
-import java.io.File
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
@@ -246,7 +246,8 @@ class Webview2Context(
       loadLibrary("WebView2Loader")
       loadLibrary("jawt")
       loadLibrary("webview")
-      prepareEnvironment(BROWSER_ARGUMENTS, defaultUserDataDir())
+      // user data folder 与设置文件同在 `Paths.dataDir` 下。
+      prepareEnvironment(BROWSER_ARGUMENTS, Paths.dataDir + "/webview2")
       // 收尾在**进程还健康**时做一次：`~WebviewEnviorment`（静态析构）跑在进程退出路径上 ——
       // 那时 STA 要么已被 `ExitProcess` 带走（`threadId_` 失效，线程走不到 `exit_thread`），
       // 要么冻在某个 COM 调用里，于是 `releaseEnvironment()` 里那条无界的 `thread.join()` 可能永远
@@ -254,27 +255,6 @@ class Webview2Context(
       // `releaseEnvironment()` 的**唯一**调用点是这里；产品层（`desktopApp/main.kt`）不要显式调它 ——
       // 收尾交给 hook（应用退出即 JVM 关闭、hook 自动跑），重复调用只会多一次无界 `join()` 的等待。
       Runtime.getRuntime().addShutdownHook(Thread { releaseEnvironment() })
-    }
-
-    private fun defaultUserDataDir(): String {
-      val home = System.getProperty("user.home").orEmpty()
-      val base =
-        listOfNotNull(
-          System.getenv("LOCALAPPDATA")?.takeIf { it.isNotBlank() },
-          home.takeIf { it.isNotBlank() }?.let { File(it, "AppData/Local").path },
-          home.takeIf { it.isNotBlank() },
-        ).map(::File).firstOrNull { it.isDirectory && it.canWrite() }
-          ?: File(System.getProperty("java.io.tmpdir")).also {
-            System.err.println(
-              "[webview] LOCALAPPDATA 与 user.home 都不可用，user data folder 退到 " +
-                "${it.path} —— cookie / 登录态不会跨进程保留",
-            )
-          }
-      val dir = File(base, "ACG/webview2")
-      if (!dir.isDirectory && !dir.mkdirs() && !dir.isDirectory) {
-        System.err.println("[webview] 建不出 user data folder：${dir.path}")
-      }
-      return dir.absolutePath
     }
 
     private fun Map<String, String>.toFlatArray(): Array<String> {

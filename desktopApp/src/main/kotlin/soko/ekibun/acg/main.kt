@@ -6,6 +6,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import soko.ekibun.common.Paths
 import java.awt.Dimension
 
 /**
@@ -21,11 +22,20 @@ import java.awt.Dimension
  * 隐藏窗口 + 自己的消息泵，调用时才创建（宿主线程与 environment 进程内共享，
  * 每个上下文只开自己的窗口）。
  *
- * user data folder（cookie / 登录态落在哪）由 web 组件自己按回退链定
- * （`Webview2Context.defaultUserDataDir`），App 层不必再指定 —— 可见页与后台页都是
- * 同一份，登录态天然共享。
+ * 用户数据根（设置文件与 WebView2 的 user data folder）在这里注入一次，平台层只按
+ * [Paths] 取路径。可见页与后台页共用同一份，登录态天然共享。
  */
 fun main(args: Array<String>) {
+  // APPDATA / LOCALAPPDATA 是环境变量，不是系统属性；取不到就当场炸，
+  // 免得拼出 "null/ekibun/ACG" 这种路径。
+  val roamingAppData = System.getenv("APPDATA") ?: error("APPDATA is not set")
+  val localAppData = System.getenv("LOCALAPPDATA") ?: error("LOCALAPPDATA is not set")
+  Paths.init(
+    Paths(
+      dataDir = "$roamingAppData/ekibun/ACG",
+      cacheDir = "$localAppData/ekibun/ACG",
+    ),
+  )
   application {
     Window(
       onCloseRequest = ::exitApplication,

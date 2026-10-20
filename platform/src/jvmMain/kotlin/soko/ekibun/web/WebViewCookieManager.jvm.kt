@@ -31,19 +31,19 @@ internal object WebView2CookieManager : WebviewCookieManager {
 
   override suspend fun set(
     url: String,
-    rawCookie: String,
+    cookie: String,
   ) {
-    val cookie = parseSetCookie(url, rawCookie) ?: return
+    val parsed = parseSetCookie(url, cookie) ?: return
     runCatching {
       ctx.setCookie(
-        cookie.name,
-        cookie.value,
-        cookie.domain,
-        cookie.path,
-        cookie.expiresEpochSeconds,
-        cookie.secure,
-        cookie.httpOnly,
-        cookie.sameSite,
+        parsed.name,
+        parsed.value,
+        parsed.domain,
+        parsed.path,
+        parsed.expiresEpochSeconds,
+        parsed.secure,
+        parsed.httpOnly,
+        parsed.sameSite,
       )
     }
   }
