@@ -7,13 +7,7 @@ import java.util.Base64
 import java.util.concurrent.Executors
 
 /**
- * `:platform` jvmTest 共用的**本地页面服务端**：`/page.html` + `/sub.js` + `/sub.png`。
- *
- * 与 `:shared` 那边的 `TestPageServer` 是同形实现，不能共用一个类 —— `:platform` 的测试
- * **不该反向依赖 `:shared`**（依赖方向反了）。两边各自一份，但**PNG 与页面形状必须一致**：
- * 以前这里和 `Webview2Test` 各有一份，PNG 的 base64 还不一样，改一处漏一处就是隐性的假红。
- *
- * 线程池用可缓存：被挂住的 handler 会一直占线程，固定池会被吃光。
+ * `:platform` jvmTest 共用的本地页面服务端：`/page.html` + `/sub.js` + `/sub.png`，页面形状与 `:shared` 那份一致。
  */
 internal class TestPageServer(
   /** 额外挂的资源路径 → (contentType, body)；`/page.html`、`/sub.js`、`/sub.png` 已内置。 */
@@ -48,7 +42,7 @@ internal class TestPageServer(
   }
 
   private companion object {
-    /** 1×1 的透明 PNG。用真的图，免得 WebView2 那边报解码错误干扰日志。 */
+    /** 1×1 的透明 PNG。 */
     const val PNG_1X1 =
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
   }

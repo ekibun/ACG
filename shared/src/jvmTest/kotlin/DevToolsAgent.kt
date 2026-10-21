@@ -12,25 +12,7 @@ import java.net.Socket
 import java.net.URLClassLoader
 import java.nio.file.Path
 
-/**
- * dev 控制条与 dev 服务器的 **premain agent**（`-javaagent` 挂进 hotRun 的应用进程：
- * 外部 jar + `-D` 传参 + 自建 ClassLoader，应用代码零足迹）。Gradle 侧只剩「把 agent 挂上
- * 应用进程」，两件事都在这里：
- *
- * 1. **拉起 dev 服务器**：用 `-Dacg.dev.classpath`（测试类路径）spawn `DevServerKt` 独立进程；
- *    端口被占先按 PID 文件清残留（自愈——先确认端口被占才动手，PID 复用时不会误伤无辜）；
- *    应用 JVM 正常退出（关窗 / Ctrl-C）时经 shutdown hook 跟着 destroy ——
- *    **服务器与应用进程同生共死**。硬杀 Gradle 客户端时 hook 不跑，服务器残留到下一次
- *    spawn 前被自愈清掉。
- * 2. **挂控制条**：监听 AWT WINDOW_OPENED 等应用主窗口（第一个 [Frame]）出现，把它当
- *    **owner**（AWT 的 owner / 跟随只在同进程内成立）→ 反射调子 ClassLoader 里的
- *    `DevStrip.attach(owner, port)`：无标题栏长条、跟随主窗口移动、经 `/__control` 与服务器对话。
- *
- * 子 ClassLoader 由 `-Dacg.dev.classpath`（测试侧的类与资源）构造 —— 控制条实现住那里，应用
- * 类路径上没有。控制条是 Compose 面板：`androidx.compose.*` 与 skiko 走 **parent-first** 委派、
- * 用的仍是应用自己的那份运行时（版本天然一致），dev 类路径里的 compose jar 只喂编译。
- * `-Dacg.dev.classpath` 不存在时 `premain` 直接返回，零副作用。
- */
+/** dev 控制条与 dev 服务器的 premain agent：拉起服务器进程，并在应用主窗口出现后挂上控制条。 */
 class DevToolsAgent {
   companion object {
     @JvmStatic
@@ -91,7 +73,7 @@ class DevToolsAgent {
             .start()
         pidFile.writeText(process.pid().toString())
         println("[dev] dev media server spawned: pid=${process.pid()}")
-        // 服务器 = 应用进程的影子：应用正常退出（关窗 / Ctrl-C）时一并收场。
+        // 服务器随应用进程退出一并收场
         Runtime.getRuntime().addShutdownHook(Thread { runCatching { process.destroy() } })
       }.onFailure { println("[dev] dev media server spawn failed: $it") }
     }
@@ -101,7 +83,7 @@ class DevToolsAgent {
         Socket("127.0.0.1", port.toInt()).close()
       }.isSuccess
 
-    /** 等应用主窗口出现，经子 ClassLoader 调 `DevStrip.attach(owner, port)`（见类 KDoc 第 2 条）。 */
+    /** 等应用主窗口出现，经子 ClassLoader 调 `DevStrip.attach(owner, port)`。 */
     private fun attachStrip(
       devCp: String,
       port: String,
@@ -112,7 +94,7 @@ class DevToolsAgent {
           DevToolsAgent::class.java.classLoader,
         )
       var attached = false
-      // premain 只登记监听就返回，不拖慢应用启动；主窗口一出现就在 EDT 上挂控制条。
+      // premain 只登记监听就返回
       Toolkit
         .getDefaultToolkit()
         .addAWTEventListener(

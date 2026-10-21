@@ -145,6 +145,14 @@ WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/de
 - **`import()` / `require()` 一律不许用**：本桥的模块加载路径会把进程 `abort()`（见
   [`../docs/development/playback-invariants.md`](../docs/development/playback-invariants.md) 的 quickjs 桥一节）。
   能力全部内联进 `init.js`（脚本位置见 [../AGENTS.md](../AGENTS.md) §2.5）。
+- **类析构回调的顺序是「先 `close()` 再放全局引用」**：`autoCloseableClass` 必须在
+  `JS_NewClass` **之前**取好（回调随时可能跑），`destroyContext` 里要等
+  `JS_FreeContext` / `JS_FreeRuntime` 都跑完才删它 —— 析构回调期间还要用它做
+  `IsInstanceOf`。先放引用就再也拿不到 `jobject`，`close()` 无从调起。
+- **栈预算默认 256KB**（`JS_SetMaxStackSize`）：`stack_limit = stack_top - stack_size`，
+  而 `stack_top` 已落在 JNI 帧里，预算必须远低于宿主线程栈。
+- **模块 loader 返回 NULL 时必须先挂一个待处理异常**（`JS_ThrowReferenceError`），
+  否则 `JS_LoadModuleInternal` 会去报运行期里残留的旧异常。
 
 ## ffmpeg
 
@@ -227,3 +235,21 @@ WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/de
   `hls_close`）会把 pb 交回 `io_close2`，先收账就是拿悬垂指针再关一遍。
 - 解码路径已经处理 `EAGAIN` 并带 drain（native `ffmpeg.cpp` + Kotlin `AvCodec.drain()`，
   `FFPlayer` 在 EOF 主动 drain）。**不要**再把它当成"未实现"去重写。
+- **自定义 pb 不能走 `avio_close`**：它把 `s->opaque` 当 `URLContext*` 交给 `ffurl_close`，
+  而我们的 opaque 是 `IoOpaque*` —— 类型混淆直接访问违例。buffer 由调用方 `av_free`，
+  上下文本体交 `avio_context_free`（它只还 struct，不管 buffer）。
+- **`avformat_open_input` 失败路径要自己收尾**：CUSTOM_IO 下 ctx 已被 ffmpeg free 掉，
+  `destroyNative` 不会再被调，账本剩余的 pb、`thiz` 的 GlobalRef 与 `FormatOpaque` 都要在
+  `initNative` 里释放，且只释放账本上剩下的（`io_close2` 已销账的不得再关）。
+- **读回调的错误语义**：`AVERROR_EOF` 表示 EOF，其余负返回值必须打日志（`fill_buffer`
+  对任何负值都置 `eof_reached`，不打日志时 IO 故障在外部看来就是「播完了」）；返回值超过
+  请求长度时截断到请求长度。
+- **`getBufferNative` 返回的内存只在本轮有效**：下一帧 `sws_scale` / `swr_convert` 会就地
+  覆写，调用方必须同步消费、不能留存引用。跨 JNI 走 `byte[]` 而不是 `DirectByteBuffer`
+  （根 [../AGENTS.md](../AGENTS.md) §2.5：commonMain 不许出现 `java.nio.ByteBuffer`）。
+- **音频输出有两块缓冲**（`audioBuffer` 与 `_audioBuffer1` 在 `postFrameAudio` 末尾交换），
+  `closeNative` 两块都要 `av_free`，视频缓冲同理。
+- **`send_packet` 的 EAGAIN 重试上限是 16 次**：重试耗尽仍失败时打日志并交给调用方收场，
+  不能静默丢包（丢一包就断参考链，之后整个 GOP 画面成块）。
+- **`getStreamsNative` 把 `stream->time_base` 一并传给 Kotlin**：容器级 seek 把微秒折回刻度时
+  会吃掉半格以内的偏移，上层算步长需要这个最小刻度。

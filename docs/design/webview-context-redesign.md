@@ -53,3 +53,70 @@
 1. 接口与工厂（`WebviewContext` / `createWebviewContext`）先定，再动两端实现。
 2. 后台驱动搬进 `JsEngine.kt`，确认任务级用例随驱动进 `shared/jvmTest`。
 3. native 拦截回调签名按 D10 调整，全量跑 `:platform:jvmTest` 与 `:shared:jvmTest` 的 WebView 套件确认命中/放行语义未破。
+
+## 上下文实现的硬约束（jvm）
+
+- 后台实例视口固定 `1×1`：`0×0` 时 WebView2 不加载页面、也不执行脚本，命令全部「成功但无效果」。
+- environment 在 native 侧进程内共享，**同一 user data folder 上不允许并存多个**；cookie 的跨上下文可见性建立在这一点上。
+- 动态库加载顺序固定为 `WebView2Loader` → `jawt` → `webview`：`webview.dll` 的导入表里有 `jawt.dll`，先加载才能让 loader 在「已加载模块」里解析到它。
+- `releaseEnvironment()` 只由 `Runtime.addShutdownHook` 调用，产品层不显式调；静态析构阶段 STA 可能已失效，无界 `join()` 会让进程退不出去。
+- `--disable-gpu-process-crash-limit` 是 `BROWSER_ARGUMENTS` 的唯一内容：GPU 进程反复崩时，默认策略会判「GPU 不可用」并终止整个浏览器进程，所有视图一起失效。
+- 安全降级参数（`--no-sandbox` / `--disable-gpu-sandbox`）只在诊断时经环境变量 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 注入，不写进 `BROWSER_ARGUMENTS`。
+- `processFailed` 的 `kind ∈ {2, 4, 5, 6}` 不上报为 `LoadFailed`；其余上报。
+- 脚本执行超时 15 s、cookie 读写超时 5 s；超时按失败处理（`evaluate` 给 `null`，读 cookie 给空串）。
+
+> `evaluate` 的「没有返回值」两端都不是 Kotlin `null`，而是**字符串 `"null"`**（WebView2 把 `undefined` 序列化成 JSON null，`evaluateJavascript` 同形）。上文「接口形状」里「不是 `"null"`」一句按此为准。
+
+> 拦截命中的两端口径不同：桌面由 native 回空 204 并 `Stop()`，Android 照常放行、只把结果交给回调。驱动只取第一个终态，可见行为因此一致；按「命中会中止加载」写脚本会在 Android 上失效。
+
+## 宿主 Context 与外部浏览器
+
+- `hostApplicationContext` 必须在宿主 `setContent` **之前**注入：`createWebviewContext` / `launchExternalBrowser` 都在命令式调用点取它，没有组合上下文，拿不到 `LocalContext`。漏注入是 `lateinit` 直接抛。
+- 从进程级 Context 起 Activity 必须带 `FLAG_ACTIVITY_NEW_TASK`，否则系统当场抛。
+- 桌面端 `launchExternalBrowser` 先查 `Desktop.isDesktopSupported()` 与 `Action.BROWSE`，headless JVM 上直接抛 `IllegalStateException`。
+- Android 没装支持 Custom Tabs 的浏览器不需要兜底：`CustomTabsIntent` 本质是一条 `ACTION_VIEW` Intent，系统会派给默认浏览器。
+
+## cookie 库
+
+- WebView2 的 `ICoreWebView2CookieManager` 属于 profile，同 environment 下所有 webview 共享；写下的 cookie 对新建的独立 webview 同样可见。
+- `SameSite=None` 必须同时 `Secure`：`AddOrUpdateCookie` 没有返回值，缺 `Secure` 时 WebView2 静默拒收，症状是「调用全正常但永远读不到」。
+- 域要去掉前导点（`CreateCookie` 不认）；域 / 路径缺省时按 `url` 推，与 Android `CookieManager` 口径一致。
+- `Max-Age` 优先于 `Expires`；两者都没有即会话 cookie。
+- `Expires` 三种格式（RFC 1123 / RFC 850 / asctime）先剥时区后缀；星期前缀不能无条件先剥——非 asctime 格式缺星期几时剥掉的会是月份，整条 cookie 会降级成会话 cookie。
+- HTTP 层没有 cookie 仓库：要带登录态必须由 JS 侧读出 cookie 写进请求头。Android 后台页的 `shouldInterceptRequest` 用 `headersWithCookie` 把系统 `CookieManager` 的 cookie 折进回调 headers，否则脚本按 url 再 `fetch` 一次时登录态是断的。
+
+## 回环回调服务器
+
+- 服务器是**进程级单例**，端口由 OS 分配（`bind(0)`）；会话靠 URL 路径区分，其余路径回 404，多登录并行不串扰。
+- 只认 origin-form（`GET /<sessionId>?…`）：回环地址在浏览器里默认不过代理，经代理的绝对形式到不了这里。
+- `awaitCallback` 原样返回 request-target 接上 origin，**不做百分号解码**：整串解会把参数值里的 `%26` 解成 `&`，把参数切开。
+- `callbackUrl` 无查询串、无尾斜杠：换 token 时 `redirect_uri` 必须与授权请求里逐字相同。
+- 回调响应带 `Cache-Control: no-store`（地址里含授权码）。
+- `accept` 抛 `IOException` 即退出 accept 循环，服务器不再接受新连接；单条连接异常只结束该连接。
+- `close()` 幂等：撤掉会话后同一地址回 404，未兑现的 `awaitCallback` 随之取消。
+
+## HTTP 响应流
+
+- `Http.request` 交给调用方的是一条活着的连接，**必须 `close()`**，否则连接不释放。
+- `read` 与 `readAll` 不能混用：`readAll` 读完即关，之后再 `read` 只剩流尾。
+- `contentLength` 未知时是 `-1` 而不是 `0`：`0` 会被 ffmpeg 当成零长度流，后续 seek 全判越界。
+- `read` 返回原始字节数、不做 EOF 翻译（翻译在 `HttpIO.read`）：返回 `0` 会被 aviobuf 当成「读空，继续要数据」。
+- 在已关闭的响应上再读抛 `IllegalStateException`，不是 EOF。
+- `close()` 必须任意线程可调且幂等：JS 侧丢弃对象时 native 析构回调会替 JS 调它。
+- 协程取消会 `cancel()` 掉底层 call 并把响应标记为已关闭；这条会话当场作废，下次读必须重开。
+- 本层不装 `cookieJar`：cookie 完全由 `headers` 决定，不增不减。
+- okhttp 要求方法与 body 匹配：`GET`/`HEAD` 不带 body，`POST`/`PUT`/`PATCH` 必须带一个（空 body 也要给 `ByteArray(0)`）。
+- `FormData` 的项键名必须与 `init.js` 的 `_formItem` 逐字一致（`filename` 为小写 l）；内容类型解析失败留空，不让坏 `MediaType` 炸掉整条请求。
+
+## 本地文件、路径与设置
+
+- `openFileHandle` 不抛异常：它由 native 的 `io_open` 回调间接调起，异常穿过 JNI 后 native 仍会用返回值，表现为更难查的崩溃；失败统一让读取方返回 `-1`。
+- `FileHandle` 是随机访问句柄，同一次打开内反复 `read` / `seek`；`read` 到末尾返回 `-1`。
+- `Paths.init` 只能成功一次，且必须早于 `settingsStore` 首次读取与 WebView2 首次建上下文；未初始化就读取抛 `UninitializedPropertyAccessException`。
+- DataStore 禁止同一文件上并存两个实例（各自缓存快照、互相覆盖），所以 `settingsStore` 是进程级单例。
+- 删键用 `prefs -= key` 而不是 `remove(key)`：后者会把被删的值 `as T` 回给调用方，泛型擦除后没有保证。
+
+## 编码与时钟
+
+- `encodeTextToBytes` 遇到不认识的 charset 必须抛，不兜底成 UTF-8：静默换编码会让对端按声明的编码解出乱码却不报错。
+- `monoTimeMs` 只保证两次读数之差有意义，不用于表达日历时间。

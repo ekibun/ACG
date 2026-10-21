@@ -10,11 +10,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 
-/**
- * `Settings.*` 这两个能力在 JS 侧的样子。落点由 [TestPaths] 注入到临时目录。
- *
- * 用例之间共享同一份文件，谁都不假设自己是第一次跑：断言只比自己写入的那两个键。
- */
+/** `Settings.*` 两个能力在 JS 侧的样子：写入后读回、`null` 删键、非字符串被拒。 */
 class SettingsAbilityTest {
   @BeforeTest
   fun initPaths() {
@@ -59,8 +55,7 @@ class SettingsAbilityTest {
 
   @Test
   fun nonStringValueIsRejected() {
-    // 全局这层不做类型转换：42 原样过桥，由宿主的 `as String?` 收窄失败 ⇒ Promise 被拒绝。
-    // 回空值或悄悄折成 "42" 都会让插件以为写成功了。
+    // 非字符串原样过桥，宿主收窄失败 ⇒ Promise 被拒绝
     assertEquals(
       "caught",
       evalAsync(

@@ -6,7 +6,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 abstract class SurfaceContext : AvSurfaceContext() {
   private val aspectRatioState = mutableFloatStateOf(1f)
 
-  /** 视频宽高比，首帧到达后会自动触发重组 */
+  /** 视频宽高比，首帧到达后触发重组。 */
   val aspectRatio: Float get() = aspectRatioState.floatValue
 
   protected fun updateAspectRatio(
@@ -15,7 +15,7 @@ abstract class SurfaceContext : AvSurfaceContext() {
   ) {
     if (width <= 0 || height <= 0) return
     val ratio = width.toFloat() / height
-    // 避免每帧都写入快照状态
+    // 避免每帧都写快照状态
     if (ratio != aspectRatioState.floatValue) aspectRatioState.floatValue = ratio
   }
 }

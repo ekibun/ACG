@@ -7,17 +7,7 @@ import java.util.Base64
 import java.util.concurrent.Executors
 
 /**
- * WebView / fetch 用例共用的**本地页面服务端**：`/page.html` + `/sub.js` + `/sub.png`，
- * 可选 `/data.json`。
- *
- * 为什么抽出来：`JsEngineDispatchTest` / `WebViewHostTest` / `:platform` 的 `Webview2Test`、
- * `WebViewCookieManagerTest` 四个文件各抄了一份起停代码与同一个 1×1 PNG 常量，
- * 其中两份 PNG 的 base64 **还不一样**（改一处漏一处就是隐性的假红）。
- *
- * 页面上一定带一个 `<script src>`：拦资源比拦主框架有信息量 —— `isForMainFrame` 必须是 `false`，
- * 误命中会把页面整个拦掉、连脚本都执行不了。
- *
- * 线程池用可缓存而非固定：拦截用例里 handler 可能被挂住，固定池会被吃光、新请求进不来。
+ * WebView / fetch 用例共用的本地页面服务端：`/page.html` + `/sub.js` + `/sub.png`，可选 `/data.json`。
  */
 internal class TestPageServer(
   /** 额外挂一个 `/data.json`（`fetch` 用例要它）。 */
@@ -64,7 +54,7 @@ internal class TestPageServer(
   }
 
   private companion object {
-    /** 1×1 的透明 PNG。用真的图，免得 WebView2 那边报解码错误干扰日志。 */
+    /** 1×1 的透明 PNG。 */
     const val PNG_1X1 =
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
   }

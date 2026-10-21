@@ -12,20 +12,7 @@ import java.util.Collections
 import kotlin.test.Test
 import kotlin.test.assertTrue
 
-/**
- * 播到**片尾**之后，本轮要自己收干净：播放轮次要结束、`pause()` / `closeAsync()` 都必须能返回。
- *
- * 为什么值得留（2026-10-01 实测踩过）：AvFormat 的预读通道在 EOF 只 `send(null)`、不 `close()`，
- * 而读循环拿到 null 且队列非空时会 `delay(100ms); continue` —— **第二次 `getPacket` 永久挂起**，
- * 于是本轮永不结束、`pause()` 的 `playingJob.join()` 一直等。症状与「暂停收不掉」一模一样，
- * 其他用例都只播到第一帧就暂停，撞不到它。
- *
- * 观测点是 [FFPlayer.Event.Frame]：`FFPlayer` 播完会以 `pts = null` 回调 ——
- * 这既是「真的播到片尾了」的公开信号，也是本用例的计时起点。从片尾前 1s 起播（不是从头），
- * 让用例一秒就能跑到 END，而不是干等整段素材。
- *
- * 素材用随源码入库的 [TestMedia.BBB_640X360_12S_FASTSTART]（12s / 300 帧），换台机器 / CI 也真跑。
- */
+/** 播到片尾后本轮自己收干净：播放轮次结束，`pause()` / `closeAsync()` 都能返回。 */
 class FFPlayerEofTest {
   @Test(timeout = 120_000)
   fun playToEofThenPauseAndCloseReturn() {
@@ -39,30 +26,27 @@ class FFPlayerEofTest {
         }
       try {
         val video = player.getStreams().first { it.codecType == AVMediaType.VIDEO }
-        // 从片尾前 1 秒起播：够走到 EOF 那条收场路径，又不必按墙钟干等 3 秒。
-        // `duration` 是 **AV_TIME_BASE 微秒**（native 侧是 `stream->duration * av_q2d(time_base) * AV_TIME_BASE`，
-        // 见 cxx/ffmpeg/ffmpeg.cpp），与 play(seek) / resumeImpl 里那些时间戳同单位。
+        // 从片尾前 1 秒起播；duration 是 AV_TIME_BASE 微秒
         val start = maxOf(video.duration - 1_000_000, 0)
-        // play() 要一直挂到整个播放轮次结束（withContext 会等自己的子协程，而轮次就是那个子协程），
-        // 所以不能 await —— UI 里也是 fire-and-forget 地 launch。
+        // play() 要一直挂到整轮结束（withContext 会等自己的子协程），所以只 launch 不 await
         val playJob = launch { player.play(mapOf(AVMediaType.VIDEO to video), start) }
 
-        // ① 一路播到片尾：等 Frame 事件的 null PTS（= 真播完了）。超时说明本轮走到 END 时卡住了。
+        // ① 播到片尾：等 Frame 事件的 null PTS
         withTimeout(30_000) {
           while (!frames.contains(null)) delay(10)
         }
-        // ② 本轮必须**自己**收干净（EOF 那条路挂了的话，这里超时）
+        // ② 本轮必须自己收干净
         withTimeout(20_000) { playJob.join() }
-        // ③ 收干净之后，pause 要能返回
+        // ③ 收干净之后 pause 要能返回
         withTimeout(5_000) { player.pause() }
 
-        // null 之前必须真有帧显示过（否则「null」可能来自开播即失败的假路径）。
+        // null 之前必须真有帧显示过
         assertTrue(
           frames.any { it != null },
           "a frame should have been shown before the EOF teardown, got frames=${frames.take(5)}...",
         )
       } finally {
-        // withTimeoutOrNull：本用例失败时（例如又退回挂死那版）不许把整个测试进程拖住
+        // withTimeoutOrNull：本用例失败时不许拖住整个测试进程
         withTimeoutOrNull(10_000) { player.closeAsync() }
       }
     }

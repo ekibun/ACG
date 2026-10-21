@@ -15,14 +15,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-/**
- * [JsEngine.openBrowserAsync] 的编排：占位符换成了什么、回给插件的是什么形状。
- *
- * 「开浏览器」用注入的 `launch` 顶掉 —— 真开的话这条用例会在跑测试的机器上弹一个浏览器，
- * 那是测试不能碰的动作。信道本身（回环服务器）由 `CallbackSessionTest` 验。
- *
- * JS 那一侧的真派发归 [JsEngineDispatchTest]：那边只能走到模板校验那一支（同样因为不能真开浏览器）。
- */
+/** [JsEngine.openBrowserAsync] 的编排：占位符换成百分号编码的回调地址，插件收到浏览器请求的原始 URL。 */
 class BrowserLoginTest {
   @BeforeTest
   fun initPaths() {
@@ -50,7 +43,7 @@ class BrowserLoginTest {
       val uri = URI(callbackUrl)
       assertEquals("127.0.0.1", uri.host, callbackUrl)
 
-      // 浏览器按这个地址回来：带上授权码，值里故意塞一个会被误解码的 %26。
+      // 浏览器按这个地址回来：值里塞一个会被误解码的 %26
       val origin = callbackUrl.substringBeforeLast('/')
       val target = callbackUrl.removePrefix(origin) + "?code=4808dfb7&state=probe%26x"
       assertEquals(200, request(origin, target))
@@ -69,15 +62,14 @@ class BrowserLoginTest {
         assertFailsWith<JSError> {
           JsEngine.instance.openBrowserAsync("https://example.com/auth?x=1") { _ -> error("must not open the browser") }
         }
-      // 文案里带不带那段原文归派发层（JsEngineDispatchTest 锁「args[0] 真到了」）——
-      // 这里只钉住「拒绝了」，以及上面那个注入的 `launch` 一次都没被调。
+      // 只钉「拒绝了」，且注入的 launch 一次都没被调
       assertTrue(
         failure.message.orEmpty().isNotEmpty(),
         "a rejection must carry a reason: ${failure.message}",
       )
     }
 
-  /** 直接打原始 HTTP：要验的正是「request-target 原样到手」，套客户端会把编码抹平。 */
+  /** 直接打原始 HTTP，request-target 原样写出。 */
   private fun request(
     origin: String,
     target: String,
@@ -98,10 +90,7 @@ class BrowserLoginTest {
   private companion object {
     const val REQUEST_TIMEOUT_MS = 10_000
 
-    /**
-     * 授权链接的典型形状：client_id / response_type / state 都在，回调地址留占位符。
-     * 刻意不带任何服务商信息 —— 引擎侧不含服务商知识，这条契约对谁都一样。
-     */
+    /** 授权链接的典型形状：query 里留 `{{callback}}` 占位符。 */
     const val TEMPLATE =
       "https://example.com/oauth/authorize?client_id=client-id&response_type=code" +
         "&state=probe123&redirect_uri={{callback}}"

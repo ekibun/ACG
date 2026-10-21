@@ -18,73 +18,49 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-// 可见 WebView 的跨端抽象。
-//
-// 分层：commonMain 持有**全部逻辑**（状态折算、假进度插值、生命周期与失败兜底），
-// 平台只提供两块收不进公共代码的东西：
-//
-//   - [createWebviewContext]：建一个平台 WebView 上下文（桌面 = WebView2 宿主建隐藏窗口，
-//     Android = 主线程建 `android.webkit.WebView`）。可见与后台（headless）共用这一个入口。
-//   - [WebViewSurface]：把上下文对应的原生视图铺进组合树（桌面 = SwingPanel + JAWT
-//     挂原生窗口，Android = AndroidView）。
-//
-// 两端都走同一个事件出口（[WebViewEvent]）：平台回调只发事件，往 [WebViewState]
-// 折算的代码只有 commonMain 这一份。
-//
-// | | 实现 | cookie 存储 |
-// | --- | --- | --- |
-// | 桌面 (Windows) | 自研 C++ shim（`cxx/webview/webview.cpp`）里的 WebView2「嵌入视图」 | 和后台 WebView **同一个 user data folder** |
-// | Android | `android.webkit.WebView` + `AndroidView` | 系统单一 `CookieManager` |
-//
-// 两端的可见页与后台页共用同一份 cookie 存储。桌面端只有 Windows 有实现。
+// 可见 WebView 的跨端抽象：commonMain 负责状态折算、进度插值、生命周期与失败兜底，
+// 平台只提供 [createWebviewContext] 与 [WebViewSurface]。两端共用 [WebViewEvent] 出口。
 
 /** WebView 的加载状态。 */
 sealed interface WebViewLoadingState {
   /** 还没有任何文档。 */
   data object Initializing : WebViewLoadingState
 
-  /** 正在加载。`progress` 是 0..1 的估算值（WebView2 只给布尔，这里是插值出来的）。 */
+  /** 正在加载。[progress] 是 0..1 的估算值。 */
   data class Loading(
     val progress: Float,
   ) : WebViewLoadingState
 
-  /** 已经有一个文档了。 */
+  /** 已有一个文档。 */
   data object Finished : WebViewLoadingState
 
-  /** 起不来或者加载失败。 */
+  /** 起不来或加载失败。 */
   data class Failed(
     val message: String,
   ) : WebViewLoadingState
 }
 
-/**
- * 平台 WebView 向 commonMain 报告的事件。平台回调（native 线程 / Android 主线程）
- * 只发事件，折算到 [WebViewState] 的代码在 [WebViewState.onWebViewEvent] 一处。
- *
- * 全部是**可见页语义**：后台任务（`soko.ekibun.acg.engine.webviewAsync`）
- * 只用其中的 [PageFinished] 与 [LoadFailed]，其余由它自己消费 —— 脚本结果与拦截命中
- * 走的是驱动自己的返回值通道，不再是平台事件。
- */
+/** 平台 WebView 上报的事件，统一由 [WebViewState.onWebViewEvent] 折算。 */
 sealed interface WebViewEvent {
-  /** 页面开始加载。Android = `onPageStarted`；桌面 = loading=1。 */
+  /** 页面开始加载。 */
   data object PageStarted : WebViewEvent
 
-  /** 真实加载进度（0..1）。只有 Android 给；桌面没有，由壳的插值循环兜住。 */
+  /** 真实加载进度（0..1）。 */
   data class Progress(
     val fraction: Float,
   ) : WebViewEvent
 
-  /** 地址变了（不区分是否已提交）。Android = `onPageStarted` / `doUpdateVisitedHistory`。 */
+  /** 地址变化。 */
   data class UrlChanged(
     val url: String,
   ) : WebViewEvent
 
-  /** 有文档真的加载出来了（提交且可交互）。桌面 = SourceChanged；Android = `onPageFinished`。 */
+  /** 文档已提交并可交互。 */
   data class DocumentLoaded(
     val url: String,
   ) : WebViewEvent
 
-  /** 这一轮加载结束（无论成败，失败走 [LoadFailed]）。Android = `onPageFinished`；桌面 = loading=0。 */
+  /** 本轮加载结束。 */
   data object PageFinished : WebViewEvent
 
   /** 标题变化。 */
@@ -98,61 +74,40 @@ sealed interface WebViewEvent {
     val canGoForward: Boolean,
   ) : WebViewEvent
 
-  /** 主框架加载失败（子资源 404 不算）。 */
+  /** 主框架加载失败。 */
   data class LoadFailed(
     val message: String,
   ) : WebViewEvent
 }
 
-/**
- * 可见 WebView 的创建期配置。
- *
- * 只在视图创建时生效 —— 想改这些得让 [WebViewState] 重建（换 key / 换 url）。
- * **后台（headless）任务不读它**：那边由任务的字段驱动，配置由平台固化。
- */
+/** 可见 WebView 的创建期配置，只在视图创建时生效。 */
 class WebViewConfig {
-  /** 自定义 User-Agent；null 表示用默认的。 */
+  /** 自定义 User-Agent；null 表示用默认值。 */
   var userAgent: String? = null
 
-  /** 是否允许 F12 开发者工具与右键菜单。调试页面时很有用，发布可以关掉。 */
+  /** 是否允许开发者工具与右键菜单。 */
   var enableDevtools: Boolean = false
 }
 
 /**
- * 平台 WebView 上下文 —— 可见页与后台任务共用同一个类型，差别只在调用方怎么用：
- * 可见壳配好 setter 后挂 [WebViewSurface]；后台驱动拿 `isHeadless = true` 的实例走
- * 「拦截 + evaluate」。
- *
- * 所有函数都是挂起的：每条命令落到**归属线程**上（桌面 = WebView 宿主线程，
- * Android = 主线程）执行完再返回，实现内部不再有 fire-and-forget 的投递。
- *
- * [onEvent] 与 [onInterceptor] 是从归属线程上调进来的：接收方自己保证线程安全，
- * 且**不要在回调里同步调回本接口的挂起方法**（桌面那会钉住宿主线程的消息泵，
- * 后台驱动里 `evaluate` 因此必须丢到独立 scope 上）。
- * 两个槽位都是**创建之后、首次导航之前一次性设好**的（不是运行期反复改的状态），
- * 所以实现侧就是普通字段，不需要 `@Volatile` 之类的同步。
+ * 平台 WebView 上下文：可见页与后台任务共用，后台实例 `isHeadless = true`。
+ * 函数均为挂起，命令投到归属线程执行完再返回。
  */
 interface WebviewContext : AutoCloseable {
-  /**
-   * 页面生命周期事件出口。创建后、导航前设好；null = 摘掉。
-   */
+  /** 页面生命周期事件出口；null 表示不接收。 */
   var onEvent: ((WebViewEvent) -> Unit)?
 
   /**
-   * 请求拦截：返回 `true` = 命中（桌面：native 给空 204 并 Stop；Android：照常放行、
-   * 只把结果交出去）。null = 不拦。
-   *
-   * `method` 与 `isForMainFrame` 两端都给得到（Android 来自 `WebResourceRequest`，
-   * 桌面来自 native 的 `WebResourceRequested`），脚本靠它们区分主框架与子资源；
-   * Android 独有的 `isRedirect` 两边对不齐（桌面恒 false），因此不上回调。
+   * 请求拦截：返回 `true` 表示命中，null 表示不拦截。
+   * 参数为 url、headers、method、是否主框架。
    */
   var onInterceptor:
     ((url: String, headers: Map<String, String>, method: String, isForMainFrame: Boolean) -> Boolean)?
 
-  /** 自定义 User-Agent。 */
+  /** 设置自定义 User-Agent。 */
   suspend fun setUserAgent(ua: String)
 
-  /** F12 / Chrome 远程调试开关。桌面无操作（`openDevTools` 不依赖它）。 */
+  /** 开关开发者工具；桌面端无操作。 */
   suspend fun setDevtoolsEnabled(enabled: Boolean)
 
   /** 导航到 [url]，附带 [headers]。 */
@@ -162,11 +117,8 @@ interface WebviewContext : AutoCloseable {
   )
 
   /**
-   * 在当前页执行脚本，返回平台给的 JSON 字符串；**失败**（超时 / 脚本抛错）是 `null`。
-   *
-   * 「没有返回值」两端给的**都不是** Kotlin 的 `null`，而是**字符串 `"null"`** —— WebView2
-   * 把 `undefined` 序列化成 JSON 的 null，Android 的 `evaluateJavascript` 对 `undefined`
-   * 同样给 `"null"`。桌面这一侧由 `Webview2Test` 钉住。
+   * 在当前页执行脚本，返回平台序列化的 JSON 字符串，失败为 `null`。
+   * 无返回值时两端给的是字符串 `"null"`。
    */
   suspend fun evaluate(script: String): String?
 
@@ -180,35 +132,17 @@ interface WebviewContext : AutoCloseable {
 
   suspend fun openDevTools()
 
-  /**
-   * 收尾：可见页组合退出时、后台任务 `finally` 里。必须幂等。
-   *
-   * 非挂起：销毁动作交给底层 [Pointer] 自己派发到归属线程（[Pointer.close] 只把释放
-   * 投进队列就返回），调用方不必再包 `withContext(NonCancellable)`。重复调用被静默忽略。
-   *
-   * 即 [AutoCloseable.close]——`Webview2Context` 直接继承 [Pointer.close]，Android 侧
-   * `override fun close()` 把 `view.destroy()` 投递回主线程。
-   */
+  /** 释放上下文，幂等；非挂起，销毁投到归属线程。 */
   override fun close()
 }
 
 /**
- * 建一个平台 WebView 上下文。
- *
- * 无模式 / 地址 / 脚本参数：[isHeadless] 选后台任务模式，其余配置走接口上的 setter，
- * 首屏地址由调用方建好之后自己 [WebviewContext.navigate]。
- *
- * 失败（环境起不来、Context 缺失）抛 [IllegalStateException]，消息给人看。
+ * 建一个平台 WebView 上下文，[isHeadless] 表示后台模式。
+ * 失败抛 [IllegalStateException]；首屏地址由调用方 [WebviewContext.navigate]。
  */
 expect suspend fun createWebviewContext(isHeadless: Boolean = false): WebviewContext
 
-/**
- * 把上下文对应的原生视图铺进 [modifier] 划出的区域，[content] 是其上的 Compose
- * 覆盖层插槽。
- *
- * **注意**：桌面端原生视图是个真的 Win32 子窗口（重型组件），它会盖住同级
- * Compose 内容 —— 这个插槽在 Windows 上只在原生后端起不来时才看得见。
- */
+/** 把原生视图铺进 [modifier] 区域，[content] 是其上的 Compose 覆盖层。 */
 @Composable
 internal expect fun WebViewSurface(
   controller: WebviewContext,
@@ -216,48 +150,48 @@ internal expect fun WebViewSurface(
   content: @Composable () -> Unit = {},
 )
 
-/**
- * 可见 WebView 的状态。
- *
- * 由 [rememberWebViewState] 建；common 的壳把平台事件折算进来。UI 只读。
- */
+/** 可见 WebView 的状态，由 [rememberWebViewState] 建；UI 只读。 */
 class WebViewState internal constructor(
-  /** 首屏加载的地址。 */
+  /** 首屏地址。 */
   internal val initialUrl: String,
   internal val config: WebViewConfig,
 ) {
-  /** 当前（或即将）加载的地址；还没收到地址事件就是 null。 */
+  /** 当前或即将加载的地址；未收到地址事件时为 null。 */
   var currentUrl by mutableStateOf<String?>(null)
     internal set
 
-  /** 文档标题。拿不到就是 null。 */
+  /** 文档标题；拿不到为 null。 */
   var pageTitle by mutableStateOf<String?>(null)
     internal set
 
+  /** 是否正在加载。 */
   var isLoading by mutableStateOf(false)
     internal set
 
+  /** 加载状态。 */
   var loadingState by mutableStateOf<WebViewLoadingState>(WebViewLoadingState.Initializing)
     internal set
 
-  /** 最近一次真的加载出文档的地址。用来区分「空壳后端」和「页面还没到」。 */
+  /** 最近一次真正加载出文档的地址。 */
   var lastLoadedUrl by mutableStateOf<String?>(null)
     internal set
 
+  /** 能否后退。 */
   var canGoBack by mutableStateOf(false)
     internal set
 
+  /** 能否前进。 */
   var canGoForward by mutableStateOf(false)
     internal set
 
-  /** 后端不可用或加载失败时的原因；null 表示没出问题。 */
+  /** 失败原因；null 表示正常。 */
   var failure by mutableStateOf<String?>(null)
     internal set
 
-  /** 平台报过真实进度（Android）就不再跑假进度插值。普通字段，不驱动重组。 */
+  /** 平台是否报过真实进度。 */
   internal var sawRealProgress = false
 
-  /** 平台上下文；由 common 的壳在 [createWebviewContext] 成功后填。 */
+  /** 平台上下文，创建成功后填入。 */
   internal var controller: WebviewContext? = null
 
   /** 导航到 [url]，附带 [headers]。 */
@@ -277,28 +211,20 @@ class WebViewState internal constructor(
 
   suspend fun navigateForward() = controller?.goForward()
 
-  /**
-   * 在**当前页面**里执行一段脚本，返回它的结果（已由平台侧序列化成 JSON 字符串）。
-   *
-   * 与后台任务的 `script` 是同一件事，区别只在**对象**：那个是另开一个隐藏窗口抓页面，
-   * 这个是用户在看的这一页 —— 不用重新请求一遍，而且带着用户当前的滚动位置、展开状态
-   * 这些交互痕迹。
-   *
-   * 返回值语义和后台任务一致：脚本没有返回值时是 `null`，失败同样是 `null`。
-   */
+  /** 在当前页面执行脚本，返回 JSON 字符串；失败或无返回值为 `null`。 */
   suspend fun evaluate(script: String): String? = controller?.evaluate(script)
 
-  /** 打开开发者工具（桌面端；Android 上无操作）。 */
+  /** 打开开发者工具；Android 上无操作。 */
   suspend fun openDevTools() = controller?.openDevTools()
 
-  /** 平台实现往里记「起不来 / 加载失败」。 */
+  /** 记录失败状态。 */
   internal fun fail(message: String) {
     failure = message
     isLoading = false
     loadingState = WebViewLoadingState.Failed(message)
   }
 
-  /** 平台事件的唯一折算点（两端平台回调的合并）。 */
+  /** 把平台事件折算进状态。 */
   internal fun onWebViewEvent(event: WebViewEvent) {
     when (event) {
       is WebViewEvent.PageStarted -> {
@@ -342,15 +268,7 @@ class WebViewState internal constructor(
   }
 }
 
-/**
- * 建一个 [WebViewState]。
- *
- * [initialUrl] 是首屏加载的地址（默认 [DEFAULT_WEBVIEW_URL]，about:blank 空页）。
- * [config] 是「建一次」的 DSL —— 只在首次组合时求值。它**不是**
- * `remember` 的 key：写成一个 key 的话，每次重组都会因为 lambda 实例不同而重建整个
- * 状态（连带把 WebView 拆了重建）。想换初始地址或配置就给 `WebView` 换个 key
- * （重建整个状态）。
- */
+/** 建一个 [WebViewState]；[config] 只在首次组合时求值。 */
 @Composable
 fun rememberWebViewState(
   initialUrl: String = DEFAULT_WEBVIEW_URL,
@@ -360,15 +278,7 @@ fun rememberWebViewState(
     WebViewState(initialUrl, WebViewConfig().apply(config))
   }
 
-/**
- * 把真正的 WebView 铺到 [modifier] 划出的区域里（common 实现，平台只出
- * [WebViewSurface]）。首屏默认加载 [DEFAULT_WEBVIEW_URL]（about:blank，空页），
- * 不自动导航到任何站点 —— 之后用 [WebViewState.loadUrl] 去。
- *
- * [content] 是原生页面之上的 Compose 覆盖层插槽。「后端没起来」与「正常」两条
- * 分支共用同一个槽位（[movableContentOf] 搬运，槽内状态不丢）；lambda 经
- * [rememberUpdatedState] 取最新，免得调用方换了 lambda 之后还在跑旧的。
- */
+/** 把 WebView 铺进 [modifier] 区域，首屏加载 [DEFAULT_WEBVIEW_URL]；[content] 是覆盖层插槽。 */
 @Composable
 fun WebView(
   state: WebViewState,
@@ -385,7 +295,7 @@ fun WebView(
           state.config.userAgent?.let { ctx.setUserAgent(it) }
           ctx.setDevtoolsEnabled(state.config.enableDevtools)
           state.controller = ctx
-          // 初始导航由壳自己发：创建入口不带地址。
+          // 创建完成后发起首屏导航
           ctx.navigate(state.initialUrl)
         }
       } catch (t: Throwable) {
@@ -395,8 +305,7 @@ fun WebView(
     controller = c
   }
 
-  // WebView2 只给「在不在加载」，没有进度。平台没报真进度时（桌面）由下面的插值
-  // 兜底；Screen 只读 loadingState，不关心进度从哪来。
+  // 加载期间由插值循环推进假进度
   LaunchedEffect(state.isLoading) { state.interpolateFakeProgress() }
 
   val currentContent by rememberUpdatedState(content)
@@ -404,7 +313,7 @@ fun WebView(
 
   val c = controller
   if (c == null) {
-    // 后端不可用（或还没起来）：退回成一个空盒子，让上层自己的提示层露出来。
+    // 后端不可用：只渲染覆盖层
     Box(modifier) { movableContent() }
     return
   }
@@ -412,8 +321,7 @@ fun WebView(
   DisposableEffect(c) {
     onDispose {
       if (state.controller === c) state.controller = null
-      // 组合退出的那一帧没有协程上下文，而 dispose 是挂起的 —— 丢到进程级 scope 上
-      // （dispose 自己幂等，重复调用被静默忽略）。
+      // 在进程级 scope 上执行挂起的释放
       disposeScope.launch { runCatching { c.close() } }
     }
   }
@@ -423,21 +331,13 @@ fun WebView(
   }
 }
 
-/** 可见 WebView 的默认首屏地址：about:blank（空页）。 */
+/** 默认首屏地址。 */
 internal const val DEFAULT_WEBVIEW_URL = "about:blank"
 
-/**
- * 收尾动作的落地 scope。组合的 `onDispose` 没有协程上下文，而 [WebviewContext.dispose]
- * 是挂起的 —— 需要一个不随组合取消的进程级 scope。取值 [Dispatchers.Default]：
- * dispose 只是投递一次「归还」并返回，不阻塞。
- */
+/** 释放动作用的进程级 scope，不随组合取消。 */
 private val disposeScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-/**
- * 假进度插值：WebView2 只给「在不在加载」，没有进度。平台没报过真进度
- * （[WebViewState.sawRealProgress]）时按固定步长推进、0.9 封顶 —— 视觉上
- * 不至于一直卡在同一个位置。
- */
+/** 按固定步长推进假进度，上限 0.9。 */
 private suspend fun WebViewState.interpolateFakeProgress() {
   while (isLoading && !sawRealProgress) {
     delay(PROGRESS_TICK_MS)

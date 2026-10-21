@@ -14,13 +14,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 
-/**
- * JS 的 `fetch` 落到网络上的形状。
- *
- * 打的是**真的**本地 HTTP 服务端（`com.sun.net.httpserver`）：请求方法、`Content-Type`、
- * body 这三样只有服务端那一侧看得见 —— 全在客户端内断言的话，"方法丢了、
- * 一律按 GET 发出去"这种失效正好落在断言之外，测不出来。
- */
+/** JS 的 `fetch` 落到网络上的形状：方法、`Content-Type`、body，都由本地服务端记录。 */
 class JsEngineFetchTest {
   @BeforeTest
   fun initPaths() {
@@ -50,7 +44,7 @@ class JsEngineFetchTest {
         exchange.sendResponseHeaders(200, response.size.toLong())
         exchange.responseBody.use { it.write(response) }
       }
-      // 冻结/挂住的 handler 会一直占着线程，缓存池不至于被一条用例卡死。
+      // 缓存池：挂住的 handler 不卡死别的用例
       executor = Executors.newCachedThreadPool()
       start()
     }

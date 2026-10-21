@@ -19,32 +19,15 @@ import androidx.compose.ui.layout.ContentScale
 import kotlinx.coroutines.CancellationException
 import soko.ekibun.common.Http
 
-/**
- * 已解码的图缓存：**进程级**，按 URL 存 [ImageBitmap]。
- *
- * 预算按**解码后**的字节算（`宽 × 高 × 4`）而不是下载的字节数 —— 吃内存的是解码位图。
- * 8 MiB ≈ 150 张 100px 封面（bgm 的 `grid` 档约 100×140，`×4` 是每像素 4 字节 ≈ 56 KB），
- * 一个列表来回滚不重下，又不会随「切了 25 种筛选」累积成几百 MB。
- */
+/** 已解码图片缓存的预算，按解码后字节（`宽 × 高 × 4`）计。 */
 private const val IMAGE_CACHE_BYTES: Int = 8 * 1024 * 1024
 
-/**
- * 加这层是因为 `LazyColumn` 滚出去的节点会被销毁、滚回来重建：没有缓存就是每滚一轮重下一遍。
- * [LruCache] 内部有锁，跨线程安全。
- */
+/** 进程级图片缓存，按 URL 存已解码的 [ImageBitmap]；[LruCache] 内部有锁。 */
 private val imageCache: LruCache<String, ImageBitmap> =
-  // sizeOf 必须**具名**传：`lruCache` 的末位参数是 onEntryRemoved，尾随 lambda 会绑错位置。
+  // sizeOf 具名传参，缓存大小按解码后字节计
   lruCache(IMAGE_CACHE_BYTES, sizeOf = { _, image -> image.width * image.height * 4 })
 
-/**
- * 网络图：按 [url] 拉字节再解码成 [ImageBitmap]。
- *
- * 走 [Http] 而不是各平台的图片库：共享层没有平台符号，而 `ByteArray.decodeToImageBitmap()`
- * 两端各有 `actual`（Android 侧 `BitmapFactory`、桌面侧 skiko），是本层唯一能用的解码入口。
- *
- * 没拿到图（[url] 为 null、下载失败、字节不是图）就画一块占位底色，**不**向外抛 ——
- * 列表里的一张封面不值得把整页打不开。
- */
+/** 网络图：按 [url] 拉字节并解码成 [ImageBitmap]；没拿到就画一块占位底色，不向外抛。 */
 @Composable
 fun RemoteImage(
   url: String?,
@@ -52,8 +35,7 @@ fun RemoteImage(
   modifier: Modifier = Modifier,
   contentScale: ContentScale = ContentScale.Crop,
 ) {
-  // 用 `remember(url)` 而不是 `produceState`：后者的 `remember` **不带 key**，
-  // 换 url 时上一条的图会留在原处显示，等新图到了才被替换 —— 列表里就是「张冠李戴」。
+  // 按 url 重置状态，换 url 即重取
   var bitmap by remember(url) { mutableStateOf<ImageBitmap?>(null) }
   LaunchedEffect(url) { bitmap = url?.let { fetchImageBitmap(it) } }
 
@@ -74,9 +56,7 @@ private suspend fun fetchImageBitmap(url: String): ImageBitmap? {
   imageCache[url]?.let { return it }
   val loaded =
     try {
-      // 要 `redirect = "follow"`：[Http.request] 缺省用**不跟随**的那个客户端，
-      // 而这里换到的是 API 给的图床地址、随时可能被跳到别处 —— 拿到 302 的响应体解码必失败。
-      // （bgm 现在的图床是直连 200，见 `docs/design/bgm-plugin.md`；这条是防跳。）
+      // 跟随重定向
       Http.request(mapOf("url" to url, "redirect" to "follow")).use { response ->
         if (response.status !in 200..299) {
           null
@@ -85,12 +65,12 @@ private suspend fun fetchImageBitmap(url: String): ImageBitmap? {
         }
       }
     } catch (cancel: CancellationException) {
-      // 取消 ≠ 加载失败：吞掉它会让 `LaunchedEffect` 的取消失效，界面停在假的「已加载」上。
+      // 取消原样抛出
       throw cancel
     } catch (_: Exception) {
       null
     }
-  // **只记成功的**：一次瞬时失败不该粘住，否则那张图在这一进程里永远画不出来。
+  // 只缓存成功的解码结果
   loaded?.let { imageCache.put(url, it) }
   return loaded
 }

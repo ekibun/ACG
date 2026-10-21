@@ -10,14 +10,7 @@ import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.time.Duration.Companion.milliseconds
 
-/**
- * 一次**可能永久阻塞**的 [AvIO.read]：丢到**守护线程**上跑，`join` 带超时。
- *
- * 播放与 HTTP 用例里要测的正是「读可能永远不回来」（abort 叫醒、会话作废、卡在 socket 上），
- * 但一次没回来的读会让整个构建挂住。超时就把线程栈打出来再失败，报告里能直接看出卡在哪。
- *
- * 线程必须是守护线程：挂在非守护线程上的永久阻塞会让测试 JVM 退不出去。
- */
+/** 丢到守护线程上带超时地跑一次 [AvIO.read]；超时打印线程栈再失败。 */
 internal fun AvIO.readBounded(
   size: Int,
   timeoutMs: Long = 10_000,
@@ -36,23 +29,9 @@ internal fun AvIO.readBounded(
   return result.get()
 }
 
-/**
- * 播放用例共用的**空播放设备**：不接 SDL / 声卡，只把每个解码帧的观测值交给调用方。
- *
- * 为什么共用一个类而不是各文件各写一份：五个用例的 `AvSurfaceContext` 空实现逐字相同，
- * 差异只在「观测哪一列」—— 那正是构造参数该表达的东西。判据各不相同，但设备行为一致。
- *
- * 三条可配的行为：
- *
- * - [onVideo]：视频帧交给平台后调一次（像素就在 `getBuffer()` 里，调用方自己决定记什么）；
- * - [onAudio]：音频帧交给平台后调一次（参数是这一帧的样本数）；
- * - [paceAudio]：音频分支按样本数 `delay` 当**声卡节拍**，让播放按真实时长推进。
- *   只给「需要播放自然走一段墙钟」的用例用（如 stall 现场），其余用例关掉它以换速度。
- *
- * 返回值约定照 [AvSurfaceContext.flushFrame]：返回 0 = 没有重采样前导偏移、时间戳原样上屏。
- */
+/** 播放用例共用的空播放设备：不接 SDL / 声卡，只把每个解码帧的观测值交给调用方。 */
 internal class TestSurface(
-  /** 声明给 native 的重采样目标；只决定 native 输出什么格式，与判据无关。 */
+  /** 声明给 native 的重采样目标。 */
   rate: Int = 48_000,
   private val paceAudio: Boolean = false,
   private val onVideo: ((ByteArray) -> Unit)? = null,

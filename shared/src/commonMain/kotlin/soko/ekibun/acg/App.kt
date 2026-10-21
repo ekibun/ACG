@@ -25,13 +25,11 @@ private enum class AppTab(
   Web("浏览器"),
   Collect("收藏"),
 
-  // 一个能直接执行插件 JS 的控制台 —— 后台 WebView 这些能力只有从 JS 里
-  // 才够得着，没有这个页签就没法在应用内验证。
+  // 脚本页签：直接执行插件 JS 的控制台
   Code("脚本"),
 }
 
-// App() 挂着 @Preview 方便在 IDE 里预览整页，但它同时是 Android / 桌面两端的真实入口，
-// 必须是 public —— compose-rules 的 preview-public-check 只认「有 @Preview」，这里按误报关掉。
+// 应用入口，带 @Preview；按误报关掉 preview-public-check。
 @Suppress("ktlint:compose:preview-public-check")
 @Composable
 @Preview

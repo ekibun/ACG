@@ -32,29 +32,7 @@ import java.net.HttpURLConnection
 import java.net.URI
 import javax.swing.Timer
 
-/**
- * dev 控制条：**无标题栏**长条，[ComposeDialog] 以应用主窗口为 owner 挂上去（owner 同进程才成立，
- * 所以由 [DevToolsAgent] 在应用进程里创建），**内容直接由 Compose 绘制** —— material3 的
- * 按钮与状态文本。窗口层留给 AWT：owner / 跟随移动 / 不抢焦点都要靠它，而 ComposeWindow 是
- * JFrame、拿不到 owner。
- *
- * 透明只在这层有开关：它要同时把面板置为非 opaque、把 skia 表面切到透明、并换掉 skiko 的窗口底色
- * —— 只设 `window.background` 不管用；所以 `isTransparent` 必须在窗口 displayable（即 `pack()`）
- * 之前设定，且要求 `isUndecorated`，否则 CMP 直接抛异常。没有系统边框也就没有系统阴影：圆角、
- * 1dp 边框与圆角外的透明留白都在 Compose 里自绘。
- *
- * Compose 类的加载靠 **parent-first**：子 ClassLoader 的 parent 是应用类加载器，所有
- * `androidx.compose.*` 与 skiko 都由应用自己的那份提供（版本天然一致）；dev 类路径里的
- * compose jar 只在编译期可见，运行时被遮蔽 —— 不存在两套运行时打架的问题。
- *
- * 跟随：监听 owner 的 componentMoved / componentResized，把控制条贴回主窗口右上角（顶边上方），
- * 主窗口移动 / 缩放都跟；owner 关闭时跟着 dispose，最小化时藏起。
- *
- * 反馈：状态文本**定宽**（`weight` + 单行截断），每秒轮询只读的 `/__control/status` —— 不点按钮
- * 也看得到 frozen / bps / served 的实时变化（播放时 served 自己往上涨）；状态再长也不改布局尺寸。
- *
- * 与 dev 服务器的对话走 `/__control` 的各动作（HttpURLConnection，回环毫秒级，UI 线程上直接发）。
- */
+/** dev 控制条：无标题栏长条，贴在应用主窗口右上角，按钮与状态轮询走 `/__control` 端点。 */
 object DevStrip {
   @JvmStatic
   @OptIn(ExperimentalComposeUiApi::class)
@@ -63,10 +41,10 @@ object DevStrip {
     port: String,
   ) {
     val strip = ComposeDialog(owner)
-    // 不抢焦点：点控制条不影响应用正在输入的东西；鼠标事件照常到达面板。
+    // 不抢焦点
     strip.focusableWindowState = false
     strip.isUndecorated = true
-    // undecorated 下 CMP 会留一圈不可见的边缘拖拽区，贴边 8dp 的点击会被它吃掉。
+    // undecorated 下窗口有一圈不可见的边缘拖拽区
     strip.isResizable = false
     strip.isTransparent = true
 
@@ -105,7 +83,7 @@ object DevStrip {
         Action("Resume") { send("resume") }
         Action("Throttle") { send("throttle?bps=30000") }
         Action("Unthrottle") { send("throttle?bps=0") }
-        // 定宽 + 单行截断：文本变化不改布局尺寸，行高恒定。
+        // 定宽 + 单行截断：文本变化不改布局尺寸
         Text(
           status,
           Modifier.weight(1f),

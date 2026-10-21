@@ -11,17 +11,8 @@ import java.util.Locale
 actual fun getWebviewCookieManager(): WebviewCookieManager = WebView2CookieManager
 
 /**
- * WebView2 的 cookie 库门面：插件 JS 的 `Cookies.get` / `Cookies.set` 落到这里。
- *
- * 取 / 写都走 [Webview2Context.getCookie] / [Webview2Context.setCookie] —— 底层是本对象
- * **惰性缓存的一个 [Webview2Context]**（第一次用时才建，之后所有读写都复用它）连同它自己
- * 的 `ICoreWebView2CookieManager`（controller 就绪时在 native 侧一次取好缓存；manager
- * 属于 profile，跨上下文共享同一套 cookie 库）。于是 cookie 读写投到 WebView 宿主线程上
- * 跑，却不必每次建 / 销一整个 WebView2 上下文。所有上下文共用同一个 user data folder
- * 下的 cookie 库，无论谁落下的 cookie，可见页 / 后台页都能读到。
- *
- * HTTP 层**没有** cookie 仓库（传输层不装 cookieJar）：要带登录态就由 JS 侧读出 cookie、
- * 显式塞进请求头 —— 于是「哪些请求带 cookie」完全由 JS 说了算，本层不增不减。
+ * WebView2 的 cookie 门面：读写走一个惰性创建的 [Webview2Context]，
+ * 命令投到 WebView 宿主线程执行。
  */
 internal object WebView2CookieManager : WebviewCookieManager {
   private val lazyCtx = lazy { Webview2Context() }
@@ -51,13 +42,13 @@ internal object WebView2CookieManager : WebviewCookieManager {
   override suspend fun clearAll() = ctx.clearAllCookies()
 }
 
-/** 解析出来的 `Set-Cookie`：字段口径与 [Webview2Context.setCookie] 一一对应。 */
+/** 解析后的 `Set-Cookie` 字段。 */
 internal data class ParsedCookie(
   val name: String,
   val value: String,
   val domain: String,
   val path: String,
-  /** 「自 Unix 纪元起的秒」；0 = 会话 cookie（缺省口径）。 */
+  /** 自 Unix 纪元起的秒；0 = 会话 cookie。 */
   val expiresEpochSeconds: Double,
   val secure: Boolean,
   val httpOnly: Boolean,
@@ -66,13 +57,8 @@ internal data class ParsedCookie(
 )
 
 /**
- * 按 RFC 6265 的字段把 `Set-Cookie` 串拆开。**手写而不是借传输库**：解析结果要转成 WebView2 的
- * 结构化字段（域要去掉前导点、SameSite 要变成枚举），库给的 cookie 对象反而更远。
- *
- * 认不出名字（第一段没有 `name=`）时返回 null。**不校验域与 URL 是否匹配** —— 装不进这个域的
- * cookie 由 WebView2 自己拒收。
- *
- * [nowEpochSeconds] 只为 `Max-Age` 换算用（它给的是相对秒数），测试里可注入。
+ * 按 RFC 6265 把 `Set-Cookie` 串拆成结构化字段；首段没有 `name=` 时返回 null。
+ * [nowEpochSeconds] 供 `Max-Age` 换算，可注入。
  */
 internal fun parseSetCookie(
   url: String,
@@ -89,12 +75,9 @@ internal fun parseSetCookie(
       .associate {
         it.substringBefore('=').trim().lowercase(Locale.ROOT) to it.substringAfter('=', "").trim()
       }
-  // 域 / 路径缺省按 url 推（去掉端口的 host / 根路径），与 Android CookieManager 口径一致。
-  // 前导点要去掉：WebView2 的 CreateCookie 不认那种写法。
+  // 域 / 路径缺省按 url 推；域去掉前导点
   val domain = attributes["domain"]?.removePrefix(".") ?: URI(url).host ?: return null
-  // SameSite 口径：默认 LAX（Chromium 的默认值）。显式 none 时必须同时置 Secure ——
-  // WebView2 对「SameSite=None 但非 Secure」的 cookie 直接拒收，且 AddOrUpdateCookie
-  // 没有返回值、不报错，症状是「调用全正常但 GetCookies 永远读不到」。
+  // 默认 LAX；NONE 需要同时置 Secure
   val sameSite =
     when (attributes["samesite"]?.lowercase(Locale.ROOT)) {
       "strict" -> 2
@@ -106,7 +89,7 @@ internal fun parseSetCookie(
     value = first.substringAfter('=', "").trim(),
     domain = domain,
     path = attributes["path"]?.takeIf { it.isNotEmpty() } ?: "/",
-    // Max-Age 优先于 Expires（RFC 6265 §5.3）；两个都没有就是会话 cookie。
+    // Max-Age 优先于 Expires；两者都没有即会话 cookie
     expiresEpochSeconds =
       attributes["max-age"]?.toLongOrNull()?.let { (nowEpochSeconds + it).toDouble() }
         ?: attributes["expires"]?.let(::httpDateEpochSeconds)
@@ -117,39 +100,30 @@ internal fun parseSetCookie(
   )
 }
 
-/**
- * `Expires` 认的三种格式（RFC 6265 §5.1.1 三种都要求认）：RFC 1123 / RFC 850 / asctime。
- *
- * 都**不带星期几与时区**：这两截在 [httpDateEpochSeconds] 里先剥掉 —— 星期几写错了（有源会写）
- * 不该让整条 cookie 变成会话 cookie；三种格式的时区一律是 GMT（RFC 7231），于是按 UTC 解即可。
- */
+/** `Expires` 接受的三种日期格式：RFC 1123 / RFC 850 / asctime，均不含星期与时区。 */
 private val HTTP_DATE_FORMATS: List<DateTimeFormatter> =
   listOf(
     DateTimeFormatter.ofPattern("dd MMM uuuu HH:mm:ss", Locale.US),
     DateTimeFormatterBuilder()
       .appendPattern("dd-MMM-")
-      // 两位年份按 RFC 6265 §5.1.1 归窗：70-99 归 19xx、00-69 归 20xx。
+      // 两位年份归窗：70-99 → 19xx，00-69 → 20xx
       .appendValueReduced(ChronoField.YEAR, 2, 4, 1970)
       .appendPattern(" HH:mm:ss")
       .toFormatter(Locale.US),
-    // asctime 的日期是空格补齐的（"Nov  6"），所以是 `ppd` 而不是 `dd`。
+    // asctime 的日期空格补齐（"Nov  6"），用 `ppd`
     DateTimeFormatter.ofPattern("MMM ppd HH:mm:ss uuuu", Locale.US),
   )
 
-/** 三个字母以上、可带逗号的星期名字前缀（"Sun, " / "Sunday, " / asctime 的 "Sun "）。 */
+/** 星期名前缀（"Sun, " / "Sunday, " / "Sun "）。 */
 private val WEEKDAY_PREFIX = Regex("^[A-Za-z]{3,9},?\\s+")
 
-/** 时区后缀（三种格式都只出现在 GMT 语境里）。 */
+/** 时区后缀（GMT / UTC / UT）。 */
 private val TIMEZONE_SUFFIX = Regex("\\s+(?i)(gmt|utc|ut)$")
 
-/**
- * `Expires` 转「自 Unix 纪元起的秒」。认不出的日期当**没有**过期时间（会话 cookie），不抛 ——
- * 一条解析不了的 `Expires` 不该让整个 `Cookies.set` 失败。
- */
+/** `Expires` 转 Unix 秒；认不出返回 null。 */
 private fun httpDateEpochSeconds(value: String): Double? {
   val text = value.trim().replace(TIMEZONE_SUFFIX, "")
-  // 两种起手都试：先按原样（有的源会带星期几），失败再去掉开头的星期名字。
-  // 不能无条件先剥：asctime 之外的格式一旦少了星期几，剥掉的就是月份。
+  // 两种起手都试：先剥星期，或按原样解析
   return parseHttpDate(text) ?: parseHttpDate(text.replace(WEEKDAY_PREFIX, ""))
 }
 

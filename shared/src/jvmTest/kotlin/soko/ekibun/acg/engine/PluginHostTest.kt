@@ -15,17 +15,10 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * [JsEngine.callPlugin] 这条通路：`import()` 取模块 → 取成员 → 调用 → 收 Promise。
- * 顺带钉住引擎层自己的模块加载（`Res` 读打包资源那一层，平台层的 `QuickJSTest` 看不到）。
- *
- * 打的是**真的** `files/js/module/bgm.js`（不是测试专用的假模块，免得通路在真模块上
- * 另有一副样子），但只调它那些不发网络的部分（纯函数、设置读写）。
+ * [JsEngine.callPlugin] 通路：`import()` 取模块 → 取成员 → 调用 → 收 Promise；打真的 `bgm.js` 纯函数部分。
  */
 class PluginHostTest {
-  /**
-   * 会话存档的键名在两边各写一份（插件里的 `SESSION_KEY`、这里的字面量）—— 这正是要钉住的：
-   * 宿主写得进去、插件读得出来。宿主只写凭据、插件只写登录态，所以会话键在 Kotlin 侧没有常量。
-   */
+  /** 会话存档的键名：宿主写、插件读，所以 Kotlin 侧没有常量。 */
   private val sessionKey = "bgm.session"
 
   @BeforeTest
@@ -56,12 +49,7 @@ class PluginHostTest {
   }
 
   /**
-   * 模块加载走的是 [JsEngine] 自己的处理器（`Res` 读打包资源），比平台层的内存处理器多一层
-   * —— `QuickJSTest.missingModuleThrows` 只钉平台层那一层。这里钉引擎层：模块缺失时
-   * JS 侧必须拿到可捕获的异常（而不是挂起或读到过期异常），且那一下之后 runtime 仍能正常销毁。
-   *
-   * `@AfterTest` 的 `reset()` 就是后半个判据：`import()` 打乱引用计数时，
-   * `JS_FreeRuntime` 会撞 `assert(list_empty(&rt->gc_obj_list))` 直接 abort 整个测试进程。
+   * 引擎层模块加载（`Res` 读打包资源）：模块缺失时 JS 侧拿到可捕获异常，之后 runtime 仍能正常销毁。
    */
   @Test
   fun importOfMissingModuleRejectsWithJsError() {
@@ -82,7 +70,7 @@ class PluginHostTest {
 
   @Test
   fun exportThatIsNotAFunctionSurfacesJsError() {
-    // crypto.js 只 `export default` 一个对象；`callPlugin` 要的是函数。
+    // crypto.js 只 export default 一个对象，callPlugin 要的是函数
     val failure = assertFailsWith<JSError> { call("default", module = "crypto") }
 
     assertTrue(
@@ -95,7 +83,7 @@ class PluginHostTest {
   fun readsBackTheSessionItStored() =
     runBlocking {
       val engine = JsEngine.instance
-      // 从干净状态起：落盘是跨测试进程留着的，上一次运行可能留下了存档。
+      // 从干净状态起：落盘内容跨测试进程留着
       engine.callPlugin("bgm", "logout")
       assertNull(engine.callPlugin("bgm", "session"), "after logout the plugin should be logged out")
 
@@ -119,7 +107,7 @@ class PluginHostTest {
         "a corrupt stored session must be treated as logged out instead of throwing at the caller",
       )
       JsEngine.instance.callPlugin("bgm", "logout")
-      // 结束在断言上（JUnit 4 要求测试方法返回 void，尾表达式是 `callPlugin` 就推不出 Unit）。
+      // 结束在断言上，保证测试方法返回 void
       assertNull(
         JsEngine.instance.callPlugin("bgm", "session"),
         "the corrupt stored session must be purged so it does not poison the next case",

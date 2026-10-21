@@ -23,15 +23,9 @@ using Microsoft::WRL::ComPtr;
 #define WV_WM_TASK (WM_APP + 1)
 
 // ---------------------------------------------------------------------------
-// 日志 —— 一律写 stderr。
-//
-// 原生日志是这个宿主唯一的可观测面（WebView2 自己不报告有用信息）。消费端只有
-// Gradle 起的测试与桌面端进程，两个都有 stderr。
-//
-// 每条都 `fflush`：宿主进程与 JVM 各有各的缓冲，不刷新会和 `System.err` 的输出
-// 错序，看到的时间戳就不再可信了。
+// 日志，一律写 stderr，每条都 fflush。
 // ---------------------------------------------------------------------------
-/** 日志用的相对时间戳（从首次调用算起）。看时序问题全靠它。 */
+/** 日志用的相对时间戳（从首次调用算起）。 */
 static long long logNowMs() {
   static const auto start = std::chrono::steady_clock::now();
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -49,18 +43,13 @@ static long long logNowMs() {
 
 // ---------------------------------------------------------------------------
 // JAWT：从 AWT 组件取原生 HWND
-//
-// 「把这个上下文挂进 UI」就是把它 `SetParent` 到 AWT 组件（`SwingPanel` 里的
-// Canvas）的 HWND 上。取句柄这一步留在**调用线程**上做（一般是 AWT 的 EDT ——
-// 组件 peer 归属那个线程），只读、不碰绘制。
 // ---------------------------------------------------------------------------
 
 /**
- * 取 AWT 组件的原生窗口句柄；组件还没 peer（没 `isDisplayable`）就返回
- * nullptr。
+ * 取 AWT 组件的原生窗口句柄；组件还没有 peer 时返回 nullptr。
  *
- * `Lock` / `Unlock` 必须成对，`GetDrawingSurfaceInfo` 拿到的东西必须
- * `FreeDrawingSurfaceInfo` 还回去 —— 漏了会泄漏。
+ * `Lock` / `Unlock` 成对调用，`GetDrawingSurfaceInfo` 的结果用
+ * `FreeDrawingSurfaceInfo` 归还。
  */
 static HWND awtHwndOf(JNIEnv* env, jobject component) {
   if (!env || !component) return nullptr;
@@ -93,11 +82,7 @@ static HWND awtHwndOf(JNIEnv* env, jobject component) {
   return hwnd;
 }
 // ---------------------------------------------------------------------------
-// 手写的 COM 回调基类
-//
-// MinGW 的 WRL 只移植了 ComPtr（wrl.h 里 implements.h / event.h 都是注释掉
-// 的），没有 `Microsoft::WRL::RuntimeClass` / `Make<>` / `Callback<>`。所以
-// 自己实现引用计数 + QueryInterface，IID 由子类显式传入。
+// 手写的 COM 回调基类：引用计数 + QueryInterface，IID 由子类显式传入。
 // ---------------------------------------------------------------------------
 template <class I>
 class ComCallback : public I {
@@ -231,7 +216,7 @@ class WebviewEnviorment
 
   std::mutex mu_;
   std::thread thread_;
-  // 只设不清空，判断用thread_.joinable();
+  // 线程 id；线程状态用 thread_.joinable() 判断。
   DWORD threadId_ = 0;
   JavaVM* vm_ = nullptr;
   JNIEnv* jenv_ = nullptr;
@@ -240,7 +225,7 @@ class WebviewEnviorment
   std::vector<WebviewContextHandler*> handlers_;
   bool isClosed = false;
 
-  // 拉起Context消费，由外部加锁
+  // 让各上下文消费 environment，由调用方加锁。
   void flushPending(ICoreWebView2Environment* env) {
     for (auto& handler : handlers_) handler->flushPending(env);
   }
@@ -260,17 +245,16 @@ class WebviewEnviorment
   }
   ~WebviewEnviorment() { releaseEnvironment(); }
 
-  // 初始化，应该只调用一次。
+  // 记录初始化参数，不启动线程。
   void prepareEnvironment(JavaVM* vm, const std::wstring& args,
                           const std::wstring& udf) {
-    // 只做准备不启动线程
     std::lock_guard<std::mutex> lock(mu_);
     vm_ = vm;
     args_ = args;
     udf_ = udf;
     isClosed = false;
   }
-  // 释放，幂等，在程序结束后强制调用一次。
+  // 释放环境，可重复调用。
   void releaseEnvironment() {
     std::thread thread;
     {
@@ -295,7 +279,7 @@ class WebviewEnviorment
     if (thread_.joinable()) {
       if (threadId_) PostThreadMessageW(threadId_, WV_WM_TASK, 0, 0);
     } else {
-      // 线程崩溃就重新打开
+      // 线程未运行时新建宿主线程。
       thread_ = std::thread(&WebviewEnviorment::threadMain, this);
     }
   }
@@ -328,8 +312,7 @@ class WebviewEnviorment
   ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
-    // 必须写 `*ppv` —— COM 契约要求返回 `S_OK` 时把接口指针交出去。只写
-    // `return S_OK` 会让调用方拿到未初始化的指针再解引用，直接崩。
+    // 写出接口指针后返回 S_OK。
     if (!ppv) return E_POINTER;
     *ppv = nullptr;
     if (riid == IID_IUnknown || riid == IID_ICoreWebView2EnvironmentOptions) {
@@ -383,7 +366,7 @@ class WebviewEnviorment
         std::lock_guard<std::mutex> lock(mu_);
         flushPending(nullptr);
       }
-      // 初始化失败就直接退出线程
+      // 初始化失败：退出消息循环。
       PostQuitMessage(0);
       return S_OK;
     }
@@ -398,7 +381,7 @@ class WebviewEnviorment
   }
 };
 
-// Webview线程
+// 宿主线程主循环
 void WebviewEnviorment::threadMain() {
   WV_LOG("thread_ begin");
   {
@@ -420,11 +403,11 @@ void WebviewEnviorment::threadMain() {
     goto exit_thread;
   }
   while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-    // 线程消息（`hwnd == nullptr`）是投给本线程的任务
+    // hwnd 为空的线程消息是投给本线程的任务。
     if (msg.hwnd == nullptr && msg.message == WV_WM_TASK) {
       {
         std::lock_guard<std::mutex> lock(mu_);
-        // 环境已经初始化，则直接执行，没初始化时由初始化回调触发
+        // 环境已就绪则直接执行任务。
         if (env_) flushPending(env_.Get());
       }
       continue;
@@ -435,7 +418,7 @@ void WebviewEnviorment::threadMain() {
 exit_thread:
   WV_LOG("Closing Webview thread");
   {
-    // 清空等待回调
+    // 排空待执行回调。
     std::lock_guard<std::mutex> lock(mu_);
     flushPending(nullptr);
     env_.Reset();
@@ -547,15 +530,10 @@ class WebviewContext
       env->DeleteGlobalRef(ctx_);
       ctx_ = nullptr;  // 之后新起回调经 getCtx 早退
     }
-    // 排空 pending_ 闭包（传 nullptr → 包装层直接返回，不碰
-    // COM），并摘除处理器，
-    // 使宿主线程不再拿到本对象。这两步都在锁外，无重入死锁。
+    // 排空 pending_ 闭包（传 nullptr，不碰 COM），并摘除处理器。
     flushPending(nullptr);
     WebviewEnviorment::instance().unregisterHandler(this);
-    // hwnd 有效且 PostMessage 成功 → 销毁在 STA 上发生（WM_CLOSE 由消息泵处理，
-    // FIFO 排在在飞回调之后）；否则（无窗口 /
-    // 线程已死，投递失败）直接删，防泄漏。 注意 delete this
-    // 必须在锁外，否则析构销毁 mu_ 后 lock_guard 再 unlock → UB。
+    // hwnd 有效时投递 WM_CLOSE 由消息泵销毁，无效时直接删除。
     if (!(hwnd_ &&
           PostMessage(hwnd_, WM_CLOSE, 0, reinterpret_cast<LPARAM>(this))))
       delete this;
@@ -584,8 +562,7 @@ class WebviewContext
   ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
-    // 同上：`S_OK` 必须伴随写出的接口指针。本对象一次充当六个回调接口，
-    // 少答一个，WebView2 注册那类事件时就会拿到空指针再调用。
+    // 一个对象充当六个回调接口，逐个应答 QueryInterface。
     if (!ppv) return E_POINTER;
     *ppv = nullptr;
     if (riid == IID_IUnknown) {
@@ -641,13 +618,10 @@ class WebviewContext
     webview_->add_ProcessFailed(this, &token);
 
     webview_->QueryInterface(IID_ICoreWebView2_2, &webview2_);
-    // 取出本上下文自己的 cookie manager 缓存下来，供后续 cookie
-    // 读写复用（不必每次 get_CookieManager）。它属于 profile，随 controller
-    // 就绪时一次取好即可。排在 SetEvent(init_) 之前 ⇒ initContext
-    // 返回时它已就位，Kotlin 侧无需再等。
+    // 缓存本上下文的 cookie manager，供后续读写复用。
     if (webview2_) webview2_->get_CookieManager(&cookieManager_);
 
-    // ---- 设置项：后台页不要界面 ----
+    // ---- 设置项：关闭界面相关能力 ----
     ComPtr<ICoreWebView2Settings> settings;
     if (SUCCEEDED(webview_->get_Settings(settings.GetAddressOf())) &&
         settings) {
@@ -684,8 +658,7 @@ class WebviewContext
     } else {
       isForMainFrame = false;
     }
-    // 摊平成 [name, value, ...] 交给 JVM —— 比在 native 里拼 HashMap 省事，
-    // 也不用在两边维护同一份类型。
+    // 把请求头摊平成 [name, value, ...] 交给 JVM。
     std::vector<std::wstring> flat;
     {
       ComPtr<ICoreWebView2HttpRequestHeaders> headers;
@@ -731,8 +704,7 @@ class WebviewContext
           return ret;
         });
     if (!hit) return S_OK;
-    // 命中：给一个空的 204 并把整轮加载停掉。JVM 侧此刻已经拿到结果了，之后
-    // nativeCancel 会来收摊。
+    // 命中拦截：回一个 204 空响应并停止加载。
     WV_LOG("Intercepted: %ls", uri.c_str());
     ComPtr<ICoreWebView2WebResourceResponse> response;
     if (auto* env = WebviewEnviorment::instance().env()) {
@@ -752,7 +724,7 @@ class WebviewContext
     BOOL ok = FALSE;
     args->get_IsSuccess(&ok);
     if (ok) {
-      // 成功才报这两个：失败的那轮没有新文档，历史栈也没动。
+      // 导航成功时上报文档地址与历史栈状态。
       const std::wstring source =
           takeString([&](LPWSTR* out) { return sender->get_Source(out); });
       callOnEvent(L"documentLoaded", source);
@@ -760,7 +732,7 @@ class WebviewContext
       BOOL forward = FALSE;
       sender->get_CanGoBack(&back);
       sender->get_CanGoForward(&forward);
-      // data 是 "canGoBack canGoForward"，两个都是 "1" / "0"。
+      // data 为 "canGoBack canGoForward"，取值 "1" / "0"。
       callOnEvent(L"historyChanged",
                   std::to_wstring(back) + L" " + std::to_wstring(forward));
     }
@@ -771,7 +743,7 @@ class WebviewContext
   HRESULT STDMETHODCALLTYPE
   Invoke(ICoreWebView2* sender,
          ICoreWebView2NavigationStartingEventArgs* args) override {
-    // 地址在**开始**导航时就有了（完成时再取的话，失败那轮拿不到）。
+    // 导航开始时取地址。
     const std::wstring uri =
         takeString([&](LPWSTR* out) { return args->get_Uri(out); });
     callOnEvent(L"urlChanged", uri);
@@ -793,8 +765,7 @@ class WebviewContext
     COREWEBVIEW2_PROCESS_FAILED_KIND kind =
         COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED;
     args->get_ProcessFailedKind(&kind);
-    // Reason / ExitCode 在 _2 上（基接口没有），拿不到就算了 —— 别为了日志把
-    // 事件处理搞失败。
+    // 从 _2 接口取 Reason / ExitCode，取不到就用默认值。
     COREWEBVIEW2_PROCESS_FAILED_REASON reason =
         COREWEBVIEW2_PROCESS_FAILED_REASON_UNEXPECTED;
     INT32 exitCode = 0;
@@ -811,7 +782,7 @@ class WebviewContext
                                       std::to_wstring(exitCode));
     return S_OK;
   }
-  // ui
+  // 窗口挂载
   void attachThreadInput(HWND parent) {
     const DWORD selfTid = GetCurrentThreadId();
     const HWND root = GetAncestor(parent, GA_ROOT);
@@ -829,15 +800,13 @@ class WebviewContext
     if (!hwnd_ || !parent) return;
     if (parent_ == parent) return;
     parent_ = parent;
-    // 顺序不能反：先接父链再改样式 —— 反过来窗口会在父链还没接上时就已经是
-    // `WS_CHILD`，然后直接消失。
+    // 先接父链，再改样式。
     SetParent(hwnd_, parent);
     LONG_PTR style = GetWindowLongPtrW(hwnd_, GWL_STYLE);
     style &= ~static_cast<LONG_PTR>(WS_POPUP | WS_CAPTION | WS_THICKFRAME);
     style |= WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
     SetWindowLongPtrW(hwnd_, GWL_STYLE, style);
-    // 只改样式不够 —— 让系统按新样式重算一次非客户区 / 裁剪。尺寸交给下面的
-    // fitToParent。
+    // 让系统按新样式重算非客户区与裁剪，尺寸交给 fitToParent。
     SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
                      SWP_FRAMECHANGED);
@@ -868,7 +837,7 @@ class WebviewContext
     if (!GetClientRect(parent_, &rc)) return;
     const int width = rc.right > 0 ? rc.right : 1;
     const int height = rc.bottom > 0 ? rc.bottom : 1;
-    // 子窗口坐标相对父窗口客户区，所以位置恒为 (0, 0)。
+    // 子窗口坐标相对父窗口客户区，位置取 (0, 0)。
     SetWindowPos(hwnd_, nullptr, 0, 0, width, height,
                  SWP_NOZORDER | SWP_NOACTIVATE);
     if (ctrl_) {
@@ -913,9 +882,7 @@ class ScriptHandler final
       jstring jResultJson = fromWide(env, result);
       env->CallVoidMethod(token_, mid_, ok, jResultJson);
       env->DeleteLocalRef(jResultJson);
-      // 回调只来一次：全局引用在这里还回去。`executeScript` 那边只在 post 失败
-      // 时自己删，成功这一支的责任在这里。（上下文先被关掉、回调没跑到的情形
-      // 会漏一个 —— 那时 JVM 也在退了，不值得为它加一条跨线程的清理链。）
+      // 回调只来一次，这里归还全局引用。
       env->DeleteGlobalRef(token_);
       return true;
     });
@@ -926,9 +893,8 @@ class ScriptHandler final
 /**
  * `GetCookies` 的结果收件人。
  *
- * 摊平成 `"n1=v1; n2=v2"` 交给回调的 `onResult(String)` —— 与 Android
- * `CookieManager.getCookie` 同一口径，JVM 侧不必再拼。取不到（失败或没有
- * cookie）时给空串。
+ * 把 cookie 摊平成 `"n1=v1; n2=v2"` 交给回调的
+ * `onResult(String)`，取不到时给空串。
  */
 class GetCookiesHandler final
     : public ComCallback<ICoreWebView2GetCookiesCompletedHandler> {
@@ -968,7 +934,7 @@ class GetCookiesHandler final
       jstring jCookies = fromWide(env, cookies);
       env->CallVoidMethod(token_, mid_, jCookies);
       env->DeleteLocalRef(jCookies);
-      // 回调只来一次：全局引用在这里还回去（同 ScriptHandler）。
+      // 归还全局引用（同 ScriptHandler）。
       env->DeleteGlobalRef(token_);
       return true;
     });
@@ -1055,15 +1021,10 @@ Java_soko_ekibun_web_Webview2Context_executeScript(JNIEnv* env, jclass,
 }
 
 /**
- * 读一个 url 下的 cookie，用**调用方传入的那个上下文自己的 manager**。
+ * 读一个 url 下的 cookie，使用调用方传入的上下文自己的 manager。
  *
- * manager 在 controller 就绪时（controller-completed 回调里、`SetEvent(init_)`
- * 之前） 一次取好缓存在 `WebviewContext::cookieManager_` 上，随取随用；它属于
- * profile 而非 单个 CoreWebView2，所以同一 environment 下各上下文看到的是同一套
- * cookie 库。摊平成
- * `"n1=v1; n2=v2"` 经 callback 的 `onResult(String)` 回来；没有 cookie
- * 也给空串， 回调只来一次。任务投到宿主线程上跑（COM 调用要留在建 manager
- * 的那条 STA 线程上）。
+ * 结果摊平成 `"n1=v1; n2=v2"` 经 callback 的 `onResult(String)` 回来，没有
+ * cookie 时给空串，回调只来一次。任务在宿主线程上执行。
  */
 extern "C" JNIEXPORT void JNICALL
 Java_soko_ekibun_web_Webview2Context_getCookie(JNIEnv* env, jclass, jlong pctx,
@@ -1082,8 +1043,7 @@ Java_soko_ekibun_web_Webview2Context_getCookie(JNIEnv* env, jclass, jlong pctx,
       WV_LOG("GetCookies: %ls", url_.c_str());
       manager->GetCookies(url_.c_str(), handler);
     } else {
-      // 没有 manager（环境没起来 / 已释放）也给个空结果 —— token 的全局引用由
-      // handler 归还，少这一回调就漏一个、JVM 侧只会干等超时。
+      // 没有 manager 时回调空结果。
       handler->Invoke(E_FAIL, nullptr);
     }
     handler->Release();
@@ -1091,11 +1051,11 @@ Java_soko_ekibun_web_Webview2Context_getCookie(JNIEnv* env, jclass, jlong pctx,
 }
 
 /**
- * 写 cookie（结构化参数）到**调用方传入的那个上下文自己的 manager**。
- * 域 / 路径缺省由 Kotlin 端按 url 推好再传进来。`expiresEpochSeconds > 0`
- * 表示带过期 时间（自 Unix 纪元起的秒），否则会话 cookie。`sameSite`：0=NONE,
- * 1=LAX, 2=STRICT。 空 name 在投递前就拦掉（fail
- * fast，不占宿主线程）。任务投到宿主线程上跑。
+ * 写 cookie（结构化参数）到调用方传入的上下文自己的 manager。
+ *
+ * 域 / 路径缺省由 Kotlin 端按 url 推好再传进来。`expiresEpochSeconds > 0` 时带
+ * 过期时间（Unix 纪元秒），等于 0 时为会话 cookie。`sameSite`：0=NONE, 1=LAX,
+ * 2=STRICT。空 name 直接返回。任务在宿主线程上执行。
  */
 extern "C" JNIEXPORT void JNICALL
 Java_soko_ekibun_web_Webview2Context_setCookie(
@@ -1192,8 +1152,7 @@ Java_soko_ekibun_web_Webview2Context_attach(JNIEnv* env, jclass, jlong pctx,
                                             jobject view) {
   if (pctx != 0) {
     WebviewContext* ctx = reinterpret_cast<WebviewContext*>(pctx);
-    // 取 HWND 这一步留在调用线程上做（组件 peer 归属 AWT 的 EDT），之后动窗口的
-    // 事全投到 WebView 线程。
+    // 在调用线程上取 HWND，窗口操作投到宿主线程。
     const HWND parent = awtHwndOf(env, view);
     if (parent == nullptr) {
       WV_LOG("awtHwndOf failed");
@@ -1212,7 +1171,7 @@ Java_soko_ekibun_web_Webview2Context_detach(JNIEnv* env, jclass, jlong pctx) {
   }
 }
 
-// 尺寸：组件大小变了重新贴合；没挂到组件上的用法给一个显式视口。
+// 按父组件尺寸重新贴合。
 extern "C" JNIEXPORT void JNICALL
 Java_soko_ekibun_web_Webview2Context_fitToParent(JNIEnv*, jclass, jlong pctx) {
   if (pctx != 0) {

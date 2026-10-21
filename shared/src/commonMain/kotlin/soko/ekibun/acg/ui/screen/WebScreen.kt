@@ -28,25 +28,10 @@ import soko.ekibun.web.WebViewLoadingState
 import soko.ekibun.web.WebViewState
 import soko.ekibun.web.rememberWebViewState
 
-/**
- * 固定站点页面的默认地址。换站点只改这一个常量（或从外部传 [WebScreen] 的 homeUrl）。
- */
+/** 默认首页地址。 */
 const val WEBVIEW_HOME_URL: String = "https://www.google.com"
 
-/**
- * 跨端 WebView 页面：顶部进度条 + 前进/后退/刷新工具条。首屏加载 [WEBVIEW_HOME_URL]。
- *
- * - Android：[android.webkit.WebView]
- * - 桌面(Windows)：自研 C++ 宿主里的 WebView2（见 `soko.ekibun.web`）
- *
- * 桌面端必须跑在**基于 AWT 的窗口**里（compose.desktop 的 `application { Window(...) }`，
- * 见 `desktopApp/main.kt`）：原生视图是个真的 Win32 窗口，靠 JAWT 从 AWT 组件（`SwingPanel`
- * 里的 Canvas）取 HWND 再 `SetParent` 挂进去 —— 没有 AWT 后端就没东西可挂。
- *
- * 顺带一提，这里的 WebView 和插件脚本的后台 WebView 共用同一套 cookie
- * （桌面共用一个 user data folder，Android 共用系统 `CookieManager`），
- * 所以在这里登录过的站点，脚本那边也是登录态。
- */
+/** 跨端 WebView 页面：进度条、前进 / 后退 / 刷新工具条，首屏加载 [homeUrl]。 */
 @Composable
 fun WebScreen(
   modifier: Modifier = Modifier,
@@ -54,7 +39,7 @@ fun WebScreen(
 ) {
   val state =
     rememberWebViewState(WEBVIEW_HOME_URL) {
-      // F12 开发者工具，调试页面时很有用；发布可关掉。
+      // 开启开发者工具（F12）
       enableDevtools = true
     }
 
@@ -79,8 +64,7 @@ fun WebScreen(
           state = state,
           modifier = Modifier.fillMaxSize(),
         ) {
-          // 桌面端这个覆盖层会被原生 WebView 窗口盖住（AWT 是重型组件），
-          // 实际只在原生后端**起不来**时才看得见；Android 上一直有效。
+          // 后端不可用时的提示
           state.failure?.let { BackendUnavailableHint(homeUrl, it) }
         }
       }
@@ -90,7 +74,7 @@ fun WebScreen(
 
 @Composable
 private fun WebToolbar(state: WebViewState) {
-  // 命令都是挂起的（要落到归属线程上执行完才返回），点击回调得自带协程上下文。
+  // 工具栏命令都是挂起函数，点击回调自带协程上下文
   val scope = rememberCoroutineScope()
 
   Row(

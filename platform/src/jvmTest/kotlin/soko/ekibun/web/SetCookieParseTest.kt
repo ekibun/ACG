@@ -7,13 +7,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/**
- * [parseSetCookie] 的字段口径 —— 手写解析里最容易错的那几处。
- *
- * 为什么单独测：这些字段要喂给 WebView2 的 `AddOrUpdateCookie`，它**没有返回值**、属性不对也不报错，
- * 症状是「调用全正常、cookie 永远读不到」。端到端用例（[WebViewCookieManagerTest]）在这条路上只能
- * 看到「读不回」，定位不到是哪一项拼错了，而且要 WebView2 宿主可用才跑得起来。
- */
+/** [parseSetCookie] 的字段口径：默认值、属性大小写、日期三种格式、SameSite/Secure 联动、无名拒绝。 */
 class SetCookieParseTest {
   private val url = "https://example.com:8443/path/page.html"
 

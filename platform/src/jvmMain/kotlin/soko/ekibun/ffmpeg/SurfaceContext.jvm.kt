@@ -13,21 +13,15 @@ import javax.sound.sampled.DataLine
 import javax.sound.sampled.SourceDataLine
 
 /**
- * 桌面端播放实现：音频走 javax.sound.sampled；视频把 native 经 `SetByteArrayRegion` 拷进复用
- * `ByteArray` 的整帧，经 `Image.makeRaster` 复制成一份 Skia 自管的 [currentFrame]
- * （[Image]），由 `VideoSurface.jvm.kt` 取 skiaCanvas 直接画。
+ * 桌面端播放实现：音频走 javax.sound.sampled；视频把 native 拷进复用 `ByteArray` 的整帧经
+ * `Image.makeRaster` 复制成 Skia 自管的 [currentFrame]，由 `VideoSurface.jvm.kt` 取 skiaCanvas 画。
  *
- * [frame] 是 Long 计数器（每帧自增），Compose 订阅它触发重绘 —— 与 mediamp 的 `frameTick`
- * 同一思路，但本端走 **CPU 上传** 路径：每帧 2 次 CPU 拷贝（makeRaster 一次 memcpy +
- * 绘制时一次 GPU 上传），与 Android 端持平；合并成单次传输的方向见 TODO B26。
- * `buf` 下一帧会被 native 就地覆写，故 makeRaster 必须**复制**而非 alias —— 换帧时旧
- * [Image] 被 [close]，不进 Cleaner；绘制方经 [getImage] 在锁内取当前帧、画完即弃，
- * 不得把 [Image] 引用留到绘制之外。
+ * [frame] 是每帧自增的计数器，Compose 订阅它触发重绘（CPU 上传路径，每帧两次拷贝）。
+ * `buf` 下一帧会被 native 就地覆写，所以 makeRaster 必须**复制**而非 alias；换帧时旧 [Image] 被
+ * [close]。绘制方经 [getImage] 在锁内取当前帧、画完即弃，不得把引用留到绘制之外。
  *
- * [soko.ekibun.ffmpeg.AvSurfaceContext] 的 native 侧会按构造时传入的 audioFormat 用 swr_convert
- * 转码输出，因此这里的 audioFormat = AV_SAMPLE_FMT_FLT 意味着拿到的是 float32。
- * 桌面声卡用 16bit PCM，故在这里转换成 16bit：转换后每帧 4 字节，正好等于 48kHz 立体声
- * 16bit 的消耗速率，播放速度与真实时间一致。
+ * native 侧按构造时传入的 audioFormat 用 swr_convert 转码，所以这里拿到的
+ * `AV_SAMPLE_FMT_FLT` 是 float32；桌面声卡用 16bit PCM，在本类里转换。
  */
 class DesktopSurfaceContext : SurfaceContext() {
   override val sampleRate: Int = 48000
@@ -83,12 +77,10 @@ class DesktopSurfaceContext : SurfaceContext() {
 
   fun flushAudioBuffer(buf: ByteArray): Int {
     val out = line
-    // 对应 Android 端的 audio.playState != PLAYSTATE_PLAYING 时自动 play()。
-    // 必须用 isRunning：向未 start 的 line 写入，缓冲区满后会永久阻塞。
+    // 必须用 isRunning：向未 start 的 line 写入，缓冲区满后会永久阻塞
     if (!out.isRunning) out.start()
 
-    // `buf` 里是 native 拷出来的 float32；顺序必须显式设成 LITTLE_ENDIAN
-    // （native 侧给的是主机字节序），否则 float 会被读反。
+    // 显式按 LITTLE_ENDIAN 读。
     val floats = ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
     val frames = floats.limit() / channels
     if (frames > 0) {
@@ -103,7 +95,7 @@ class DesktopSurfaceContext : SurfaceContext() {
       out.write(pcm, 0, pcm.size)
     }
     frameWrite += frames
-    // 与 Android 的 AudioTimestamp.framePosition 等价：已播放的帧数
+    // 与 Android 的 framePosition 等价：已播放的帧数
     return (frameWrite - out.longFramePosition).toInt()
   }
 
@@ -132,8 +124,7 @@ class DesktopSurfaceContext : SurfaceContext() {
     val out = line
     out.stop()
     out.flush()
-    // DataLine 的帧计数「自 open 以来」累计，flush 不重置（AudioTrack 的会归零，别照搬）：
-    // 这里重取基准，否则 flushFrame 算出的 offset 变负、seek 后 PTS 校正失效。
+    // 重取帧计数基准。校正失效
     frameWrite = out.longFramePosition
   }
 

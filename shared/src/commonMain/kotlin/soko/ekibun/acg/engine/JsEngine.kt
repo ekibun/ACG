@@ -42,13 +42,7 @@ class JsEngine {
 
   private var quickjsDelegate: QuickJS? = null
 
-  /**
-   * 惰性初始化的锁：首建是一段 check-then-act（建 runtime、求值 init、赋值），
-   * 两个协程并发首访会各建一个 [QuickJS]，后赋值者覆盖先前 —— 那一个永不
-   * [close][QuickJS.close]（runtime + 归属线程泄漏）。锁里那些 `runBlocking`
-   * 没有死锁风险：等的是 QuickJS 的归属线程，而归属线程上的回调
-   * （`handleJSInvokable` / `init` 那个桥）都不进这把锁。
-   */
+/** 惰性创建 [QuickJS] 时用的互斥锁。 */
   private val quickjsLock = Any()
 
   private val quickjs: QuickJS
@@ -72,28 +66,22 @@ class JsEngine {
           }
           val ctx1 = QuickJS(moduleHandler = moduleHandler)
           quickjsDelegate = ctx1
-          // `init` 是**工厂函数**，JS 侧没别的引用持有它，调用完即可归还 —— 但必须 `as JSFunction`：
-          // 声明成 `as JSInvokable` 会丢掉 `AutoCloseable`，每个引擎实例固定漏 1 票（见 [ability-bridge]）。
-          // 这里在属性 getter 里、没有协程上下文，只能阻塞等（`evaluate` 本身是挂起的）。
+          // init 是工厂函数，取回后调用一次并归还
           val init =
             runBlocking { ctx1.evaluate(moduleHandler("@init")!!, "<init>") } as JSFunction
           try {
             init(
-              // `_binding(method, args)` 的落地：`argv` 是 init.js 那一**份**实参（`vararg` 打的
-              // `Array<Any?>`），`thisVal` 是隐式接收者、不占位。`when` **直接调**各能力、不按名字找 ⇒
-              // `private` 天然不受影响、写错名字是编译错误（反射走不通，依据见 [ability-bridge]）。
+              // `_binding(method, args)` 的实现：按方法名分派到各能力，
+              // 见 `docs/design/quickjs-ability-bridge.md`
               JSInvokable { argv ->
                 val args = argv[1] as List<*>
                 when (argv[0] as String) {
                   "encode" -> encode(args[0] as String, args[1] as String?)
                   "decode" -> decode(args[0] as ByteArray, args[1] as String?)
-                  // args[1] 是 console.log(...) 的**实参数组**，作为 args 的元素整体送达，
-                  // 不是摊平成位置参数。
+                  // args[1] 是 console.log(...) 的实参数组，整体送达
                   "console" -> console(args[0] as String, args[1] as List<Any?>)
-                  // `fetch` 只建会话、**不读 body**：body 交给 `Response.arrayBuffer`
-                  // 按需取（`init.js` 那边 await 之后才调）。所以 `_opaque` 交的是
-                  // [Http.Response] 本体，JS 侧那个 `JavaObject` 包装就是 finalizer
-                  // 能回收它的抓手（`close()` 由析构回调代调，见 cxx/quickjs/quickjs.cpp）。
+                  // fetch 只建会话、不读 body，body 由 `Response.arrayBuffer` 按需取；
+                  // 交出去的 `_opaque` 是 Response 本体。
                   "fetch" ->
                     CoroutineScope(Dispatchers.IO).async {
                       val rsp = Http.request(args[0] as Map<Any, Any?>)
@@ -121,9 +109,7 @@ class JsEngine {
                     CoroutineScope(Dispatchers.IO).async {
                       getWebviewCookieManager().set(args[0] as String, args[1] as String)
                     }
-                  // webview 的 4 个实参打进 args，不是位置参数。args[3] 是回调，
-                  // 它的归属语义见 [webviewAsync]：JS 函数引用由 asyncReleasing 收尾，
-                  // 并在本地包一层拦截器转成本地回调。
+                  // webview 的四个实参打进 args，args[3] 是拦截回调
                   "webview" ->
                     CoroutineScope(Dispatchers.IO).asyncReleasing(args[3] as JSFunction?) {
                       webviewAsync(
@@ -150,19 +136,19 @@ class JsEngine {
                       )
                     }
 
-                  // openBrowser 只有一个实参：带 `{{callback}}` 占位符的授权链接。
+                  // openBrowser 的实参：带 `{{callback}}` 占位符的授权链接
                   "openBrowser" ->
                     CoroutineScope(Dispatchers.IO).async {
                       openBrowserAsync(args[0] as String)
                     }
 
-                  // 设置的读：交回 `Deferred<String?>`，没有该键就是 null。
+                  // 读设置，交回 `Deferred<String?>`，没有该键即 null
                   "Settings.get" ->
                     CoroutineScope(Dispatchers.IO).async {
                       settingsStore.get(args[0] as String)
                     }
 
-                  // 设置的写：值为 null 即删该键。
+                  // 写设置，值为 null 即删该键
                   "Settings.set" ->
                     CoroutineScope(Dispatchers.IO).async {
                       settingsStore.set(args[0] as String, args[1] as String?)
@@ -179,28 +165,13 @@ class JsEngine {
         }
       }
 
-  /**
-   * 求值。**挂起**：[QuickJS.evaluate] 会把求值搬到 runtime 的归属线程上。
-   *
-   * 这里不做 `runBlocking` 包一层 —— 门面一旦阻塞，UI 侧（[soko.ekibun.acg.ui.screen
-   * .CodeScreen]）就得跟着卡。调用方本来就在协程里。
-   */
+  /** 在插件 runtime 上求值 [cmd]。 */
   suspend fun evaluate(
     cmd: String,
     name: String = "<eval>",
   ): Any? = quickjs.evaluate(cmd, name)
 
-  /**
-   * 调插件模块导出的函数 —— 宿主叫 JS 那一侧的唯一入口。
-   *
-   * [module] 是 `files/js/module/` 下的文件名（不带 `.js`），与 [moduleHandler] 拼路径的
-   * 规则同一套；每次调用现 `import()` 一次，**不登记、不缓存**模块引用 —— 顺带也就没有
-   * 「谁负责放掉那份导出表」这笔账（模块命名空间一旦整图展开，里面的函数全是要归还的
-   * [JSFunction]；这里只取一个成员，`jsToJava` 只包那一个）。
-   *
-   * 插件导出的函数基本都是 `async`（要 `fetch`），所以这里把 Promise 收口成 [Deferred]
-   * 一并 `await` 掉，调用点拿到的就是数据本身。
-   */
+  /** 调插件模块 [module] 导出的函数 [function]，参数为 [args]；模块名不带 `.js`。 */
   suspend fun callPlugin(
     module: String,
     function: String,
@@ -216,15 +187,14 @@ class JsEngine {
       try {
         pluginFunction.invokeAsync(*args)
       } finally {
-        // 这一票是本函数借的（evaluate 交出来的），调用完就还。
+        // 归还 evaluate 交出的导出函数引用
         pluginFunction.close()
       }
     return if (result is Deferred<*>) result.await() else result
   }
 
   fun reset() {
-    // 主动销毁 runtime，而不是只把引用置空等 GC：JS 侧的 Java 对象持有
-    // global ref，只有 destroyContext 触发的析构才会把它们还回去。
+    // 销毁 runtime 并清空引用
     synchronized(quickjsLock) {
       quickjsDelegate?.close()
       quickjsDelegate = null
@@ -238,12 +208,7 @@ class JsEngine {
     println("$type\n$data")
   }
 
-  /**
-   * 把 [value] 包成 JS 字符串字面量 —— [callPlugin] 要把模块名与函数名嵌进求值串里。
-   *
-   * 参数实际都是源码里的常量，但拼串就得能装下任意内容：漏转义的话一句带引号的
-   * 名字会变成另一段代码。
-   */
+  /** 把 [value] 包成 JS 字符串字面量（含转义）。 */
   private fun jsStringLiteral(value: String): String =
     "'" +
       value
@@ -255,39 +220,20 @@ class JsEngine {
         .replace("\u2029", "\\u2029") +
       "'"
 
-  /**
-   * [input] 按 [to] 编码成字节 —— `TextEncoder` 那侧的实现。
-   *
-   * [to] 是 JS 侧 `new TextEncoder(label)` 的 `label`，**原样交给平台编码表**（[encodeTextToBytes]）：
-   * 大小写、别名（`utf8` / `UTF-8`）、非 UTF 编码都认，**不认识就抛**，JS 侧 `catch` 接得住。
-   */
+  /** 把 [input] 按 [to] 编码成字节 —— `TextEncoder` 的实现；[to] 为 null 时用 utf-8。 */
   private fun encode(
     input: String,
     to: String?,
   ): ByteArray = encodeTextToBytes(input, to ?: "utf-8")
 
-  /**
-   * [input] 按 [from] 解码成字符串 —— `TextDecoder` 那侧的实现。
-   *
-   * [from] 的来由与判据与 [encode] 完全一致（同一个 `label` 参数、同一种「不认识就抛」）；
-   * 非法字节按编码的默认策略**替换**（U+FFFD），不抛。
-   */
+  /** 把 [input] 按 [from] 解码成字符串 —— `TextDecoder` 的实现；非法字节替换成 U+FFFD。 */
   private fun decode(
     input: ByteArray,
     from: String?,
   ): String = decodeBytesToText(input, from ?: "utf-8")
 
-  /**
-   * 起一个 [Deferred]，并在它收场时（成功 / 失败 / 取消）归还接手的 JS 实参。
-   *
-   * 不能用 `async` 体里的 `finally`：Deferred 被取消、协程体根本没跑起来时，
-   * `finally` 不会执行，那一票就永远挂在 `QuickJS` 的登记表上了（关闭时才由
-   * `collectLeaks` 兜掉并报一条 `reference leak`）。`invokeOnCompletion`
-   * 三种收场都覆盖。
-   */
+  /** 起一个 [Deferred]，收场时关闭 [values] 里的 JS 引用。 */
   private fun <T> CoroutineScope.asyncReleasing(
-    // 形参刻意收窄成 JSRef 而不是 AutoCloseable：QuickJS 自己也实现了 AutoCloseable，
-    // 若这里接受 AutoCloseable，把 runtime 传进来就会被 invokeOnCompletion 当场销毁。
     vararg values: JSRef?,
     block: suspend CoroutineScope.() -> T,
   ): Deferred<T> {
@@ -296,37 +242,14 @@ class JsEngine {
     return job
   }
 
-  /**
-   * 后台 WebView 桥 —— 插件 JS 里的 `webview(url, header, script, onInterceptRequest)`。
-   *
-   * 返回**原始值**，由 `init.js` 里的 `webview` wrapper 自己判断形状：
-   *
-   * - 命中拦截：回 `{ url, headers }` 对象；
-   * - 脚本返回值：回 JSON 字符串（可能为空串 / null）；
-   * - 无脚本：回 `null`。
-   *
-   * 失败（环境起不来 / 导航失败 / 超时）抛 [JSError]，让 JS 侧 Promise reject，
-   * 而不是回一个让脚本误判的空值。
-   *
-   * [interceptor] 是 `onInterceptRequest` 的 Kotlin 落地：返回**非 null 且非 false** 的值即命中、
-   * 中止加载，并用该值直接 `complete` 后台任务结果（脚本侧拿到什么就是什么）；返回 `null` / `false`
-   * 放行。它**不是** [JSFunction] —— JS 侧来的函数引用由调用方（`_binding`）包一层转成本地回调，
-   * 票也由调用方归还。
-   *
-   * 骨架只有这一份：建 headless 上下文（失败即抛 [JSError]）→ 配拦截回调 → 导航 →
-   * 等第一个终态（拦截命中 / 脚本结果 / 加载失败）→ 超时兜底 → `finally` 销毁。
-   * 终态只取第一个 —— `CompletableDeferred.complete` 幂等，之后的重复事件自然被忽略
-   * （Android 拦截命中后 `onPageFinished` 仍会到；桌面命中后的 Stop 会引出一个被
-   * native 吞掉的 OperationCanceled）。
-   */
+  /** 后台 WebView 桥：导航 [url]（附 [header]），加载完后执行 [script]；失败或超时抛 [JSError]。 */
   internal suspend fun webviewAsync(
     url: String,
     header: Map<Any, Any?>?,
     script: String?,
     interceptor: ((url: String, headers: Map<String, String>, method: String, isForMainFrame: Boolean) -> Any?)?,
   ): Any? {
-    // header 展开成纯数据 Map，并补齐后台加载默认要带的 Referer（对齐 http.js：
-    // header.referer = header.referer || url）。
+    // header 展开成纯数据 Map，并补齐后台加载默认带的 Referer
     val normalized =
       header?.entries?.associate { it.key.toString() to it.value.toString() } ?: emptyMap()
     val baseHeaders =
@@ -337,8 +260,7 @@ class JsEngine {
       }
 
     val outcome = CompletableDeferred<Any?>()
-    // evaluate 要挂起等结果：平台回调线程（桌面是宿主线程，挂着消息泵）不能钉住，
-    // 脚本执行丢到 Dispatchers.IO 上（沿用 _binding 的 inline CoroutineScope(Dispatchers.IO) 派发，不另建 scope）。
+    // 建 headless WebView 上下文
     val ctx =
       try {
         createWebviewContext(isHeadless = true)
@@ -352,12 +274,11 @@ class JsEngine {
           is WebViewEvent.PageFinished ->
             if (!outcome.isCompleted) {
               if (script == null) {
-                // 没传脚本：页面加载完即终态，结果就是 null（init.js 转成 undefined）。
+                // 无脚本：加载完即终态，结果 null
                 outcome.complete(null)
               } else {
                 CoroutineScope(Dispatchers.IO).launch {
-                  // 脚本返回值由平台侧序列化成 JSON 字符串；执行失败静默成 null，
-                  // 不让一次脚本错误把整轮搞崩。
+                  // 执行脚本，返回值是 JSON 字符串，失败为 null
                   val json = runCatching { ctx.evaluate(script) }.getOrNull()
                   outcome.complete(json)
                 }
@@ -384,33 +305,14 @@ class JsEngine {
       ctx.navigate(url, baseHeaders)
       return withTimeout(30.seconds) { outcome.await() }
     } catch (_: TimeoutCancellationException) {
-      // 超时兜底：与上面的 try 共用 finally 销毁上下文。
       throw JSError("Background webView timeout：$url")
     } finally {
-      // close() 非挂起：底层 Pointer 自己把销毁派发到归属线程，调用方不必包 NonCancellable。
+      // 销毁上下文（close 非挂起）
       runCatching { ctx.close() }
     }
   }
 
-  /**
-   * 外部浏览器登录桥 —— 插件 JS 里的 `openBrowser(templateUrl)`。
-   *
-   * [templateUrl] 是授权地址，回调地址的位置由占位符 `{{callback}}` 标出：这里把它换成
-   * **百分号编码**后的会话地址 —— 授权链接把它放在查询串里，`: / ? #` 之类必须编码。
-   *
-   * 返回**浏览器实际请求的那个完整 URL**（含查询串，原样未解码）：
-   * `http://127.0.0.1:51987/9f3a4b…?code=4808dfb7…&state=probe123`。
-   * 用法归插件：换 token 的 `redirect_uri` 取 `split("?")[0]`（就是换进去的那个值），
-   * 参数逐段 `decodeURIComponent` —— **别整串解**，值里的 `%26` 会被解成 `&`、把参数切开。
-   *
-   * **不做 token 交换**：那要 `client_id` / `client_secret`，是插件自己的知识，
-   * 引擎里一条服务商相关的东西都不能有。
-   *
-   * 一直等，不超时 —— 用户可能把浏览器挂在后台很久再回来点登录。模板里没有占位符、
-   * 或浏览器起不来时抛 [JSError]，让 JS 侧 Promise reject，而不是回一个让脚本误判的空值。
-   *
-   * [launch] 是「开浏览器」的可注入缝：测试直接驱动本函数、不真去开。
-   */
+  /** 外部浏览器桥：把 [templateUrl] 的 `{{callback}}` 换成编码后的回调地址，打开浏览器并等回调。 */
   internal suspend fun openBrowserAsync(
     templateUrl: String,
     launch: suspend (String) -> Unit = ::launchExternalBrowser,
@@ -435,12 +337,7 @@ class JsEngine {
     }
   }
 
-  /**
-   * 按 `encodeURIComponent` 的保留集做百分号编码（非 ASCII 取 UTF-8 字节）。
-   *
-   * 会话地址本身是纯 ASCII（回环 host + 十六进制 id），走字节而不是字符是为了让
-   * 换进去的值在任何位置都合法 —— 按字节判 ASCII，非 ASCII 一律进 `%XX`。
-   */
+  /** 按 `encodeURIComponent` 的保留集做百分号编码（非 ASCII 取 UTF-8 字节）。 */
   private fun percentEncodeComponent(value: String): String =
     buildString {
       value.encodeToByteArray().forEach { raw ->

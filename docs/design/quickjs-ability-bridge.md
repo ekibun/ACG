@@ -105,6 +105,33 @@ try {
 
 > **DON'T:** 给「真破坏会自己响」的东西留文本断言（如锁引导函数形参个数/名字的 `initFactoryTakesOnlyOneBridge`）。删形参会让 8 条行为测试全红（真破坏本来就会响），而加形参/改名全绿（那不是缺陷、是换设计）——为「有人选了不同设计」判红是越界。这条由代码评审把关，不进测试套件。文本规则能换成行为断言就换掉（如 `formDataShapeIsReachable` 锁 FormData 键名），别让它与行为用例并存成双份。
 
+## 七、引导脚本的能力约定
+
+`init.js` 定义宿主导出的全部全局能力，`files/js/module/` 下的插件只能用这些：
+
+| 全局 | 形态 |
+| --- | --- |
+| `_binding(method, args)` | 唯一入口；`args` 为实参数组，按名字转发到各能力 |
+| `fetch(input, init)` | 返回 `Response`；`text()` / `json()` / `arrayBuffer()` 取内容 |
+| `Request` / `Response` / `FormData` / `Cookies` / `console` | 浏览器同名 API 的子集 |
+| `TextEncoder` / `TextDecoder` | `encode(data)` / `decode(data)` 经 `_binding` 的 `encode` / `decode` 同步桥 |
+| `webview(url, header, script, onInterceptRequest)` | 返回 Promise，见下 |
+| `openBrowser(url)` | 返回 Promise，结果为回调完整 URL |
+| `Settings.get` / `Settings.set` | 异步的扁平字符串键值；值传 `null` 即删键 |
+| `encodeURI` / `encodeURIComponent` | 按字节做 `%XX` 编码，可指定编码名 |
+
+`_binding` 的分支返回值形状：
+
+- `Response.arrayBuffer` 的 Kotlin 侧返回 `Deferred<ByteArray>`，脚本里必须 `await` 才能拿到字节数组；`decode` 是同步桥，直接收 `ByteArray`。
+- `webview` 的 Kotlin 侧回原始值，脚本侧按类型分派：`null` 或空串 → `undefined`，字符串 → `JSON.parse`，对象 → 拦截得到的 `{url, headers}`。
+- 拦截回调返回真值即中止该轮加载，并把被拦下请求的 `url` 与 `headers` 交回脚本。
+
+`FormData` 每项映射为 `{ name, value, filename, type }` 四个键，`type` 仅在带 `filename` 时给出，对应 `Http` 的 multipart part。
+
+`openBrowser` 把 `url` 中的 `{{callback}}` 占位符替换为 `http://127.0.0.1:<端口>/<会话id>`（百分号编码形式），返回浏览器实际请求的完整 URL；参数需逐段 `decodeURIComponent`，token 交换不在引擎内完成。
+
+`Settings` 只接受字符串值，`get` 缺键返回 `null`，`set` 传 `null` 表示删键；两者都是异步的，写也需 `await`。
+
 ## 检查清单
 
 1. 加新能力：在 `JsEngine` 里加 `private` 方法 + 在 `when` 加一个分支，**不要**加反射。

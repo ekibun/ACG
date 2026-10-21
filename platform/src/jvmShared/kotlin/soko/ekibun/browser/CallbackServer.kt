@@ -14,28 +14,21 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
-// JVM 族（Android + 桌面）共用的回环回调服务器。
-//
-// 契约（[CallbackSession]）在 commonMain，编排（占位符替换、返回值形状）在 :shared 的
-// JsEngine；这里只落地「内建服务器」这一件事：一个常驻 `ServerSocket`，会话落在 URL 路径上。
-//
-// 服务器是**进程级单例**，不是每个会话一个：端口由 OS 分配（`bind(0)`），要拿到端口就得
-// 先有 socket，而每次登录都新建端口会把「地址」变成一次性的东西 —— 复用一个服务器、
-// 用路径区分会话，才谈得上「由 URL 定位 session」。
+// JVM 族（Android + 桌面）共用的回环回调服务器：一个常驻 `ServerSocket`，会话落在 URL 路径上。
 
-/** 会话地址的 host。只绑回环：同网段的别人不该能替用户完成登录。 */
+/** 会话地址的 host，只绑回环。 */
 private const val LOOPBACK_HOST = "127.0.0.1"
 
-/** `accept` 的排队上限。够浏览器预连 + 本次跳转的量即可。 */
+/** `accept` 的排队上限。 */
 private const val BACKLOG = 8
 
-/** 一条连接上等请求行的上限。浏览器会预连 socket 却不发数据，超时即关，不占线程。 */
+/** 单条连接的闲置超时（毫秒）。 */
 private const val CONNECTION_IDLE_TIMEOUT_MS = 30_000
 
-/** 请求行（到 LF 为止）的长度上限，防对端灌一段不进内存。 */
+/** 请求行的长度上限（字节）。 */
 private const val MAX_REQUEST_LINE_BYTES = 8 * 1024
 
-/** 会话 id 的随机字节数（转成十六进制后 24 个字符）。 */
+/** 会话 id 的随机字节数（十六进制后 24 个字符）。 */
 private const val SESSION_ID_BYTES = 12
 
 private const val HEX_DIGITS = "0123456789abcdef"
@@ -52,12 +45,11 @@ private object CallbackServer {
 
   private val server: ServerSocket by lazy { startServer() }
 
-  /** 本服务器的 origin，即会话地址去掉路径的那截。 */
+  /** 本服务器的 origin，即会话地址去掉路径的部分。 */
   private val origin: String get() = "http://$LOOPBACK_HOST:${server.localPort}"
 
   fun newSession(): CallbackSession {
-    // 先让服务器起来（[origin] 那一下才会建 socket）：它失败时不该在表里留下一条
-    // 永远等不到回调的会话。
+    // 先取 origin，确保服务器已启动
     val baseUrl = origin
     val sessionId = newSessionId()
     val result = CompletableDeferred<String>()
@@ -82,7 +74,7 @@ private object CallbackServer {
         try {
           socket.accept()
         } catch (_: IOException) {
-          // 这个服务器是进程级的：accept 失败就没有后续了，循环退出。
+          // accept 失败即退出循环
           return
         }
       connections.execute { serve(client) }
@@ -95,22 +87,20 @@ private object CallbackServer {
         socket.soTimeout = CONNECTION_IDLE_TIMEOUT_MS
         val requestLine =
           readRequestLine(BufferedInputStream(socket.getInputStream())) ?: return
-        // origin-form：`GET /<会话id>?code=… HTTP/1.1`。绝对形式（经代理）不处理 ——
-        // 回环地址在浏览器里默认不过代理，那种请求到不了这里。
+        // origin-form：`GET /<会话id>?code=… HTTP/1.1`
         val target = requestLine.split(' ').getOrNull(1) ?: return
         val result = sessions[target.substringBefore('?').removePrefix("/")]
         if (result == null) {
-          // 浏览器还会来取 /favicon.ico，插件的其它请求也可能落到这个端口上。
+          // 非会话路径（如 /favicon.ico）
           respond(socket, "404 Not Found", NOT_FOUND_PAGE)
         } else {
-          // 结果里的 target 是**原样**的：不解码交给插件按段解（见 [CallbackSession.awaitCallback]）。
-          // 重复打中同一个地址时 complete 幂等，第二次只是再回一次页面。
+          // target 原样交给调用方，complete 幂等
           result.complete("$origin$target")
           respond(socket, "200 OK", FINISH_PAGE)
         }
       }
     } catch (_: IOException) {
-      // 单条连接出问题（对端提前断开之类）不影响会话本身。
+      // 单条连接出错不影响会话
     }
   }
 
@@ -135,7 +125,7 @@ private object CallbackServer {
       "HTTP/1.1 $status\r\n" +
         "Content-Type: text/html; charset=utf-8\r\n" +
         "Content-Length: ${bytes.size}\r\n" +
-        // 回调页没有任何留存价值，地址里还带着授权码。
+        // 回调页不缓存
         "Cache-Control: no-store\r\n" +
         "Connection: close\r\n\r\n"
     val out = socket.getOutputStream()
@@ -171,8 +161,7 @@ private class LoopbackCallbackSession(
 
 actual fun createCallbackSession(): CallbackSession = CallbackServer.newSession()
 
-/** 回调兑现后给用户看的那一屏。`window.close()` 只对脚本开的窗口有效 ——
- *  Custom Tabs 里是空操作，所以提示语才是真的收尾手段。 */
+/** 回调兑现后给用户看的页面。 */
 private val FINISH_PAGE =
   """
   <!doctype html>
@@ -190,7 +179,7 @@ private val FINISH_PAGE =
   </html>
   """.trimIndent()
 
-/** 不是会话路径的回显（`/favicon.ico` 之类）。 */
+/** 非会话路径的回显页（`/favicon.ico` 之类）。 */
 private val NOT_FOUND_PAGE =
   """
   <!doctype html>

@@ -4,23 +4,10 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 
-/**
- * 宿主可用性体检：**直构**一个 [Webview2Context]，真导航一次 `about:blank`。
- *
- * 与 `:shared` 那侧 `WebViewHostTest.checkHost` 是同一套理由（那边有完整说明）：这台机器上
- * 实测到过一种坏法 —— 环境建得成、控制器建得成、`Navigate` 也返回 S_OK，但**引擎完全不动**，
- * 连 `about:blank` 都到不了完成事件。这种坏法下用例会卡满超时、再报一堆看不懂的断言失败，
- * 纯属噪声；体检一次、说清原因、几个用例一起记成 skipped，才对得起看构建的人。
- *
- * 之所以不走驱动（`webviewAsync`）：`:platform` 的测试**不该依赖 `:shared`**，
- * 依赖方向反了。这里就用平台自己那套 —— 建上下文 → 给尺寸 → 挂 `onEvent` → 导航 → 等
- * `PageFinished` → `evaluate("1 + 1")` → 归还。
- *
- * @return null 表示健康；否则是给人看的跳过原因（由 [skipUnlessHostIsAvailable] 记成 skipped）。
- */
+/** 宿主可用性体检：直构 [Webview2Context]、导航 `about:blank`、执行 `1 + 1`；null 表示健康。 */
 internal fun webviewHostHealth(): String? =
   runBlocking {
-    // `Webview2Context` 的伴生初始化要从 `Paths` 取 user data folder：先补注入。
+    // 伴生初始化要从 Paths 取 user data folder，先补注入
     TestPaths.ensureInitialized()
     val ctx =
       runCatching { Webview2Context() }.getOrElse { return@runBlocking "host failed to start: ${it.message ?: it}" }
@@ -29,8 +16,7 @@ internal fun webviewHostHealth(): String? =
       val json =
         withTimeoutOrNull(HOST_HEALTH_TIMEOUT_MS) {
           ctx.onEvent = { event -> if (event is WebViewEvent.PageFinished) loaded.complete(Unit) }
-          // 没 attach 的上下文没有「父窗口客户区」可用，尺寸得自己给；否则 controller
-          // 一直是 0×0，页面未必会真的排版。
+          // 没 attach 的上下文没有父窗口客户区，尺寸得自己给
           ctx.setBounds(800, 600)
           ctx.navigate("about:blank")
           loaded.await()
@@ -45,10 +31,10 @@ internal fun webviewHostHealth(): String? =
         else -> "host failure: the about:blank health check returned $json"
       }
     } finally {
-      // dispose() 非挂起：底层 Pointer 自己把销毁派发到归属线程，调用方不必包 NonCancellable。
+      // dispose() 非挂起：底层 Pointer 自己把销毁派发到归属线程
       runCatching { ctx.close() }
     }
   }
 
-/** 体检的护栏：比后台任务的 30s 略宽一点。 */
+/** 体检超时上界。 */
 private const val HOST_HEALTH_TIMEOUT_MS = 40_000L

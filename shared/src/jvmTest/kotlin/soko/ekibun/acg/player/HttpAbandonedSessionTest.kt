@@ -8,14 +8,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class HttpAbandonedSessionTest {
-  /**
-   * 服务端**完全忽略 Range**、一路 200 从 0 重发。`getRange` 建好响应之后如果在前推途中抛出
-   * （abort 正好落在前推中间），那条响应不能没人关 —— 它已经挂到 `cachedRsp` 上了，读自己的
-   * `catch` 必须摘掉并关掉，否则那条连接一直吊在服务端。
-   *
-   * 确定性来自服务端：每 50ms 心跳一个字节，客户端一关 socket 它就**看得见**。静默期后「进过但
-   * 没退出」== 漏了一条会话，不靠「睡够猜」判定。
-   */
+  /** abort 落在前推途中：已建好的响应被摘掉并关掉，服务端 `entered == exited`。 */
   @Test(timeout = 120_000)
   fun abandonedSessionIsClosedWhenAdvanceToThrows() {
     val body = ByteArray(200_000) { (it % 251).toByte() }
@@ -28,12 +21,11 @@ class HttpAbandonedSessionTest {
     ).use { server ->
       val handler = HttpIO.Handler()
       val io = handler.open(server.url)
-      // 先读一次让会话存在，再把它丢掉：`cachedRsp` 变 null。
+      // 先读一次让会话存在，再把它丢掉
       assertTrue(io.readBounded(4096) > 0, "first read")
       io.close()
 
-      // 逻辑 offset 拉得很远；`cachedRsp` 是 null，所以下一次读必须在网络游标 0 上新建一条
-      // 会话、靠 `advance` 一路往前磨。
+      // 逻辑 offset 拉得很远：下一次读要新建会话、靠 advance 一路往前磨
       io.seek(150_000, AvIO.SEEK_SET)
       val result = AtomicInteger(Int.MIN_VALUE)
       val reader =
@@ -49,7 +41,7 @@ class HttpAbandonedSessionTest {
       val ret = result.get()
       io.close()
 
-      // 静默期：等每个 handler 察觉并退出。
+      // 静默期：等每个 handler 察觉并退出
       val deadline = System.nanoTime() + 8_000_000_000L
       while (System.nanoTime() < deadline && server.exited < server.entered) Thread.sleep(50)
       println("ret=$ret entered=${server.entered} exited=${server.exited} leaked=${server.entered - server.exited}")

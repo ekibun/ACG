@@ -1,8 +1,7 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
-// 平台层（:platform）：native 绑定（soko.ekibun.{jni,quickjs,ffmpeg,web} 的 JNI 面）+
-// 跨端通用结构与平台原语（webview 契约与两端实现、播放器的 SurfaceContext / VideoSurface、
-// File/Http IO 原语与 OkHttp 传输层）。包名是 JNI 符号的一部分，搬动文件不改包名。业务与界面在 :shared。
+// 平台层（:platform）：native 绑定的 JNI 面、跨端通用结构与平台原语（webview 契约与两端实现、播放器的
+// SurfaceContext / VideoSurface、File/Http IO 原语与 OkHttp 传输层）。业务与界面在 :shared。
 plugins {
   alias(libs.plugins.kotlinMultiplatform)
   alias(libs.plugins.androidMultiplatformLibrary)
@@ -32,15 +31,7 @@ kotlin {
   applyDefaultHierarchyTemplate()
 
   sourceSets {
-    // 「JVM 族」中间层：Android 与桌面 JVM 共用的那批**平台实现**。换绑定技术（cinterop /
-    // 别的 FFI）时要换掉的是这一层，不是 commonMain 的编排逻辑。
-    //
-    // 只收**实现**，不收 `external fun` 声明 —— 那些是契约，签名全用 common 类型，
-    // 留在 commonMain 已合规。搬声明会改 61 个 JNI 导出符号（类名进符号），换不来任何东西。
-    //
-    // 判据是「两端逐字相同、且不含平台专有符号」。留在原处的是**真有差异**的那些：
-    // loadLibrary（桌面按序找 dll / Android 直接 loadLibrary）、以及
-    // web / SurfaceContext / VideoSurface（Android 专有）。
+    // 「JVM 族」中间层：Android 与桌面 JVM 共用的平台实现，只收实现，不含 external fun 声明。
     val jvmShared =
       create("jvmShared") {
         dependsOn(commonMain.get())
@@ -49,46 +40,37 @@ kotlin {
     androidMain.get().dependsOn(jvmShared)
 
     commonMain.dependencies {
-      // coroutines 用 api：Pointer.closeDeferred() 的返回类型 Job 与 ThreadDispatcher
-      // 本身都是协程类型，消费方（:shared）要看得见。
+      // coroutines 用 api 暴露，消费方可直接使用协程类型。
       api(libs.kotlinx.coroutines.core)
-      // QuickJS.kt 的 @Keep（native 线程直接调进来的入口不被动过）。
+      // 提供 @Keep 注解。
       implementation(libs.androidx.annotation)
-      // webview 壳与 VideoSurface 的 Compose 面。不引 material3 —— 进度条这类
-      // 视觉折算在 :shared 的屏幕层做。
+      // webview 壳与 VideoSurface 的 Compose 面。
       implementation(libs.compose.runtime)
       implementation(libs.compose.foundation)
       implementation(libs.compose.ui)
-      // 设置的落盘：DataStore 的 commonMain 只认 okio Path（`createWithPath`），
-      // 只收 java.io.File 的那个重载在 jvmAndroidMain 里、commonMain 看不见。
-      // 契约面（SettingsStore）不暴露 okio 类型，所以不用 api。
+      // 提供 DataStore 基于 okio Path 的 commonMain 实现。
       implementation(libs.okio)
       implementation(libs.androidx.datastore.preferences.core)
     }
     androidMain.dependencies {
-      // SurfaceContext.android 的 createBitmap（androidx.core.graphics 扩展）——
-      // 在 :shared 时经传递依赖可见，:platform 的依赖图没有它，须显式声明。
+      // 提供 SurfaceContext.android 的 createBitmap 扩展。
       implementation(libs.androidx.core.ktx)
-      // 外部浏览器登录的 Custom Tabs（soko.ekibun.browser 的 Android 实现）。
+      // 提供 Android 侧外部浏览器登录的 Custom Tabs。
       implementation(libs.androidx.browser)
     }
-    // HTTP 传输层：OkHttp 只有 jvm / androidJvm 两个真实 target（common 只是元数据），
-    // 而两端都用它 ⇒ 放在中间层，一份实现覆盖桌面与 Android。
+    // HTTP 传输层：OkHttp 一份实现覆盖桌面与 Android。
     jvmShared.dependencies {
       implementation(libs.okhttp)
     }
     jvmTest.dependencies {
       implementation(libs.kotlin.test)
-      // 健康检查的「宿主不可用」要靠 JUnit4 的 assumption 才能记成 skipped —— kotlin-test 的
-      // JUnit4 门面只带 @Ignore，println + 早退在 XML 里是 passed。版本由 Kotlin plugin 按
-      // 同一版本 pin 好了，这里引裸坐标不会引入第二个 junit。
+      // 引入 JUnit4，用于按 assumption 记为 skipped。
       implementation("junit:junit:4.13.2")
     }
   }
 }
 
-// jniLoadLibrary() 从 classpath 资源里取 native 库，测试时需要能拿到 cxx 的构建产物。
-// buildJni 挂进任务图：改了 cxx/ 只跑测试也会先重编 native，杜绝「测试静默用旧 dll」。
+// 把 cxx/build/bin 下的 native 库打进测试资源，并让 jvmTestProcessResources 依赖 buildJni。
 tasks.named<ProcessResources>("jvmTestProcessResources") {
   dependsOn(":desktopApp:buildJni")
   val binDir = rootProject.layout.projectDirectory.dir("cxx/build/bin")
@@ -98,17 +80,11 @@ tasks.named<ProcessResources>("jvmTestProcessResources") {
 }
 
 tasks.named<Test>("jvmTest") {
-  // 进程级崩溃（native 段的访问违例之类）时，HotSpot 的现场报告默认落在**进程工作目录**，
-  // 也就是本模块目录 —— 每崩一次就多一个待提交的未跟踪文件。指到 build/ 下，
-  // 跟其他产物一样被 `**/build/` 忽略掉。排查崩溃时去 platform/build/ 找 hs_err_pid*.log。
+  // 把 JVM 崩溃报告写到 build/hs_err_pid%p.log。
   jvmArgs("-XX:ErrorFile=${layout.buildDirectory.get().asFile.resolve("hs_err_pid%p.log")}")
-  // JDK 24 起（JEP 472）`System.load` 会打印 restricted-method 警告；测试里
-  // `jniLoadLibrary` 正是用它加载 cxx 的四个 dll，所以这里也要显式声明一次。
-  // 详细理由与取值见 desktopApp/build.gradle.kts 的同名注释。
+  // 关闭 JDK 24+ 的 restricted-method 警告。
   jvmArgs("--enable-native-access=ALL-UNNAMED")
-  // 数据目录由各测试类的 `TestPaths` 注入临时目录，这里不再注 `-Dacg.dataDir`。
-  // 每个用例各自 ctx.close()：native 段的断言 abort 会连整个测试进程一起带走，
-  // 而 Gradle 默认只汇总结果，崩了就只能从上一轮残留的 XML 去猜死在哪个用例。
-  // 打印逐用例事件才能一眼定位，代价是每轮几十行输出 —— 留着当偶发崩的第一现场。
+  // 数据目录由各测试类的 `TestPaths` 注入，此处不注 `-Dacg.dataDir`。
+  // 逐用例打印测试事件。
   testLogging { events("started", "passed", "skipped", "failed") }
 }

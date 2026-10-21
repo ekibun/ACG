@@ -16,17 +16,8 @@ import java.io.InputStream
 import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
 
-/**
- * HTTP 传输层：桌面 JVM 与 Android 共用这一份 OkHttp 实现。
- *
- * **拉取式**，没有预读：okhttp 的 body 就是一条按需读的流，读到哪下到哪，本地存量只有 okio
- * 缓冲那一个段（见 `playback-invariants.md` 5.6）。
- * 闲置超时交给 okhttp 的 `readTimeout`：它按**两次读之间**计时，与 `Http.SOCKET_TIMEOUT_MS`
- * 的语义一致；超时即这条连接作废，`HttpIO` 的「超时 ⇒ 换一条会话」正好接住。
- *
- * 这里**不装 cookieJar**：本层没有隐式 cookie 仓库，cookie 完全由 JS 侧决定 ——
- * 带哪些 cookie 就是 `headers` 里写哪些，本层不增不减。
- */
+// HTTP 传输层：桌面 JVM 与 Android 共用的 OkHttp 实现，拉取式、不装 cookieJar。
+
 private val plainClient: OkHttpClient by lazy {
   OkHttpClient
     .Builder()
@@ -36,7 +27,7 @@ private val plainClient: OkHttpClient by lazy {
     .build()
 }
 
-/** 与 [plainClient] 共享连接池，只差一条跟随重定向。 */
+/** 与 [plainClient] 共享连接池，跟随重定向。 */
 private val redirectClient: OkHttpClient by lazy {
   plainClient
     .newBuilder()
@@ -52,16 +43,13 @@ actual suspend fun openResponse(options: Map<Any, Any?>): Http.Response {
     try {
       call.executeOnIo()
     } catch (e: SocketTimeoutException) {
-      // 等响应头就超时了：与读超时同等对待，让 HttpIO 的重开那条路接住。
+      // 等响应头超时，按闲置超时处理
       throw Http.IdleTimeoutException()
     }
   return OkHttpResponse(call, rsp)
 }
 
-/**
- * 阻塞的 [Call.execute] 搬上 IO 线程。协程取消时 `cancel()` 掉这次 call ——
- * 阻塞中的 socket 读不看取消点，只能靠关连接叫醒它。
- */
+/** 把阻塞的 [Call.execute] 搬到 IO 线程；协程取消时取消这次 call。 */
 private suspend fun Call.executeOnIo(): okhttp3.Response =
   withContext(Dispatchers.IO) {
     suspendCancellableCoroutine { cont ->
@@ -70,22 +58,19 @@ private suspend fun Call.executeOnIo(): okhttp3.Response =
     }
   }
 
-/** 一条活着的流式响应：okhttp 的 [okhttp3.Response] 外面只包这一层。 */
+/** 基于 okhttp 的流式响应。 */
 private class OkHttpResponse(
   private val call: Call,
   private val rsp: okhttp3.Response,
 ) : Http.Response {
   private val stream: InputStream = rsp.body.byteStream()
 
-  /**
-   * 这条响应还能不能读。**取消也算作废**：叫醒一次阻塞读的唯一手段是 `cancel()` 掉这次 call，
-   * 而那等于关掉连接 —— 之后这条响应再也给不出字节（见 [onIo]）。
-   */
+  /** 这条响应是否已关闭或作废。 */
   @Volatile
   var closed = false
     private set
 
-  /** `Content-Range: bytes 1024-2047/8192` 是唯一能说明「这条流从哪儿起」的头。 */
+  /** `Content-Range` 头。 */
   private val contentRange: String? = rsp.header("Content-Range")
 
   private var networkOffset: Int =
@@ -136,7 +121,7 @@ private class OkHttpResponse(
           throw Http.IdleTimeoutException()
         }
       }
-    // 白读丢弃一样算：网络游标推进的判据是「从流里取走了多少」，不是「调用方用上了多少」。
+    // 网络游标按从流里取走的字节数推进
     if (count > 0) networkOffset += count
     return count
   }
@@ -148,11 +133,7 @@ private class OkHttpResponse(
       close()
     }
 
-  /**
-   * 两件都要：[Call.cancel] 叫醒可能正卡在 [read] 里的那次阻塞读，[okhttp3.Response.close]
-   * 把 body 放掉。两条关闭路径（调用方显式 close、JS 侧 `JavaObject` finalizer）并发到达时，
-   * [closed] 只有一个赢家。
-   */
+  /** 取消 call 并关闭 body；并发调用只有一次生效。 */
   override fun close() {
     if (closed) return
     closed = true
@@ -160,12 +141,7 @@ private class OkHttpResponse(
     rsp.close()
   }
 
-  /**
-   * 阻塞 I/O 搬上 IO 线程；协程取消时掀掉这次 call，把阻塞读一起叫醒。
-   *
-   * 掀掉之后**这条响应就废了**（连接已关），所以顺手置 [closed]：撤作者（`HttpIO` 的作废信号）
-   * 据此丢掉这条会话、下一条读重发。
-   */
+  /** 把阻塞 I/O 搬到 IO 线程；协程取消时取消这次 call 并标记关闭。 */
   private suspend fun <T> onIo(block: () -> T): T =
     withContext(Dispatchers.IO) {
       suspendCancellableCoroutine { cont ->
@@ -178,10 +154,7 @@ private class OkHttpResponse(
     }
 }
 
-/**
- * `options` 的键由 JS 侧 `init.js` 决定（`url` / `headers` / `method` / `body` / `redirect`）。
- * 拼请求的规则与旧实现逐条对应，**少带一个 header 是难查的静默失效**。
- */
+/** 按 `options` 构造请求。 */
 private fun buildRequest(options: Map<Any, Any?>): Request {
   val url = options["url"] as? String ?: throw IllegalArgumentException("Http.request: options has no 'url'")
   val headerBuilder = Headers.Builder()
@@ -195,9 +168,9 @@ private fun buildRequest(options: Map<Any, Any?>): Request {
   }
 
   val body = buildBody(options)
-  // JS 侧 `Request` 已把方法归一成字符串；Kotlin 侧的调用只带 url，缺省 GET。
+  // 方法缺省：有 body 用 POST，无 body 用 GET
   val method = options["method"] as? String ?: if (body == null) "GET" else "POST"
-  // okhttp 对「方法 × body」是硬要求：GET/HEAD 不许带，POST/PUT/PATCH 必须带一个。
+  // okhttp 要求方法与 body 匹配：GET/HEAD 不带，其余必须带一个
   val finalBody =
     when {
       method == "GET" || method == "HEAD" -> null
@@ -222,8 +195,7 @@ private fun buildBody(options: Map<Any, Any?>): RequestBody? {
       val value = formItem["value"]
       val type = formItem["type"]
       if (type is String && value is ByteArray) {
-        // 键名必须与 `init.js` 的 `_formItem` 逐字一致：那边写的是小写 l 的 `filename`。
-        // 解析不出的内容类型留空：不该让一个坏 MediaType 把整个请求炸掉。
+        // 键名与 `init.js` 的 `_formItem` 一致
         multipart.addFormDataPart(name, formItem["filename"] as? String, value.toRequestBody(type.toMediaTypeOrNull()))
       } else {
         multipart.addFormDataPart(name, value.toString())

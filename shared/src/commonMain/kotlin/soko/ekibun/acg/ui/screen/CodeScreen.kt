@@ -25,7 +25,7 @@ import soko.ekibun.acg.engine.JsEngine
 import soko.ekibun.acg.ui.comp.highlight
 import soko.ekibun.quickjs.JSError
 
-// 同 App()：挂着 @Preview，但它是被 App() 调用的真实页签，不能是 private。
+// 脚本页签，带 @Preview；按误报关掉 preview-public-check。
 @Suppress("ktlint:compose:preview-public-check")
 @Preview(showBackground = true)
 @Composable

@@ -1,10 +1,6 @@
-// 能力桥只有一个：_binding(method, args) —— 通用派发，args 是那一份实参（不是位置参数）
+// 能力桥入口：_binding(method, args) 通用派发，args 为实参数组。
 async (_binding) => {
-  // FormData 的每一项在 Kotlin 侧被 `Http` 拆成 multipart 的一个 part，
-  // 认的是 `name` / `value` / `type` / `filename` 四个键 —— 这里**只给带
-  // filename 的项写 type**，因为只有文件 part 才有 Content-Type
-  // （`Http` 那边 `type is String && value is ByteArray` 才走文件分支）。
-  // 键名必须与 `Http` 侧逐字一致，少一个字母就静默降级成普通字段。
+  // 把 FormData 项映射为 { name, value, filename, type } 四个键，type 仅在带 filename 时给出。
   const _formItem = (name, value, filename) => ({
     name,
     value,
@@ -24,7 +20,7 @@ async (_binding) => {
     }
 
     append(name, value, filename) {
-      // __items__ 是普通数组，没有 append（那是 FormData 自己的方法）。
+      // 追加一项到 __items__。
       this.__items__.push(_formItem(name, value, filename))
     }
 
@@ -71,7 +67,7 @@ async (_binding) => {
         this.append(name, value, filename);
         return;
       }
-      // splice 只能用在 __items__ 上，不在 FormData 上（this.splice 会静默无效）
+      // 原地替换 __items__ 中的同名项。
       this.__items__.splice(index, 1, _formItem(name, value, filename));
     }
 
@@ -124,18 +120,14 @@ async (_binding) => {
       this.arrayBuffer = async () => {
         if(this.bodyUsed) throw new TypeError("body stream already read");
         this.bodyUsed = true;
-        // `await` 不能省：`_binding` 落到 Kotlin 的能力桥，返回的是
-        // `Deferred<ByteArray>`（桥约定，见 ability-bridge.md），JS 侧 await  才拿到
-        // 字节数组。少这个 await 的话 `decode` 收到的是 `CompletableDeferredImpl`，
-        // 强转 `ByteArray` 当场抛 ClassCastException（实测，见 JsEngineDispatchTest）。
+        // _binding 返回 Deferred<ByteArray>（桥约定见 ability-bridge.md），需 await 取字节数组。
         return await _binding('Response.arrayBuffer', [rsp]);
       }
       // TODO `type`, `useFinalURL`
     }
 
     async text(utfLabel) {
-      // `decode` 是**同步**桥（直接收 ByteArray），所以 `arrayBuffer()` 的结果
-      // 必须先 await 成字节数组 —— 传 Promise 进去会在 Kotlin 侧强转时炸。
+      // decode 是同步桥，需先把 arrayBuffer() 的结果 await 成字节数组。
       const buf = await this.arrayBuffer();
       return new _TextDecoder(utfLabel || "utf-8").decode(buf);
     }
@@ -158,28 +150,17 @@ async (_binding) => {
     }
   }
 
-  // toString(16) 不补零：0x0a 会得到 "a"，URL 编码必须写成 "%0a"。
+  // 按字节做百分号编码，每字节固定两位十六进制。
   const encodeURI_hex = (encoder, c) => [...new Uint8Array(encoder.encode(c))]
     .map(v => "%" + v.toString(16).padStart(2, "0"))
     .join("").toUpperCase();
 
   /**
-   * 后台 WebView —— 对应 BangumiPlugin 的 `modules/http.js#__webview__`。
+   * 后台 WebView：按 url 打开页面，可带请求头、注入并执行脚本、拦截请求，返回 Promise。
    *
-   * 那个工程里它是个 `require("http")` 出来的模块；这里内联，因为它和 fetch /
-   * TextEncoder / FormData 一样是**宿主能力**：init.js 就是这份能力表的定义处，
-   * 模块目录 `files/js/module/` 留给跑在能力之上的插件（`import("bgm")` 那条路）。
-   * 所以这里没有对应的 `files/js/module/webview.js`。
+   * 参数依次为 url、请求头、脚本、拦截回调：
    *
-   * 与参照实现只差一件事：那边是**阻塞**等待（`while(!finished) sleep(1000)`），
-   * 这里返回 Promise。QuickJS 只有一个事件循环，阻塞会把整个引擎锁死 ——
-   * 脚本从那边搬过来时，把 `var ret = __webview__(...)` 换成 `await webview(...)`。
-   *
-   * 用法（位置参数与 http.js 完全一致）：
-   *
-   *   // 1) 拦一个请求：命中即中止加载，把**被拦下那个请求**的 url+headers 交回脚本
-   *   //    自己去 fetch。回调只当布尔用：返回真值即命中，返回 falsy 则放行 ——
-   *   //    回调收到的对象是 { url, headers, method, isForMainFrame } 四个字段。
+   *   // 1) 拦一个请求：回调返回真值即中止加载，并把被拦下请求的 url+headers 交回脚本
    *   const req = await webview(url, { "User-Agent": ua }, null,
    *     (request) => !!request.headers.Range);
    *   const buf = await (await fetch(req.url, { headers: req.headers })).arrayBuffer();
@@ -194,7 +175,7 @@ async (_binding) => {
       script == null ? null : "" + script,
       typeof onInterceptRequest === "function" ? onInterceptRequest : null
     ]);
-    // Kotlin 侧 webviewAsync 直接回原始值，形状由这里自己判断：
+    // 按返回值类型解析：null 为无脚本 / 脚本无返回值，字符串为脚本返回值（JSON），对象为命中的拦截。
     if (ret == null) return undefined;            // 无脚本 / 脚本无返回值
     if (typeof ret === "string") {               // 脚本返回值（JSON 字符串）
       if (ret === "") return undefined;
@@ -238,27 +219,24 @@ async (_binding) => {
     },
     webview,
     /**
-     * 打开系统浏览器做登录：`url` 是授权地址，回调地址的位置用占位符 `{{callback}}` 标出，
-     * 会被换成 `http://127.0.0.1:<端口>/<会话id>`（百分号编码形式，直接放在 redirect_uri 上）。
+     * 打开系统浏览器做登录：`url` 为授权地址，回调地址处用占位符 `{{callback}}` 标出，替换为
+     * `http://127.0.0.1:<端口>/<会话id>`（百分号编码形式，直接放在 redirect_uri 上）：
      *
      *   const cb = await openBrowser("https://bgm.tv/oauth/authorize?client_id=…&redirect_uri={{callback}}");
      *   // cb = "http://127.0.0.1:51987/9f3a4b…?code=4808dfb7…&state=probe123"
      *
-     * 返回值是浏览器**实际请求的那个完整 URL**（含查询串、原样未解码、不超时）：
-     * 参数要逐段 `decodeURIComponent`（整串解会把值里的 `%26` 变成 `&`、把参数切开），
-     * 换 token 的 `redirect_uri` 回传 `cb.split("?")[0]`。
-     * token 交换本身不在这里做 —— 引擎不含任何服务商知识，`client_secret` 是插件自己的事。
+     * 返回浏览器实际请求的完整 URL（含查询串、原样未解码）；参数逐段 `decodeURIComponent`，
+     * 换 token 的 redirect_uri 回传 `cb.split("?")[0]`。
      */
     openBrowser: (url) => _binding("openBrowser", ["" + (url || "")]),
     /**
-     * 扁平的字符串设置，落盘在平台的设置文件里。
+     * 扁平的字符串设置，落盘在平台的设置文件里：
      *
-     *   await Settings.get("bgm.client_id");     // 没有该键则 null
+     *   await Settings.get("bgm.client_id");      // 没有该键则 null
      *   await Settings.set("bgm.client_id", "…"); // 写
      *   await Settings.set("bgm.session", null);  // 值为 null 即删键
      *
-     * 不做类型转换：非字符串由宿主的类型收窄拒绝该 Promise。
-     * 两个都是异步的，**写也必须 await** —— 否则下一句读与它并发，谁先落盘不确定。
+     * 只接受字符串，值传 null 表示删键；两个方法都是异步的，写也需 await。
      */
     Settings: {
       get: (key) => _binding("Settings.get", [key]),

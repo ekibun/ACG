@@ -64,26 +64,15 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* res) {
   return JNI_VERSION_1_4;
 }
 
-// io_open 建出来的 pb 得自己记账：CUSTOM_IO 下 ffmpeg 不替我们关（avformat.h 的
-// AVFMT_FLAG_CUSTOM_IO），而 pb 的释放点只有 io_close2 一条 —— 顶层 pb 被
-// avformat_close_input 置 NULL 跳过（demux.c:388-396），嵌套 pb 由 demuxer 自己
-// ff_format_io_close。**账本是集合、且要能被 io_close2 销账**：HLS 一次 open
-// 里会连续开 master / variant / segment 多个
-// pb，单槽记账会让失败路径二次关闭一个已经释放的 pb（崩因链与 hs_err 证据见
-// cxx/AGENTS.md 的 ffmpeg 一节）。
+// io_open 建出的 pb 记在账本里，由 io_close2 逐个销账；HLS 一次 open 会开多个
+// pb。
 struct FormatOpaque {
   jobject thiz;                   // AvFormat 实例的 GlobalRef
   std::vector<AVIOContext*> pbs;  // io_open 建出来、还没关的 pb
 };
 
-// 每个 pb 一份，**pb->opaque 指向它**（原来是裸的 AvIO GlobalRef）。
-// 除了持有 AvIO，它挂两样以前每次回调都要重做的东西：
-//
-// - **复用的读数组**。`fill_buffer` 一次要的是「缓冲剩余容量」，MP4 源被
-//   `ff_configure_buffers_for_index` 放大后可达 MB 级；而一次只到货一个 okio
-//   段（实测 8 KB）。按请求量 NewByteArray 等于每回调清零几百 KB 去接 8 KB ——
-//   实测那笔开销就是一次强制清零，约 16 GB/s、62 ns/KB。
-// - **缓存 methodID**。原来每次回调都 GetObjectClass + GetMethodID。
+// 每个 pb 一份，`pb->opaque` 指向它：持有 AvIO 的 GlobalRef、复用读数组与缓存的
+// methodID。
 struct IoOpaque {
   jobject io;          // AvIO 实例的 GlobalRef
   jbyteArray arr;      // 复用数组的 GlobalRef，只增不减；首次读时才建
@@ -93,8 +82,8 @@ struct IoOpaque {
   jmethodID closeMid;  // close "()V"
 };
 
-// 还一个已经不在账上的 pb：Java 侧 close() → 还两个 GlobalRef → 释放缓冲与
-// 上下文本体。三个关闭点（io_close2 / destroyNative / 打开失败）共用这一份。
+// 关闭一个 pb：调 Java 侧 close()、还 GlobalRef、释放缓冲与上下文本体。
+// io_close2 / destroyNative / 打开失败三处共用。
 static void closeIoContext(JNIEnv* env, AVIOContext* pb) {
   if (!pb) return;
   auto io = (IoOpaque*)pb->opaque;
@@ -110,18 +99,12 @@ static void closeIoContext(JNIEnv* env, AVIOContext* pb) {
     if (io->io) env->DeleteGlobalRef(io->io);
     delete io;
   }
-  // ⚠️ **不能用 avio_close**：那是给 avio_open 的 URLContext 系 pb 用的 ——
-  // 它把 s->opaque 当 URLContext* 送去 ffurl_close（avio.c），对我们这个在
-  // opaque 里放 IoOpaque* 的自定义 pb 是类型混淆，直接访问违例
-  // （2026-10-02 实测：hs_err 落在 avio_close 内 `mov 0x80(%rdx)`）。
-  // 自定义 pb 的正确关法：buffer 由调用方 av_free（avio.h 的契约
-  // 「AVIOContext.buffer … must be later freed with av_free()」），
-  // 上下文本体交 avio_context_free（它只还 struct，不管 buffer）。
+  // buffer 交 av_free，上下文本体交 avio_context_free。
   av_freep(&pb->buffer);
   avio_context_free(&pb);
 }
 
-// 把 [pb] 从账上摘掉（在就摘，不在就什么都不做）。
+// 把 [pb] 从账本中摘掉。
 static void forgetPb(FormatOpaque* self, AVIOContext* pb) {
   for (auto it = self->pbs.begin(); it != self->pbs.end(); ++it) {
     if (*it == pb) {
@@ -131,9 +114,7 @@ static void forgetPb(FormatOpaque* self, AVIOContext* pb) {
   }
 }
 
-// 收干净账上剩下的全部 pb。**必须在 ffmpeg 那一侧不再持有它们之后调**：
-// io_close2 跑过就从账上摘掉了，剩下的要么是顶层 pb（avformat_close_input 对
-// CUSTOM_IO 置 NULL 跳过），要么是 demuxer 漏关的嵌套 pb。
+// 关闭账本上剩余的全部 pb，然后清空账本。
 static void closeAllPbs(JNIEnv* env, FormatOpaque* self) {
   for (auto pb : self->pbs) closeIoContext(env, pb);
   self->pbs.clear();
@@ -160,7 +141,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
     jstring strUrl = env->NewStringUTF(url);
     jobject ioCtx = env->CallObjectMethod(io, method, strUrl);
     env->DeleteLocalRef(strUrl);
-    // 一个 pb 一份记账（含缓存的 methodID 与复用数组），见 IoOpaque。
+    // 为这个 pb 建 IoOpaque，并缓存 read / seek / close 的 methodID。
     auto ioCtxCls = env->GetObjectClass(ioCtx);
     auto ctxOpaque = new IoOpaque{env->NewGlobalRef(ioCtx),
                                   nullptr,
@@ -170,15 +151,14 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
                                   env->GetMethodID(ioCtxCls, "close", "()V")};
     env->DeleteLocalRef(ioCtxCls);
     env->DeleteLocalRef(ioCtx);
-    // 初始缓冲对齐 IO_BUFFER_SIZE（aviobuf.c:36）；MP4 源之后按索引换掉。
+    // 初始缓冲 32768 字节，MP4 源之后按索引换掉。
     *pb = avio_alloc_context(
         (unsigned char*)av_malloc(32768), 32768, 0, ctxOpaque,
         [](void* opaque, uint8_t* buf, int buf_size) -> int {
           JNIEnv* env;
           javaVm->GetEnv((void**)&env, JNI_VERSION_1_4);
           auto io = (IoOpaque*)opaque;
-          // 扩容只增不减：一次 open 里通常只发生 1~2 次（初始 32768，mov 按索引
-          // realloc 之后再涨一档）。
+          // 复用数组只增不减，容量不足时按请求长度重建。
           if (io->cap < buf_size) {
             if (io->arr) env->DeleteGlobalRef(io->arr);
             io->arr =
@@ -192,11 +172,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
               return AVERROR(ENOMEM);
             }
           }
-          // 长度显式传下去，不让 Kotlin 按 `buf.size` 填满 ——
-          // 数组只增不减，可能远大于这次请求，见 `AvIO.read` 的 KDoc。
-          //
-          // 最后一道防线：超量就 clamp 并打日志，不夹住的话直接拷进去就是写穿
-          // avio 缓冲。契约仍是「按 len 截断」，这里只保证不越界。
+          // 读取长度显式传入；返回值超过请求长度时截断到请求长度。
           int ret =
               env->CallIntMethod(io->io, io->readMid, io->arr, (jint)buf_size);
           if (ret > buf_size) {
@@ -205,12 +181,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
             ret = buf_size;
           }
           if (ret > 0) env->GetByteArrayRegion(io->arr, 0, ret, (jbyte*)buf);
-          // AvIO 的契约是 **AVERROR_EOF 表示
-          // EOF、其余负数表示出错**（FileIO.read / HttpIO.read 都把各自的 EOF
-          // 翻成了 AVERROR_EOF）。错误在这一层就得出声：aviobuf 的 fill_buffer
-          // 对任何负返回值都置 eof_reached 并把错误码记进
-          // s->error（aviobuf.c:551-558），此后 av_read_frame 一律以 EOF 形态
-          // 上浮 —— 不在这里打日志，IO 故障在外面看起来就是"播完了"。
+          // EOF 记为 AVERROR_EOF，其余负返回值打错误日志。
           if (ret < 0 && ret != AVERROR_EOF)
             av_log(nullptr, AV_LOG_ERROR, "AvIO read error ret=%d\n", ret);
           return ret;
@@ -220,19 +191,18 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
           JNIEnv* env;
           javaVm->GetEnv((void**)&env, JNI_VERSION_1_4);
           auto io = (IoOpaque*)opaque;
-          // 两个参数都收窄成 jint —— AvIO.seek 的签名是 (II)I，原本就是 32 位。
+          // 两个参数收窄为 jint，对应 AvIO.seek 的 (II)I。
           return env->CallIntMethod(io->io, io->seekMid, (jint)offset,
                                     (jint)whence);
         });
-    // 记进账本，交给 io_close2 销账或关闭路径兜底（理由见 FormatOpaque
-    // 的注释）。
+    // 记进账本，交给 io_close2 销账或关闭路径兜底。
     if (*pb) self->pbs.push_back(*pb);
     return 0;
   };
   ctx->io_close2 = [](AVFormatContext* s, AVIOContext* pb) {
     JNIEnv* env;
     javaVm->GetEnv((void**)&env, JNI_VERSION_1_4);
-    // 先销账再关：销账之后失败路径与 destroyNative 就不会再碰这个 pb 了。
+    // 先从账本摘掉，再关闭。
     forgetPb((FormatOpaque*)s->opaque, pb);
     closeIoContext(env, pb);
     return 0;
@@ -242,11 +212,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
   const int ret = avformat_open_input(&ctx, urlChars, nullptr, nullptr);
   env->ReleaseStringUTFChars(url, urlChars);
   if (ret < 0) {
-    // ctx 已经被 ffmpeg free 掉了（失败路径见 FormatOpaque
-    // 的注释），destroyNative 永远不会再被调 —— 账上剩下的 pb、thiz 的
-    // GlobalRef 都要在这里收干净，一个不留。**只收账上剩下的**：read_header
-    // 中途失败的 demuxer 可能已经自己关过几个嵌套 pb（io_close2
-    // 已销账），再关一遍就是 use-after-free。
+    // 打开失败：关闭账本剩余的 pb，释放 thiz 的 GlobalRef 与 self。
     closeAllPbs(env, self);
     env->DeleteGlobalRef(self->thiz);
     delete self;
@@ -261,10 +227,7 @@ Java_soko_ekibun_ffmpeg_AvFormat_getStreamsNative(JNIEnv* env, jobject thiz,
   auto ctx = (AVFormatContext*)pctx;
   if (avformat_find_stream_info(ctx, nullptr) != 0) return nullptr;
   jclass streamClass = env->FindClass("soko/ekibun/ffmpeg/AvStream");
-  // 时基一并递上去：`stream->time_base` 是这条流时间戳的**最小刻度**。
-  // 容器级 seek 把微秒折回刻度时，会吃掉半格以内的偏移
-  // （libavformat/seek.c 的 seek_frame_internal，mov 没实现 read_seek2
-  // 就走这条路）—— 上层要算「比半格大」的步长，非知道它不可。
+  // 时基一并递上去：`stream->time_base` 是这条流时间戳的最小刻度。
   jmethodID constructor =
       env->GetMethodID(streamClass, "<init>", "(JIIIIIIIIJLjava/util/Map;)V");
   jobjectArray streams =
@@ -272,8 +235,7 @@ Java_soko_ekibun_ffmpeg_AvFormat_getStreamsNative(JNIEnv* env, jobject thiz,
   for (int i = 0; i < ctx->nb_streams; ++i) {
     AVStream* stream = ctx->streams[i];
     auto metadata = av_dict_to_map(env, stream->metadata);
-    // 流上没有时长（HLS 只把总时长记在格式层）时 NOPTS 乘出来是垃圾值 —— 记 0
-    // 表示未知，总时长走 getDurationNative。
+    // 流上没有时长时记为 0，总时长走 getDurationNative。
     const jlong durationUs =
         stream->duration == AV_NOPTS_VALUE
             ? 0
@@ -294,11 +256,7 @@ Java_soko_ekibun_ffmpeg_AvFormat_getStreamsNative(JNIEnv* env, jobject thiz,
 }
 
 /**
- * 容器总时长（AV_TIME_BASE 微秒）；容器没给（直播流等）返回 0。
- *
- * 总时长必须走格式层取：HLS 只把分片 EXTINF 求和写进 `AVFormatContext.duration`
- * （libavformat/hls.c），每条流上恒为 NOPTS —— 流上的时长（AvStream.duration）
- * 只对 MP4 那类把时长记在流上的容器有值。
+ * 容器总时长（AV_TIME_BASE 微秒）；容器未提供时返回 0。总时长从格式层取。
  */
 extern "C" JNIEXPORT jlong JNICALL
 Java_soko_ekibun_ffmpeg_AvFormat_getDurationNative(JNIEnv*, jobject,
@@ -313,14 +271,7 @@ Java_soko_ekibun_ffmpeg_AvFormat_destroyNative(JNIEnv* env, jobject thiz,
                                                jlong pctx) {
   auto ctx = (AVFormatContext*)pctx;
   auto self = (FormatOpaque*)ctx->opaque;
-  // **先 avformat_close_input、再收账**：read_close（如
-  // hls_close）会把它自己认得的 pb 经 ff_format_io_close 交回
-  // io_close2，那一步会销账并释放；先收账的话这些 pb 已经被我们还掉，ffmpeg
-  // 随后拿着悬垂指针再调一次 io_close2 —— 又回到二次关闭那条路。走完
-  // close_input，账上剩的才是真没人认领的：顶层 pb（avformat_close_input 对
-  // CUSTOM_IO 先置 NULL，跳过 ff_format_io_close，demux.c:388-396）与 demuxer
-  // 漏关的嵌套 pb。连同 io_open 里的 GlobalRef、av_malloc 缓冲、Java
-  // 侧连接一起在这里收干净。
+  // 先关输入，再回收账本剩余的 pb、GlobalRef 与 self。
   avformat_close_input(&ctx);
   if (self) {
     closeAllPbs(env, self);
@@ -349,9 +300,7 @@ extern "C" JNIEXPORT jint JNICALL
 Java_soko_ekibun_ffmpeg_AvFormat_getPacketNative(JNIEnv* env, jobject thiz,
                                                  jlong ctx, jlong packet) {
   int ret = av_read_frame((AVFormatContext*)ctx, (AVPacket*)packet);
-  // 非 EOF 的错误在这里出声：Kotlin 侧（AvFormat.getPacket）会把一切负返回值
-  // 折叠成 EOF 收场，不打日志的话 demux 层的故障看起来就是"播完了"。IO 层
-  // 的错误另有 read 回调里那一条（那层才是 AvIO 契约的边界）。
+  // 非 EOF 的负返回值打错误日志。
   if (ret < 0 && ret != AVERROR_EOF)
     av_log(nullptr, AV_LOG_ERROR,
            "av_read_frame error ret=%d (folded to EOF by caller)\n", ret);
@@ -371,17 +320,9 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvCodec_initNative(
   if (ctx) avcodec_free_context(&ctx);
   return 0;
 }
-// 解码产出必须按 FFmpeg 的收/发分离协议收集：
-//   - avcodec_send_packet() 返回 AVERROR(EAGAIN) 表示"输入队列满"，
-//     此时必须先收帧；
-//   - avcodec_receive_frame() 必须循环调用，直到返回 AVERROR(EAGAIN)
-//     （需要更多输入）或 AVERROR_EOF（已 drain 完）。
-// 一个 packet 在 B 帧/参考帧较多的编码下可能产出 0 帧（帧被解码器内部缓存）
-// 或多帧，所以这里返回的是 AvFrame 数组而不是单帧。
-//
-// 注意：这里没有在 AVCodecContext 上挂帧缓存（`opaque` 是上游留给用户的
-// 字段，本工程没用到它）；每次 receive_frame 前都用一个临时 AVFrame，拿到帧
-// 就把所有权转交给 Java 侧（由 AvFrame.closeNative -> av_frame_free 释放）。
+// 解码产出按 FFmpeg 的收/发分离协议收集：send_packet 返回 EAGAIN 时先收帧，
+// receive_frame 循环到 EAGAIN 或 EOF。一个 packet 可能产出 0 帧或多帧，所以返回
+// AvFrame 数组。
 static jobjectArray newAvFrameArray(JNIEnv* env, jint size) {
   jclass cls = env->FindClass("soko/ekibun/ffmpeg/AvFrame");
   if (!cls) return nullptr;
@@ -407,7 +348,7 @@ Java_soko_ekibun_ffmpeg_AvCodec_sendPacketAndGetFramesNative(
   if (!empty) return nullptr;
 
   std::vector<AVFrame*> out;
-  // 把解码器里已经解出的帧全部收出来（顺带给 send_packet 腾出输入队列）
+  // 取出解码器已解出的全部帧。
   auto receiveAll = [&]() {
     while (true) {
       auto frame = av_frame_alloc();
@@ -418,20 +359,14 @@ Java_soko_ekibun_ffmpeg_AvCodec_sendPacketAndGetFramesNative(
         continue;
       }
       av_frame_free(&frame);
-      // AVERROR(EAGAIN)：需要继续喂包；AVERROR_EOF：drain 完成
+      // EAGAIN 表示需要继续喂包，EOF 表示 drain 完成。
       break;
     }
   };
 
-  // drain 阶段：packet == 0 表示冲刷解码器内部缓存的尾帧
+  // packet == 0 表示冲刷解码器内部缓存的尾帧。
   int ret = avcodec_send_packet(ctx, packet ? (AVPacket*)packet : nullptr);
-  // EAGAIN = 输入队列满：**这个包没被收进去**，必须先收帧腾出位置再重发。
-  // 包一丢，码流就少了这一帧的数据，之后整个 GOP 都拿不到正确的参考帧 ——
-  // 画面成块马赛克，要到下一个关键帧才恢复。（2026-09-22：这正是「持续成块、
-  // 跳转才恢复」那条症状的形状，所以这一路绝不能静默。）
-  //
-  // FFmpeg 的契约保证「输出的帧全部读完之后再送，不会再返回 EAGAIN」，所以正常
-  // 情况下第二发就成；给足次数是为了真的卡住时还能吵出来，而不是悄悄把包扔掉。
+  // 输入队列满时先收帧再重发，最多重试 kMaxSendRetry 次。
   const int kMaxSendRetry = 16;
   for (int i = 0; ret == AVERROR(EAGAIN) && packet != 0 && i < kMaxSendRetry;
        ++i) {
@@ -439,8 +374,7 @@ Java_soko_ekibun_ffmpeg_AvCodec_sendPacketAndGetFramesNative(
     ret = avcodec_send_packet(ctx, (AVPacket*)packet);
   }
   if (ret == AVERROR(EAGAIN)) {
-    // 收帧重发都收不进去：**如实表错**。这一包会被调用方 close 掉，
-    // 也就是参考链从此刻断——没有日志的话，外面只会看到"画面花了"。
+    // 重试后仍收不进去，记录错误日志。
     av_log(ctx, AV_LOG_ERROR,
            "avcodec_send_packet EAGAIN x%d, packet dropped: stream=%d size=%d "
            "(frames until the next keyframe will be wrong)\n",
@@ -470,8 +404,7 @@ Java_soko_ekibun_ffmpeg_AvCodec_sendPacketAndGetFramesNative(
 }
 extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_ffmpeg_AvCodec_flushNative(
     JNIEnv* env, jobject thiz, jlong ctx) {
-  // seek 用：丢弃解码器内部缓冲，之后需要重新喂关键帧。
-  // 与 drain（send_packet(NULL) 取出残余帧）是两回事。
+  // 丢弃解码器内部缓冲（seek 用）。
   avcodec_flush_buffers((AVCodecContext*)ctx);
 }
 extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_ffmpeg_AvCodec_closeNative(
@@ -496,13 +429,10 @@ struct SWContext {
   // 视频
   int64_t width = 0;
   int64_t height = 0;
-  // 转码目标格式固定为 AV_PIX_FMT_RGBA（见
-  // postFrameVideo）：平台侧渲染（SurfaceContext.jvm.kt 的
-  // Skia、SurfaceContext.android.kt 的
-  // Bitmap）一直就是按它消费帧的，没有别的选项，所以不把它做成构造参数。
+  // 转码目标格式固定为 AV_PIX_FMT_RGBA。
   uint8_t* videoBuffer = nullptr;
   int64_t videoBufferSize = 0;
-  // opaque：以下都是内部状态
+  // 以下为内部状态
   SwrContext* _swrCtx = nullptr;
   AVChannelLayout _srcChannelLayout;
   AVSampleFormat _srcAudioFormat = AV_SAMPLE_FMT_NONE;
@@ -582,16 +512,10 @@ int64_t postFrameVideo(SWContext* ctx, AVFrame* frame) {
     ctx->_swsCtx = sws_getContext(
         frame->width, frame->height, (AVPixelFormat)frame->format, ctx->width,
         ctx->height,
-        // 与上面给 ctx->_videoData 定尺寸、填数据时用的是同一个格式常量，
-        // 否则 sws_scale 写进来的布局与当初分配的缓冲区对不上。
+        // 输出像素格式与 av_image_fill_arrays 分配视频缓冲时用的格式一致，
+        // sws_scale 按这个格式写入。
         AV_PIX_FMT_RGBA, SWS_POINT, nullptr, nullptr, nullptr);
-    // ⚠️ 这个缓存键必须回写：上面那个 if
-    // 拿它判断「源像素格式变没变」，不回写就永远停在初值
-    // AV_PIX_FMT_NONE，于是条件**每一帧都成立**，sws 上下文被逐帧释放重建 ——
-    // 每帧一次 sws_getContext 的分配与初始化，视频越往下放越白烧。swscale 里的
-    // "No accelerated colorspace conversion" 警告正是随每次 sws_getContext
-    // 打印的，所以日志会被它刷满。音频路径一直是这么写的，见 postFrameAudio
-    // 里的 _srcAudioFormat。
+    // 回写源像素格式缓存键，供上面的条件判断使用。
     ctx->_srcVideoFormat = (AVPixelFormat)frame->format;
   }
   if (!ctx->_swsCtx) return -1;
@@ -624,15 +548,10 @@ Java_soko_ekibun_ffmpeg_AvSurfaceContext_postFrameNative(
       return -1;
   }
 }
-// 把 native 缓冲**拷进** Kotlin 的 byte[]：长度对得上就覆写传入那块（Kotlin
-// 侧按流类型 留着复用），对不上才新建 —— 视频 3.67 MB/帧、约 60
-// 帧/s，每帧新建会把 Java 堆顶在 -Xmx 上。走 byte[] 而不是
-// DirectByteBuffer，是不让 commonMain 出现 java.nio.ByteBuffer （根 AGENTS.md
-// §2.5：commonMain 不许有平台符号）。
+// 把 native 缓冲拷进 Kotlin 的 byte[]：长度一致时覆写传入的数组，不一致时新建。
 //
-// 返回 nullptr = 本轮没有缓冲，调用方据此早退。
-// ⚠️ 调用方必须同步消费这块内存、不能留存引用：
-// 下一帧 sws_scale / swr_convert 会就地覆写。
+// 返回 nullptr 表示本轮没有缓冲。
+// 调用方需同步消费这块内存，不能留存引用。
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_soko_ekibun_ffmpeg_AvSurfaceContext_getBufferNative(
     JNIEnv* env, jobject thiz, jlong pctx, jint codec_type, jbyteArray buf) {
@@ -659,14 +578,14 @@ Java_soko_ekibun_ffmpeg_AvSurfaceContext_getBufferNative(
   // 1. 获取传入 buf 的长度
   jsize buflen = buf ? env->GetArrayLength(buf) : 0;
   jbyteArray ret = nullptr;
-  // 2. 检查传入的 buf 是否可以完美复用
+  // 2. 传入数组长度一致时复用它
   if (buf && buflen == (jsize)size) {
     ret = buf;
   } else {
     // 长度不匹配或传入了 NULL，创建新数组
     ret = env->NewByteArray((jsize)size);
     if (!ret) {
-      // OOM 保护：创建失败直接返回 NULL
+      // 创建失败返回 NULL
       return nullptr;
     }
   }
@@ -679,9 +598,7 @@ Java_soko_ekibun_ffmpeg_AvSurfaceContext_copyPixelsNative(JNIEnv* env,
                                                           jobject thiz,
                                                           jlong src, jlong dst,
                                                           jint bytes) {
-  // 纯 memcpy：桌面端把 native 那块 RGBA 直接写进
-  // 复用的位图，避免每帧新建 skiko 对象。
-  // 目标由调用方保证够大（同宽高 allocPixels 出来的）。
+  // 纯 memcpy 拷贝像素，调用方保证目标缓冲区足够大。
   if (src == 0 || dst == 0 || bytes <= 0) return;
   memcpy((void*)dst, (const void*)src, (size_t)bytes);
 }
@@ -693,9 +610,7 @@ Java_soko_ekibun_ffmpeg_AvSurfaceContext_closeNative(JNIEnv* env, jobject thiz,
   if (!ctx) return;
   if (ctx->_swsCtx) sws_freeContext(ctx->_swsCtx);
   if (ctx->_swrCtx) swr_free(&ctx->_swrCtx);
-  // 两个输出缓冲（av_fast_malloc）必须还，否则每个 AvSurfaceContext
-  // 实例漏一份（视频那支最大）；音频有**两块**在 audioBuffer 与 _audioBuffer1
-  // 之间来回换（见 postFrameAudio 末尾），都得还。
+  // 释放 av_fast_malloc 分配的音频与视频输出缓冲。
   av_free(ctx->audioBuffer);
   av_free(ctx->_audioBuffer1);
   av_free(ctx->videoBuffer);
@@ -724,8 +639,7 @@ Java_soko_ekibun_ffmpeg_AndroidSurfaceContext_copyBufferToSurface(
 
   ANativeWindow* nativeWindow = ANativeWindow_fromSurface(env, surface);
   if (nativeWindow == nullptr) return false;
-  // 先把目标几何对齐成 RGBA_8888 + 与 native 输出一致的宽高：Surface
-  // 默认不一定就是这套 （尺寸 / 像素格式可能不符），先设好再取 buffer。
+  // 把 Surface 的缓冲几何设为 RGBA_8888 与当前宽高。
   if (ANativeWindow_setBuffersGeometry(nativeWindow, (int32_t)ctx->width,
                                        (int32_t)ctx->height,
                                        WINDOW_FORMAT_RGBA_8888) != 0) {
@@ -744,9 +658,7 @@ Java_soko_ekibun_ffmpeg_AndroidSurfaceContext_copyBufferToSurface(
     ANativeWindow_release(nativeWindow);
     return false;
   }
-  // 逐行拷贝：ANativeWindow 的 stride（像素）常大于 width，扁平 memcpy
-  // 会把每行错位累加 成斜向花屏——这是「不报错、只失效」的典型，按 stride
-  // 走才对。
+  // 按 stride 逐行拷贝。
   const int rowBytes = (int)(ctx->width * 4);
   const int dstStride = (int)(native_outBuffer.stride * 4);
   const int rows = (int)ctx->height < native_outBuffer.height

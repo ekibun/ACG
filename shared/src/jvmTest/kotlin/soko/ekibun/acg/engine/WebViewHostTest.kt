@@ -12,10 +12,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
-/**
- * 拦截回调里记下一次请求 —— `onInterceptRequest` 的四个入参全留：
- * `headers.isNotEmpty()` 那条断言要它，`isForMainFrame` / `method` 各自有一条。
- */
+/** 拦截回调里记下一次请求的四个入参。 */
 private data class SeenRequest(
   val url: String,
   val headers: Map<String, String>,
@@ -23,45 +20,13 @@ private data class SeenRequest(
   val isForMainFrame: Boolean,
 )
 
-/**
- * 自研 WebView2 宿主（`cxx/webview/webview.cpp`）的**端到端**回归测试。
- *
- * 本类**不走** `_binding`：直接调同包的 [webviewAsync] 驱动，
- * 验的是**WebView2 宿主本身**的行为 —— 起一个本地 HTTP 服务，把真的页面喂给真的
- * WebView2，锁住几件**只有真的跑起来才会坏**的事：
- *
- * 1. **子资源在拦截回调里看得见**（`<script src>`），且 `isForMainFrame == false`、
- *    `method` / `headers` 都是真值。
- * 2. **脚本注入拿得回结果**，且 DOM 里确实有子资源产生的副作用。
- * 3. **cookie 在不同任务之间是共享的** —— 两次任务走的是同一个 user data folder
- *    （可见页与后台页共用同一份存储靠的就是这个机制）。
- * 4. **拦截回调全程放行也能把页面跑完** —— 回调在每个请求上都被调了不止一次，
- *    一次都不命中时整轮仍以「脚本跑完」收场。（注意别写成「命中 → 放行」：
- *    命中即 `Stop()`，整轮加载当场中止，那条时序不可达 —— 见
- *    [releasingEveryRequestLetsPageFinish]。）
- *
- * 环境不满足时这几个用例都跳过（记成 skipped，不是 passed）：跳过前会先跑一次
- * [checkHost] 体检（真导航一个 `about:blank`），原因原样进跳过消息 ——
- * 静默跳过容易让人误以为「验过了」。
- *
- * 注意 [webviewAsync] 内部用的是 `30.seconds` 护栏（约 30s），
- * 这里外面再套一层 35s 的护栏，免得真出问题把构建挂死。
- *
- * 正因为不走 `_binding`，本类证明不了 `JsEngine` 的 `when` 派发改对了 ——
- * 那一路由同包的 [JsEngineDispatchTest] 管（零桩、真 `JsEngine`）。两类合起来才
- * 覆盖两端：本类验宿主，那个验能力桥的派发形状。
- *
- * 驱动（[webviewAsync]）随 2026-10-13 的
- * 接口重设计搬进了本包，所以本类从 `:platform` 的 jvmTest 迁到这里。留在 `:platform`
- * 的是另一种东西：**直接构平台类**验 `Webview2Context` 自己的 `evaluate` 管道
- * （`platform/jvmTest/.../web/Webview2Test.kt`、`WebViewCookieManagerTest.kt`）。
- */
+/** WebView2 宿主的端到端用例：拦截回调看得见子资源、脚本注入拿得回结果、cookie 跨任务共享。 */
 class WebViewHostTest {
   private lateinit var pageServer: TestPageServer
 
   @BeforeTest
   fun startServer() {
-    // WebView2 的 user data folder 由 `Paths` 决定：后台任务建上下文之前必须注入。
+    // 后台任务建上下文前必须注入 Paths
     TestPaths.ensureInitialized()
     pageServer =
       TestPageServer(
@@ -78,10 +43,7 @@ class WebViewHostTest {
 
   private fun webViewReady() = skipUnlessHostIsAvailable(hostHealth)
 
-  /**
-   * `webviewAsync` 内部是 `30.seconds` 的护栏，外面只多留 5 s：
-   * 真挂住时不必让构建多等 25 s，正常路径也不受这条上限影响。
-   */
+  /** 35 s 护栏。 */
   private suspend fun <T> guarded(block: suspend () -> T): T = withTimeout(35_000) { block() }
 
   /** `<script src="/sub.js">` 这种子资源必须出现在拦截回调里，且字段是真的。 */
@@ -99,14 +61,13 @@ class WebViewHostTest {
             null,
             { u, headers, method, isForMainFrame ->
               seen += SeenRequest(u, headers, method, isForMainFrame)
-              // 只在子资源上命中，并直接回「被拦请求自己」的 url + headers；主框架放行，
-              // 页面才有机会去请求子资源。返回 false 即放行。
+              // 只在子资源上命中，回被拦请求自己的 url + headers；主框架返回 false 放行
               if (u.endsWith("/sub.js")) mapOf("url" to u, "headers" to headers) else false
             },
           )
         }
 
-      // 回调可能还在别的线程上追加，读之前必须整份拷出来，否则边迭代边改。
+      // 回调可能还在别的线程上追加，读之前整份拷出来
       val seenSnapshot = synchronized(seen) { seen.toList() }
       val seenUrls = seenSnapshot.map { it.url }
       val hit =
@@ -144,8 +105,7 @@ class WebViewHostTest {
           JsEngine.instance.webviewAsync(
             url("/page.html"),
             null,
-            // 返回对象而不是字符串：WebView2 给的是结果的 JSON，字符串会被
-            // 再包一层引号，断言起来全是转义。
+            // 返回对象而不是字符串：结果本身就是 JSON，字符串会被再包一层引号
             "({ sub: !!window.__subLoaded, imgs: document.images.length })",
             null,
           )
@@ -156,20 +116,7 @@ class WebViewHostTest {
       assertTrue(json.contains("\"imgs\":1"), "the image subresource should be in the DOM: $json")
     }
 
-  /**
-   * 拦截回调**全程放行**（一次都不命中）之后，加载能自己跑完。
-   *
-   * 这条验的是「放行」这个结局本身 —— 也就是 [webviewAsync] 的 interceptor
-   * 摆在脚本面前的那个选择里，返回 falsy 这一支到底通不通。
-   *
-   * **别把它写成「命中 → 放行」**：那条时序在真引擎里**不可达**。
-   * `cxx/webview/webview.cpp` 的 `WebResourceRequested` 回调里，一旦 JVM 侧返回
-   * 命中，native 立刻给一个空 204 并 `webview_->Stop()` —— 整轮加载当场中止，
-   * 不会再有第二次回调。结果在命中那一刻就定了（[webviewAsync] 的
-   * `outcome.complete` 幂等、只取第一个终态）。
-   *
-   * 回调在每一次请求上都被调了不止一次，这本身也是「放行不影响加载」的证据。
-   */
+  /** 拦截回调全程放行（返回 falsy）之后，加载能自己跑完。 */
   @Test
   fun releasingEveryRequestLetsPageFinish() =
     runBlocking {
@@ -189,8 +136,8 @@ class WebViewHostTest {
           )
         }
 
-      // 回调被反复调用过（不是只调一次就完事），且主框架与子资源都到过。
-      // 回调可能还在别的线程上追加，读之前必须整份拷出来，否则边迭代边改。
+      // 回调被反复调用过，且主框架与子资源都到过
+      // 回调可能还在别的线程上追加，读之前整份拷出来
       val seenSnapshot = synchronized(seen) { seen.toList() }
       val urls = seenSnapshot.map { it.url }
       assertTrue(
@@ -206,7 +153,7 @@ class WebViewHostTest {
         "the callback should fire for every request, but it fired only ${seenSnapshot.size} time(s): $urls",
       )
 
-      // 全程放行 ⇒ 没有任何一次命中 ⇒ 整轮必须以「脚本跑完」收场。
+      // 全程放行 ⇒ 无命中 ⇒ 整轮以「脚本跑完」收场
       val json =
         assertIs<String>(
           result,
@@ -222,26 +169,7 @@ class WebViewHostTest {
       )
     }
 
-  /**
-   * cookie 跨任务共享。
-   *
-   * 两次任务各自建一个自己的 environment，但 **user data folder 是同一份**
-   * （`Webview2Context.defaultUserDataDir`），所以 cookie 存储也是同一份。
-   * 这正是「可见页和后台页共用一套登录态」的实现机制，所以这里用两次后台任务来验它。
-   * 分开的目录会让第二次读到空 cookie。
-   *
-   * **用带 `max-age` 的持久 cookie，而不是 session cookie** —— 这一点踩过坑：
-   *
-   *   session cookie（`document.cookie = 'x=1; path=/'` 这种没有 expires/max-age 的）
-   *   只活在浏览器进程的内存里，Chromium 不会把它落进 `Default/Network/Cookies`。
-   *   而**两个后台任务之间一个 WebView 都不存在**时，浏览器进程会把内存态丢掉，
-   *   于是第二个视图读不到 —— 当时误判成「cookie 存储没共享」，其实是丢了内存态。
-   *   加 `max-age` 之后立刻通过，`Cookies` 库里也能查到 `webview_probe`。
-   *
-   *   对产品的影响是有限的：可见页开着的时候浏览器进程就活着，后台任务照样看得到
-   *   它写的 session cookie（登录态的常见路径）。真正会丢的只有「所有视图都关掉、
-   *   只剩后台任务在跑」这种场景。
-   */
+  /** cookie 跨任务共享：两次任务各建自己的 environment，但共用同一份 user data folder。 */
   @Test
   fun cookiesAreSharedAcrossTasks() =
     runBlocking {
@@ -275,37 +203,15 @@ class WebViewHostTest {
     }
 
   internal companion object {
-    /** 体检里那次 about:blank 的护栏，比 `30.seconds` 稍宽一点。 */
+    /** 体检超时上界。 */
     const val HOST_HEALTH_TIMEOUT_MS = 40_000L
 
-    /** 环境体检结果，`null` 表示健康。各用例共用，别重复跑 —— [JsEngineDispatchTest] 也读这一份。 */
+    /** 环境体检结果，`null` 表示健康。各用例共用一份。 */
     val hostHealth: String? by lazy { checkHost() }
 
-    /**
-     * 宿主可用性体检。
-     *
-     * **为什么要真跑一次导航**：只判断「环境起没起来」是不够的。这台机器上实测到过
-     * **两种**坏法，都长得很像「代码没写对」：
-     *
-     * 1. **引擎完全不动** —— 环境建得成、控制器建得成、`Navigate` 也返回 S_OK，但连
-     *    `about:blank` 都到不了 `NavigationCompleted`，GPU 子进程退出码 1、渲染进程根本不创建；
-     * 2. **子进程崩了**（2026-10-13 实测）—— `processFailed` 直接报
-     *    `kind=6/4 reason=3 exit=7`（GPU / utility 子进程 CRASHED），连 `about:blank` 都过不去；
-     *    宿主 JVM 随后还会随机死在 `0xC0000005` / `0x80000003`。
-     *
-     * 两种情况里同一台机器上的 `msedge.exe`（同一个 Chromium 版本）无头模式都跑得好好的，
-     * 所以是 **WebView2 运行时自己坏了**，不是我们的宿主（重装 Evergreen Runtime 通常能好）。
-     *
-     * 这种坏法下这几个用例都会卡满 30s 再报一堆看不懂的断言失败，纯属噪声；
-     * 体检一次、说清原因、这几个一起记成 skipped，才对得起看构建的人。
-     *
-     * 想绕开体检直接看原始失败，跑测试时加 `-Dacg.test.skipUnavailableHost=false`
-     * （或直接看 `cxx/webview/webview.cpp` 的原生日志）。
-     *
-     * @return null 表示健康；否则是给人看的跳过原因。
-     */
+    /** 宿主可用性体检：真跑一次 `about:blank` 导航并执行 `1 + 1`；null 表示健康。 */
     fun checkHost(): String? {
-      // about:blank 不碰网络，能把「运行时坏」和「本地 HTTP 服务/网络有问题」分开。
+      // about:blank 不碰网络
       val result =
         runBlocking {
           withTimeoutOrNull(HOST_HEALTH_TIMEOUT_MS) {

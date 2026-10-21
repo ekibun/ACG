@@ -2,6 +2,7 @@ package soko.ekibun.common
 
 import java.io.RandomAccessFile
 
+/** 用 [RandomAccessFile] 打开文件；失败返回 null。 */
 internal actual fun openFileHandle(
   path: String,
   mode: String,

@@ -3,13 +3,9 @@ package soko.ekibun.web
 import soko.ekibun.common.Paths
 import java.nio.file.Files
 
-/**
- * `:platform` jvmTest 的路径注入：`settingsStore` 与 [Webview2Context] 都从 [Paths] 取路径。
- * 落在临时区，只注入一次（`Paths.init` 只能成功一次）。
- */
+/** `:platform` jvmTest 的路径注入：落在临时区，只初始化一次。 */
 internal object TestPaths {
-  // 与 `:shared` 那份同形：多 fork / 并行时必须有可见性 + 互斥，否则 `Paths.init` 会被调第二次
-  // （它只允许成功一次，第二次直接抛）。
+  // 多 fork / 并行下只初始化一次
   @Volatile
   private var initialized = false
 

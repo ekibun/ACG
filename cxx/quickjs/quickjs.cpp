@@ -16,14 +16,9 @@ struct JSRuntimeOpaque {
   JavaVM* javaVm;
   jobject thiz;
   JSClassID javaClassID;
-  // ArrayBuffer 的 class id：quickjs.h 不导出 class 枚举（长在 quickjs.c
-  // 内部）， initContext 拿一个真 ArrayBuffer 问一次 JS_GetClassID
-  // 自标定，submodule 升级也不会漂。
+  // ArrayBuffer 的 class id，initContext 用一个真 ArrayBuffer 自标定。
   JSClassID arrayBufferClassId;
-  // `java/lang/AutoCloseable` 的全局引用（initContext 建、destroyContext 删）。
-  // 挂在 JavaObject 上的对象若是它的实现者，类析构回调要替 JS 侧调一次 close()
-  // —— JS 那边没有 finally，引用丢掉就是最后的机会，漏了只能等 runtime 销毁。
-  // 拿不到（类找不到 / OOM）就退化成只放引用，行为与从前一致。
+  // `java/lang/AutoCloseable` 的全局引用，initContext 建、destroyContext 删。
   jclass autoCloseableClass;
   // 0 表示不限制：memoryLimit 为 0 就不调 JS_SetMemoryLimit。
   int64_t memoryLimit;
@@ -32,20 +27,13 @@ struct JSRuntimeOpaque {
   bool interrupted;
 };
 
-// 「放引用」与「销毁包装」是两件**分开**的事，故意不合成一件：
+// 「放引用」与「销毁包装」分为两件事：
 //
 //   jsReleaseValue  -> 放掉一票 JS 引用（JS_FreeValue）
 //   jsDestroyHandle -> 释放堆上的包装（delete）
 //
-// 合成一个的后果：`definePropertyValue` 的 k / v 各只要其一（k 只放引用、v
-// 只销毁 包装），合并版会**悄悄偷走**别人的一票 —— 释放包装会顺带把 JS
-// 引用计数减一。 拆开还有第二个好处：同一个句柄可以在多次 JS
-// 操作之间复用（每次配一次 jsDupValue），而包装仍然只销毁一次（坑的取证见
-// ownership 手册规则 1）。
-//
-// 分层：这两个 helper 只在 C 内部按需取用（`definePropertyValue` 的 k / v）；
-// Kotlin 侧的释放入口永远是「两件都要」，走下面把两步并成**一次 JNI 过界**的
-// jsFreeValue 导出，细粒度操作不暴露给 Kotlin。
+// 两个 helper 只在 C 内部按需取用；Kotlin 侧的释放入口是走一次 JNI 过界的
+// jsFreeValue。
 void jsReleaseValue(jlong ctx, jlong obj) {
   if (obj == 0) return;
   JS_FreeValue((JSContext*)ctx, *((JSValue*)obj));
@@ -66,28 +54,20 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
                           nullptr,    memory_limit,
                           timeout_ms, std::chrono::steady_clock::now(),
                           false};
-  // AutoCloseable 的类引用要在 JS_NewClass **之前**备好 ——
-  // 类析构回调随时可能跑，那时再取就晚了。
+  // 在 JS_NewClass 之前取好 AutoCloseable 的类引用。
   {
     jclass cls = env->FindClass("java/lang/AutoCloseable");
     if (cls != nullptr) {
       opaque->autoCloseableClass = (jclass)env->NewGlobalRef(cls);
       env->DeleteLocalRef(cls);
     }
-    // 这里**只 Clear 不 Describe**（与下面 finalizer 那处相反）：
-    // 这条路走不通是「类找不到」的正常降级，Describe 只会往 stderr
-    // 打一条 NoClassDefFoundError 噪声，而那不是错误 ——
-    // 退化后行为与从前一致（只放引用，不 close）。
+    // 取不到类引用时只清异常，按无 AutoCloseable 降级。
     if (env->ExceptionCheck()) env->ExceptionClear();
   }
-  // QuickJS 自己默认给 1MB 的栈预算（JS_DEFAULT_STACK_SIZE），和 JVM 线程栈
-  // （约 1MB）同量级 —— 深递归真把**宿主**线程栈走穿，挂的是整个进程。
-  // 预算必须远低于宿主线程栈：stack_limit = stack_top - stack_size，而
-  // stack_top 已经落在 JNI 帧里了；256KB 是给上面那些 JNI/Java 帧留的余量。
+  // 设置 JS 栈预算，默认 256KB。
   JS_SetMaxStackSize(rt, stack_size > 0 ? stack_size : 256 * 1024);
   if (memory_limit > 0) JS_SetMemoryLimit(rt, (size_t)memory_limit);
-  // 协作式中断：JS_ExecutePendingJob / JS_Eval 会轮询这个回调，`while(true){}`
-  // 就是靠它变成 "InternalError: interrupted" 的。
+  // 中断处理器：求值超过 timeoutMs 时让 JS 以 interrupted 收场。
   JS_SetInterruptHandler(
       rt,
       [](JSRuntime* rt, void*) -> int {
@@ -117,9 +97,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
             (jstring)env->CallObjectMethod(opaque->thiz, load, javaStr);
         env->DeleteLocalRef(javaStr);
         if (retJava == nullptr) {
-          // QuickJS 要求 loader 返回 NULL 时**必须**挂着一个待处理异常
-          // （见 js_host_resolve_imported_module）。光返回 NULL，就会由
-          // JS_LoadModuleInternal 去报运行期里恰好残留的那个旧异常。
+          // loader 返回 NULL 时必须挂一个待处理异常。
           JS_ThrowReferenceError(ctx, "could not load module '%s'",
                                  module_name);
           return nullptr;
@@ -131,7 +109,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
         env->ReleaseStringUTFChars(retJava, str);
         env->DeleteLocalRef(retJava);
         if (JS_IsException(func_val)) return nullptr;
-        // 模块已经被引用过了，这里把这个 JSValue 放掉。
+        // 放掉模块句柄的 JSValue。
         auto m = (JSModuleDef*)JS_VALUE_GET_PTR(func_val);
         JS_FreeValue(ctx, func_val);
         return m;
@@ -142,24 +120,9 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
   if (!JS_IsRegisteredClass(rt, opaque->javaClassID)) {
     JSClassDef def{
         "JavaObject",
-        // 类析构回调：JS 侧把这个包装丢掉时跑。
+        // 类析构回调。
         //
-        // 两件事，按顺序：
-        // 1. 若原对象实现 `AutoCloseable` ⇒ 调一次 `close()`；
-        // 2. 放掉 Java 全局引用。
-        //
-        // 顺序不能反：先放引用就再也拿不到 jobject 了，close 也就无从调起。
-        //
-        // 为什么 close：JS 那边没有 try-finally，插件把引用一丢，
-        // 宿主侧就再没有「用完了」的信号了。
-        // 而这些对象（Http.Response 之类）都**欠着一条连接或一个 native
-        // 句柄**，不在这儿调，就只能等 `JS_FreeRuntime` 一次性兜底，
-        // 中间那条连接一直悬着。
-        //
-        // 这套「GetMethodID(GetObjectClass(x), "close", "()V") + CallVoidMethod
-        // + ExceptionDescribe/Clear」的形状与 `ffmpeg.cpp` 的 `closeIoContext`
-        // 一致，是有意保持同形的（各自要在自己那侧的线程上跑，
-        // 抄不出公共函数）—— 改动其中一份时记得看另一份。
+        // 对实现 AutoCloseable 的对象调一次 close()，再放掉 Java 全局引用。
         [](JSRuntime* rt, JSValue obj) noexcept {
           auto opaque = (JSRuntimeOpaque*)JS_GetRuntimeOpaque(rt);
           if (opaque == nullptr) return;
@@ -169,19 +132,14 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
           if (ref == nullptr) return;
           if (opaque->autoCloseableClass != nullptr &&
               env->IsInstanceOf(ref, opaque->autoCloseableClass)) {
-            // `GetMethodID` 问的是**具体类**，但签名 `()V` 来自接口
-            // `AutoCloseable.close()` —— 它是抽象方法（不是 default 方法），
-            // 所以每个实现类都**一定**有这个 public 方法，查得到。
-            // `GetObjectClass` 返回的是 local ref，取完方法 id 就得删 ——
-            // GC 时机上没别的机会释放它。
+            // 取具体类的 close 方法；cls 是 local ref，取完即删。
             jclass cls = env->GetObjectClass(ref);
             jmethodID close = cls == nullptr
                                   ? nullptr
                                   : env->GetMethodID(cls, "close", "()V");
             if (close != nullptr) {
               env->CallVoidMethod(ref, close);
-              // 析构回调绝不能往外抛（它跑在 GC 时机上，没有调用者能接）——
-              // 先 Describe 打到 stderr 再 Clear：静默清掉就丢了诊断线索。
+              // 记录并清除 close() 抛出的异常。
               if (env->ExceptionCheck()) {
                 env->ExceptionDescribe();
                 env->ExceptionClear();
@@ -193,8 +151,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
         }};
     int e = JS_NewClass(rt, opaque->javaClassID, &def);
     if (e < 0) {
-      // 类没注册成：这个 runtime 起不来，opaque 连它的 weak global ref
-      // 一起收掉，别把失败路径漏成一份常驻内存。
+      // 类注册失败：回收 runtime、opaque 与全局引用。
       JS_SetRuntimeOpaque(rt, nullptr);
       JS_FreeRuntime(rt);
       if (opaque->autoCloseableClass != nullptr)
@@ -206,8 +163,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
   }
   JSContext* jsc = JS_NewContext(rt);
   if (!jsc) {
-    // context 建不成（基本只有 OOM）：runtime 同样不能留 —— 与上面
-    // JS_NewClass 失败是同一条清理链，别让 gc_obj_list 断言留到进程退出。
+    // context 创建失败：回收 runtime、opaque 与全局引用。
     JS_SetRuntimeOpaque(rt, nullptr);
     JS_FreeRuntime(rt);
     if (opaque->autoCloseableClass != nullptr)
@@ -216,7 +172,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
     delete opaque;
     return 0;
   }
-  // ArrayBuffer class id 的自标定（见 struct 里字段注释）。
+  // 自标定 ArrayBuffer 的 class id。
   auto abProbe = JS_NewArrayBufferCopy(jsc, (const uint8_t*)"", 0);
   opaque->arrayBufferClassId = JS_GetClassID(abProbe);
   JS_FreeValue(jsc, abProbe);
@@ -227,17 +183,11 @@ Java_soko_ekibun_quickjs_QuickJS_destroyContext(JNIEnv* env, jclass,
                                                 jlong ctx) {
   JSRuntime* rt = JS_GetRuntime((JSContext*)ctx);
   auto opaque = (JSRuntimeOpaque*)JS_GetRuntimeOpaque(rt);
-  // 顺序有讲究：JS_FreeContext / JS_FreeRuntime 期间会跑 JavaObject
-  // 的类析构回调，它得读到 opaque（javaVm + javaClassID）才能把挂着的 Java
-  // 全局引用删掉。 以前这里先把 opaque 置成 nullptr，那些 global ref
-  // 就被析构回调里那句 `if (opaque == nullptr) return;` 直接放过了 —— 漏的是
-  // jobject 全局引用表。
+  // 先释放 context 与 runtime，再删 opaque：析构回调期间还要读 opaque。
   JS_FreeContext((JSContext*)ctx);
   JS_FreeRuntime(rt);
   if (opaque != nullptr) {
-    // thiz 是 initContext 里 NewWeakGlobalRef 建的，得自己删；opaque 本体同理。
-    // autoCloseableClass 同样要在**析构回调跑过之后**才删 —— 上面两次 Free
-    // 里它还要用来判 `IsInstanceOf`。
+    // 释放 autoCloseableClass、thiz 的 weak global ref 与 opaque 本体。
     if (opaque->autoCloseableClass != nullptr)
       env->DeleteGlobalRef(opaque->autoCloseableClass);
     env->DeleteWeakGlobalRef(opaque->thiz);
@@ -271,9 +221,7 @@ Java_soko_ekibun_quickjs_QuickJS_jsNewFloat64(JNIEnv*, jclass, jlong ctx,
 extern "C" JNIEXPORT jlong JNICALL
 Java_soko_ekibun_quickjs_QuickJS_jsNewArrayBuffer(JNIEnv* env, jclass,
                                                   jlong ctx, jbyteArray obj) {
-  // JS_NewArrayBufferCopy 会复制字节，所以返回前必须把 Java 数组放掉
-  // （JNI_ABORT = 不回写）。留着不放的话，每构造一个 ArrayBuffer 就漏一个
-  // local ref / pinned buffer。
+  // 读完字节后放掉 Java 数组（JNI_ABORT，不回写）。
   auto len = env->GetArrayLength(obj);
   auto elems = env->GetByteArrayElements(obj, nullptr);
   auto ret = (jlong) new JSValue(
@@ -297,24 +245,13 @@ extern "C" JNIEXPORT jint JNICALL
 Java_soko_ekibun_quickjs_QuickJS_definePropertyValue(JNIEnv*, jclass, jlong ctx,
                                                      jlong obj, jlong k,
                                                      jlong v) {
-  // 属性旗标钉死在 native 侧、不再收 Kotlin 入参：Kotlin 侧原先有个 `JSProp`
-  // 常量对象专门传它，而五个调用点要的全是同一个「可配置 + 可写 +
-  // 可枚举」。真要别的旗标（比如 `JS_PROP_THROW`）再从参数位上把它加回来。
+  // 属性旗标固定为可配置 + 可写 + 可枚举。
   auto atom = JS_ValueToAtom((JSContext*)ctx, *(JSValue*)k);
   auto ret = JS_DefinePropertyValue((JSContext*)ctx, *(JSValue*)obj, atom,
                                     *(JSValue*)v, JS_PROP_C_W_E);
   JS_FreeAtom((JSContext*)ctx, atom);
-  // 这个函数收下 k / v **两个**句柄，并让它们彻底退场：
-  //
-  //   v —— JS_DefinePropertyValue 的函数体以 `JS_FreeValue(ctx, val)` 收尾，
-  //        调用方那一票已经被被调方吃掉（属性自己另持一票）。这里再放一次就是
-  //        双重释放 —— gc_decref_child 里那句 `js_rc(p)->ref_count > 0` 断言
-  //        就是这么来的。
-  //   k —— JS_ValueToAtom 只是借用，这一票得我们自己放。
-  //
-  // 两个包装也一并销毁：每个调用点都是一次性的「定义这个属性」，没人会再用那个
-  // k/v 句柄。把「放引用」与「销毁包装」合在这里做，才不会让没被消费掉的
-  // `new JSValue` 在引用账本上留下一笔。
+  // 释放 k / v 两个句柄：v 的引用已由 JS_DefinePropertyValue 消费，只销毁包装；
+  // k 的引用由这里释放。
   jsReleaseValue(ctx, k);
   jsDestroyHandle(k);
   jsDestroyHandle(v);
@@ -330,8 +267,7 @@ Java_soko_ekibun_quickjs_QuickJS_isException(JNIEnv*, jclass, jlong obj) {
 }
 extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_quickjs_QuickJS_jsFreeValue(
     JNIEnv*, jclass, jlong ctx, jlong obj) {
-  // 放引用 + 销毁包装一次过界 —— Kotlin 侧没有「只要其一」的调用点，细粒度
-  // helper 不出 C（见文件头那段的分层说明）。
+  // 放引用与销毁包装一次过界。
   jsReleaseValue(ctx, obj);
   jsDestroyHandle(obj);
 }
@@ -345,8 +281,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_evaluate(
     opaque->evalStart = std::chrono::steady_clock::now();
     opaque->interrupted = false;
   }
-  // JS_Eval 不接管源码：用完两个字符串都要放掉，否则每次 evaluate() 都会漏
-  // 一份 pinned 的脚本副本。
+  // JS_Eval 不接管源码，用完两个字符串都要放掉。
   auto cmdChars = env->GetStringUTFChars(cmd, nullptr);
   auto cmdLen = env->GetStringUTFLength(cmd);
   auto nameChars = env->GetStringUTFChars(name, nullptr);
@@ -390,15 +325,11 @@ Java_soko_ekibun_quickjs_QuickJS_getException(JNIEnv* env, jclass, jlong ctx) {
 
 // ===== JS → Java 的透传原语 =====
 //
-// 类型分派、递归、防环 cache、释放策略全在 Kotlin 侧（`QuickJS.jsToJava`）——
-// 分层对齐 flutter_qjs：native 只做 QuickJS C API 的一对一薄包装，不做任何转换
-// 判断；tag / 属性 / 标量怎么读、句柄什么时候放，都由 Kotlin 决定。
+// 类型分派、递归、防环 cache 与释放策略都在 Kotlin 侧（`QuickJS.jsToJava`）；
+// native 只做 QuickJS C API 的一对一薄包装。
 
-// jsGetTag 返回的稳定 tag 码由 Kotlin 侧的 JS_TAG_* 常量解释（QuickJS.kt）：把
-// 反向映射内联在 return 里，QuickJS 的原始 tag —— 包括随构建配置变形的
-// JS_TAG_IS_FLOAT64 —— 不出 native，Kotlin 不镜像 ABI。五个名字之外的 tag
-// （NULL / UNDEFINED / EXCEPTION / symbol / bigint）一律返回 0，Kotlin 侧不
-// 命名它，由分派器的 else 接住转 null。
+// jsGetTag 返回稳定 tag 码，由 Kotlin 侧的 JS_TAG_* 常量解释；五个名字之外的
+// tag 一律返回 0。
 extern "C" JNIEXPORT jint JNICALL
 Java_soko_ekibun_quickjs_QuickJS_jsGetTag(JNIEnv*, jclass, jlong obj) {
   int tag = JS_VALUE_GET_TAG(*(JSValue*)obj);
@@ -430,11 +361,7 @@ Java_soko_ekibun_quickjs_QuickJS_jsIsError(JNIEnv*, jclass, jlong ctx,
 extern "C" JNIEXPORT jboolean JNICALL
 Java_soko_ekibun_quickjs_QuickJS_jsIsPromise(JNIEnv*, jclass, jlong ctx,
                                              jlong obj) {
-  // 上游没有 JS_IsPromise；JS_PromiseState 对非 Promise 返回 -1
-  // （内部 JS_GetOpaque(obj, JS_CLASS_PROMISE) 为空）。
-  // 接进 int 再比：JSPromiseStateEnum 没钉底层类型，-1 不在其枚举常量集内，
-  // 直接与 -1 比较 Clang 会报 always-true 的越界比较警告；
-  // 上游自己也是先取 int。
+  // 上游没有 JS_IsPromise，用 JS_PromiseState 判断（非 Promise 返回 -1）。
   int state = JS_PromiseState((JSContext*)ctx, *(JSValue*)obj);
   return state != -1;
 }
@@ -470,8 +397,7 @@ Java_soko_ekibun_quickjs_QuickJS_jsToCString(JNIEnv* env, jclass, jlong ctx,
                                              jlong obj) {
   auto pstr = JS_ToCString((JSContext*)ctx, *(JSValue*)obj);
   if (pstr == nullptr) {
-    // 失败（OOM，或对象的 toString 抛错）会留下待处理异常；失败信号已由 null
-    // 传达，把异常清掉，别污染后续调用（与 jsGetArrayBuffer 的探针同款卫生）。
+    // 失败时清掉待处理异常并返回 null。
     JS_FreeValue((JSContext*)ctx, JS_GetException((JSContext*)ctx));
     return nullptr;
   }
@@ -483,10 +409,7 @@ Java_soko_ekibun_quickjs_QuickJS_jsToCString(JNIEnv* env, jclass, jlong ctx,
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_soko_ekibun_quickjs_QuickJS_jsGetArrayBuffer(JNIEnv* env, jclass,
                                                   jlong ctx, jlong obj) {
-  // 先按 class id 过滤（initContext 自标定）：JS_GetArrayBuffer 对非
-  // ArrayBuffer 会往 runtime 里抛
-  // TypeError，逐对象探针等于每节点白分配一个错误对象再吞掉 ——
-  // 在同一个原语里问完再取，Kotlin 侧一次过界拿结果。
+  // 先按 class id 过滤，再取 ArrayBuffer 内容。
   auto opaque =
       (JSRuntimeOpaque*)JS_GetRuntimeOpaque(JS_GetRuntime((JSContext*)ctx));
   if (JS_GetClassID(*(JSValue*)obj) != opaque->arrayBufferClassId)
@@ -494,9 +417,7 @@ Java_soko_ekibun_quickjs_QuickJS_jsGetArrayBuffer(JNIEnv* env, jclass,
   size_t size;
   uint8_t* buf = JS_GetArrayBuffer((JSContext*)ctx, &size, *(JSValue*)obj);
   if (!buf) {
-    // 有 class id 把门理论上不该失败；万一失败（比如 detached buffer），抛出的
-    // TypeError 必须就地清掉，否则后面每个「返回 NULL 却不抛异常」的 API 都会被
-    // 这个旧异常污染。放掉它。
+    // 取失败时清掉抛出的异常并返回 null。
     JS_FreeValue((JSContext*)ctx, JS_GetException((JSContext*)ctx));
     return nullptr;
   }
@@ -510,8 +431,7 @@ Java_soko_ekibun_quickjs_QuickJS_jsGetOpaque(JNIEnv*, jclass, jlong ctx,
                                              jlong obj) {
   auto opaque =
       (JSRuntimeOpaque*)JS_GetRuntimeOpaque(JS_GetRuntime((JSContext*)ctx));
-  // 取的是 `jsWrapObject` 挂在 JavaObject 类上的 global ref；经 JNI 返回时
-  // JVM 会另建一个 local ref 指向同一对象，global ref 本身的所有权不变。
+  // 取 JavaObject 上挂的 Java 全局引用。
   return (jobject)JS_GetOpaque(*(JSValue*)obj, opaque->javaClassID);
 }
 
@@ -542,12 +462,7 @@ Java_soko_ekibun_quickjs_QuickJS_jsGetOwnProperties(JNIEnv* env, jclass,
   // 旗标 -1 = 全部自有属性（含不可枚举与 symbol）。
   if (JS_GetOwnPropertyNames(cctx, &ptab, &plen, *(JSValue*)obj, -1) != 0)
     return nullptr;
-  // (key, value) 交错铺进一个 LongArray：key 由 atom
-  // 就地物化（JS_AtomToValue）， value 按同一个 atom 取（JS_GetProperty），atom
-  // 随取随放 —— 它是 C 侧的 计数资源，不过 JNI
-  // 界。整组打包成一次过界，省掉逐属性 4 次（atom 取值、 按 atom 取
-  // value、FreeAtom，加 Kotlin 侧的配对开销）；四支句柄的消费都在 Kotlin 侧的
-  // jsToJava。
+  // (key, value) 交错铺进一个 LongArray，atom 随取随放。
   auto arr = env->NewLongArray((jsize)(plen * 2));
   auto handles = new jlong[plen * 2];
   for (uint32_t i = 0; i < plen; ++i) {
@@ -580,10 +495,7 @@ Java_soko_ekibun_quickjs_QuickJS_jsNewCFunction(JNIEnv*, jclass, jlong ctx,
         jmethodID invoke =
             env->GetMethodID(clazz, "handleJSInvokable",
                              "(Lsoko/ekibun/quickjs/JSInvokable;[JJ)J");
-        // 实参与 this 不在 C 里转换：dup 成句柄递给 Kotlin，转换连同句柄的消费
-        // 都在 Kotlin 侧的 jsToJava 里做。递的是 jlong 不是 jobject，没有任何
-        // local ref 要簿记；argv 是 JSValueConst（借用），dup 出的票由 Kotlin
-        // 还。
+        // 实参与 this 各 dup 成句柄交给 Kotlin，转换与句柄释放都在 Kotlin 侧。
         auto argvHandles = env->NewLongArray(argc);
         auto handles = new jlong[argc];
         for (int i = 0; i < argc; ++i)
@@ -604,8 +516,7 @@ extern "C" JNIEXPORT jlong JNICALL
 Java_soko_ekibun_quickjs_QuickJS_jsThrowError(JNIEnv*, jclass, jlong ctx,
                                               jlong err) {
   JS_Throw((JSContext*)ctx, JS_DupValue((JSContext*)ctx, *(JSValue*)err));
-  // JS_Throw 自己用 JS_DupValue 记了一票，所以把我们这份放掉；这个句柄从
-  // javaToJs 出来就是一次性的，跟着一起退场。
+  // JS_Throw 自己 dup 了一票，这里放掉调用方传入的 err 句柄。
   jsReleaseValue(ctx, err);
   jsDestroyHandle(err);
   return (jlong) new JSValue(JS_EXCEPTION);
@@ -626,8 +537,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_jsCall(
   JSRuntime* rt = JS_GetRuntime((JSContext*)ctx);
   JS_UpdateStackTop(rt);
   auto longArr = env->GetLongArrayElements(argv, nullptr);
-  // JS_Call 只是借用 argv，那些 JSValue 结构仍归调用方（Kotlin 在调用返回后
-  // 立刻把每个参数放掉）。这里用 js_malloc 临时铺一份、调完立刻 js_free。
+  // argv 借用自调用方：用 js_malloc 临时铺一份，调完释放。
   auto argvJs = (JSValue*)js_malloc((JSContext*)ctx,
                                     sizeof(JSValue) * (argc > 0 ? argc : 1));
   if (argvJs == nullptr) {
@@ -653,13 +563,11 @@ Java_soko_ekibun_quickjs_QuickJS_executePendingJob(JNIEnv*, jclass, jlong ctx) {
 }
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_soko_ekibun_quickjs_QuickJS_jsNewPromise(JNIEnv* env, jclass, jlong ctx) {
-  // JS_NewPromiseCapability 往数组里写两个**新持有**的引用，所以各自造一个
-  // 包装即可，不用再 dup。
+  // JS_NewPromiseCapability 返回两个新持有的引用，各建一个包装即可。
   auto resolving_funcs = new JSValue[2];
   auto promise = (jlong) new JSValue(
       JS_NewPromiseCapability((JSContext*)ctx, resolving_funcs));
-  // 把 resolve / reject 两个函数各自搬进单独的分配里，这样它们的包装可以分别
-  // 被 jsDestroyHandle() 销毁。
+  // resolve / reject 各搬进单独的分配，便于分别销毁。
   auto resolve = (jlong) new JSValue(resolving_funcs[0]);
   auto reject = (jlong) new JSValue(resolving_funcs[1]);
   delete[] resolving_funcs;

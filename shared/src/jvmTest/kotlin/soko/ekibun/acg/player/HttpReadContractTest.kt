@@ -12,16 +12,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * `HttpIO.read` 的**契约**回归：网络源解出来的帧序列必须与本地文件逐帧相同。
- *
- * 两个用例分别压两种服务端形态：认 Range（206，正常路径）与**不认 Range**（一律 200 整个 body，
- * seek 只能靠往前推）。两者都把 body 切成小块、每块之间 sleep，好让「缓冲里一个字节都没有」这个
- * 窗口真的出现。判据是帧序列本身：素材用随源码入库的 `media/bbb-640x360-12s-faststart.mp4`
- * （300 帧 / 12s，关键帧每 2s 一个）。解出的视频帧 PTS 必须是参考解码的一个**连续后缀**，一帧不缺。
- *
- * 第三个用例不看帧、只看**服务端请求数**：它守的是「向前 seek 该白读还是该重开会话」那条
- * **性能判据**（[HttpIO.getResponseBlocking] 第三条分支）。判据只影响快慢、不影响正确性，
- * 所以量的是会话数；落点与基线都是实测钉的（见该用例 KDoc）。
+ * `HttpIO.read` 的契约：网络源解出的帧序列与本地文件逐帧相同（认与不认 Range 两种服务端），并守住 seek 的会话数判据。
  */
 class HttpReadContractTest {
   @Test
@@ -38,11 +29,7 @@ class HttpReadContractTest {
     }
   }
 
-  /**
-   * 服务端**不认 Range**（Range 头一律回 200 整个 body）时的现场：seek 之后只能靠往前推
-   * 网络游标。这里先顺序读一小段（把第一条响应的缓冲用起来），再**向前跳**到 3s ——
-   * offset 一下越过已缓冲的位置，逼出「缓冲没到就在 IO 层等」那条路。
-   */
+  /** 服务端不认 Range 时向前 seek：先顺序读一小段，再向前跳到 3 s。 */
   @Test
   fun forwardSeekOverRangeIgnoringServerReadsEveryFrame() {
     val media = TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART)
@@ -55,10 +42,9 @@ class HttpReadContractTest {
             val video = format.getStreams().first { it.codecType == AVMediaType.VIDEO }
             val codec = AvCodec(video)
             try {
-              // 先顺序读一点，逼出第一条响应并让缓存往前推。
+              // 先顺序读一点，让第一条响应与缓存往前推
               repeat(3) { format.getPacket(listOf(video))?.close() }
-              // 容器级 seek 只落关键帧（每 2s 一个），seek 到 3s 会落回 2s 那个关键帧，
-              // 落点之后这段全靠 IO 往前推。
+              // 容器级 seek 只落关键帧（每 2s 一个），落点之后全靠 IO 往前推
               format.seekTo(3_000_000)
               val pts = ArrayList<Long>()
               while (true) {
@@ -78,7 +64,7 @@ class HttpReadContractTest {
         }
       // seek 落到 2s 关键帧，此后还剩 10s × 25fps = 250 帧。
       assertTrue(afterSeek.size > 200, "more than 200 frames should remain after the seek, got ${afterSeek.size}")
-      // 必须正好是参考序列的一个连续后缀：丢一个 sample 就会在这里断开。
+      // 必须正好是参考序列的一个连续后缀
       val startIndex = reference.indexOf(afterSeek.first())
       assertTrue(startIndex >= 0, "the first frame after seek ${afterSeek.first()} is not in the reference sequence")
       assertEquals(
@@ -89,26 +75,7 @@ class HttpReadContractTest {
     }
   }
 
-  /**
-   * 向前 seek 落在「网络游标之上、通道存量之内」时，扣减判据应当**保住会话**（不重开）。
-   *
-   * [HttpIO.getResponseBlocking] 第三条分支的判据是「白读的**网络代价**」：
-   * `offset - rsp.offset - rsp.availableForRead` —— **扣掉通道里已有的部分**，因为那部分白读是
-   * 纯内存 memcpy、零网络成本。落地到这里就是一句可观测的话：向前 seek 一小段时
-   * [TestMediaServer.requests] **不涨**。
-   *
-   * 落点为什么取 2s 与 3s 两个：这条素材关键帧每 2s 一个，`seekTo` 只会落关键帧 ——
-   * 实测（3 轮 × 两种发块节奏，6/6 一致）在**顺序解到 1s（25 帧）**之后：
-   *
-   * | seek 目标 | 服务端请求数 |
-   * |---|---|
-   * | 1s / 2s（落在存量内） | 不涨（扣减生效） |
-   * | 3s（越过存量） | 涨 1（真要从网络取） |
-   *
-   * 两句断言分别守住**收益**与**边界**：扣减不能形同虚设（2s 不该重开），也不能无条件放行
-   * （3s 该重开）。判据判错方向只影响性能、不影响正确性，所以这里量的是会话数而非帧内容 ——
-   * 帧内容的契约由上面两个用例守。
-   */
+  /** 向前 seek 落在通道存量之内时保住会话，越过存量才重开。 */
   @Test
   fun forwardSeekWithinBufferedRangeKeepsSessionButFarSeekDoesNot() {
     val media = TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART)
@@ -119,7 +86,7 @@ class HttpReadContractTest {
           val video = format.getStreams().first { it.codecType == AVMediaType.VIDEO }
           val codec = AvCodec(video)
           try {
-            // 顺序解到 1s（25 帧）：让会话铺开、网络游标推到 1s 附近，通道里留下存量。
+            // 顺序解到 1s（25 帧）：网络游标推到 1s 附近，通道里留下存量
             var decoded = 0
             while (decoded < 25) {
               val packet = format.getPacket(listOf(video)) ?: break
@@ -129,7 +96,7 @@ class HttpReadContractTest {
             assertEquals(25, decoded, "sequential reads should decode all 25 frames (this media has 300)")
             assertEquals(1, server.requests, "sequential reads must not reopen the session")
 
-            // 收益：2s 落回 2s 关键帧，要跳的那段已在通道里 ⇒ 零网络成本 ⇒ 不该重开。
+            // 收益：2s 落在存量内 ⇒ 零网络成本 ⇒ 不该重开
             format.seekTo(2_000_000)
             format.getPacket(listOf(video))?.close()
             assertEquals(
@@ -139,7 +106,7 @@ class HttpReadContractTest {
                 "the session -- a new request means the criterion counted the already-buffered bytes as network cost.",
             )
 
-            // 边界：再多跳 1s 越过存量 ⇒ 真要从网络取 ⇒ 必须重开一条落在新落点上的会话。
+            // 边界：再多跳 1s 越过存量 ⇒ 真要从网络取 ⇒ 必须重开一条会话
             format.seekTo(3_000_000)
             format.getPacket(listOf(video))?.close()
             assertEquals(
@@ -158,7 +125,7 @@ class HttpReadContractTest {
     }
   }
 
-  /** 顺序解完整条视频流，返回**解码序**的全部帧 PTS（微秒）——帧身份的正本。 */
+  /** 顺序解完整条视频流，返回解码序的全部帧 PTS（微秒）。 */
   private fun decodeVideoPts(format: AvFormat): List<Long> =
     runBlocking {
       try {

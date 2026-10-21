@@ -78,10 +78,17 @@ if (len == AVERROR_EOF) {
 
 ### 1.5 `AvIO.Handler.open` 不许抛异常
 
-它跑在 native 的 `io_open` 回调里。Kotlin 异常会 pending 在 JNI 上没人接，
-**下一个 JNI 调用直接 abort 整个 JVM**（hs_err 的 Problematic frame 在 `initNative`）。
-「打不开」要返回一个 read/seek 恒失败的 IO，让 `avformat_open_input` 自己以 I/O 错误收场——
-失败清理路径照常走完。
+`open` 跑在 native 的 `io_open` 回调里：Kotlin 异常会 pending 在 JNI 上没人接，下一次 JNI 调用直接
+abort 整个 JVM。所以「打不开」必须返回一个 read/seek 恒失败的 `AvIO`（`FileIO` 对不存在的路径正是
+这个做法），让 `avformat_open_input` 以 I/O 错误干净收场。
+
+### 1.6 每个 pb 只持有一个复用读数组
+
+native 侧每个 `AVIOContext` 分配一次读数组并反复用，`AvIO.read(buf, len)` 里 `len ≤ buf.size`，
+但通常远小于它（`fill_buffer` 要的是「缓冲剩余容量」，MP4 源能被放大到 MB 级，数组只增不减）。
+
+⇒ 实现**必须按 `len` 截断**，不能按 `buf.size` 填满：填满会报出比请求量还多的字节 —— native 只能把
+返回值 clamp 回去，并打一条 `AvIO read over-ran`，等于每次读都变成一条错误日志。
 
 ---
 
@@ -105,6 +112,9 @@ if (len == AVERROR_EOF) {
 
 ⇒ **不要用 `Mutex` 解**：它排队，上一跳转的结果照样先落地再被覆盖，
 且只盖住被包的入口（`seekTo` / `play` / `resume` 有几个入口没数清楚就会漏）。
+
+⇒ 帧上的「正被消费」标记（`AvFrame.inUse`）**只判空、不比对是哪个 PTS**：标记可能是上一轮留下的
+（它的 `updateJob` 还没收尾），比对身份会把这种帧取走、与本轮作业撞同一帧。
 
 ### 2.2 同一轮内相邻两帧必须先等上一帧送显完
 

@@ -13,12 +13,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/**
- * 回环回调服务器的行为：地址形状、按路径区分会话、原样交付 request-target、撤掉即 404。
- *
- * 这些是 :shared 的 `openBrowserAsync` 依赖的地基 —— 那边另有一条用例验「占位符 + 编排」，
- * 但**验不到信道本身**（它只看见返回的那串）。
- */
+/** 回环回调服务器的行为：地址形状、按路径区分会话、原样交付 request-target、撤掉即 404。 */
 class CallbackSessionTest {
   /** 会话地址去掉路径的那截，即本服务器的 origin。 */
   private fun CallbackSession.origin(): String = callbackUrl.substringBeforeLast('/')
@@ -38,7 +33,7 @@ class CallbackSessionTest {
         uri.path.removePrefix("/").matches(Regex("[0-9a-f]{24}")),
         "the path segment should be a hex session id: ${session.callbackUrl}",
       )
-      // 这两条是给换 token 用的：redirect_uri 要逐字回传，多一个 `?code=…` 或尾斜杠就不是它了。
+      // 无 query、无尾斜杠
       assertNull(uri.query, session.callbackUrl)
       assertFalse(session.callbackUrl.endsWith("/"), session.callbackUrl)
     } finally {
@@ -68,7 +63,7 @@ class CallbackSessionTest {
     runBlocking {
       val session = createCallbackSession()
       try {
-        // 浏览器会顺手来取 favicon：不是会话路径，回 404，且不把会话带走。
+        // 非会话路径：回 404，且会话不被带走。
         assertEquals(404, request(session.origin(), "/favicon.ico").status)
 
         val target = session.path() + "?code=4808dfb7&state=probe%2B1&x=%E4%B8%AD"
@@ -117,7 +112,7 @@ class CallbackSessionTest {
     val body: String,
   )
 
-  /** 直接打原始 HTTP：要验的正是「request-target 原样到手」，套 HTTP 客户端会把编码抹平。 */
+  /** 直接打原始 HTTP，request-target 原样写出。 */
   private fun request(
     origin: String,
     target: String,
@@ -129,7 +124,7 @@ class CallbackSessionTest {
         write("GET $target HTTP/1.1\r\nHost: ${uri.host}\r\nConnection: close\r\n\r\n".toByteArray())
         flush()
       }
-      // 服务器写完就关（`Connection: close`），读到 EOF 即整个响应。
+      // 读到 EOF 即整个响应
       val raw = socket.getInputStream().readBytes().decodeToString()
       return Response(
         status = statusCodeOf(raw),

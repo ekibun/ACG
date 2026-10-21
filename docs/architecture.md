@@ -129,13 +129,18 @@ okio `Path`，那个 `Path` 只出现在 `:platform` 内部的建表函数与懒
   **谁都不该关**；只有 `avcodec` 是每个解码器实例独占一条，随实例归还一起关掉
   （`closeDispatcherOnClose`）。
 
+`Pointer` 的两条细约束：`0` 是**合法的空句柄**（借用型的空壳传的就是 `0L`），只有 `null` 表示
+「没交句柄」；覆写 `initPtr` 返回 `0` 视为建句柄失败，基类当场 `check`。`close()` 先标记再投递，
+所以 `releaseImpl` 跑在「已标记、未销毁」那个窗口里 —— 归还**不走**查 `isClosed` 的读门，句柄以
+参数交进去。
+
 基座（`soko.ekibun` 根包 + `soko.ekibun.common`）的契约与实现 —— 只有 `loadLibrary` 两端各写一份，
 其余都收在 `jvmShared`：
 
 | 契约（`commonMain`） | 桌面（`jvmMain`） | Android（`androidMain`） |
 | --- | --- | --- |
 | `expect createThreadDispatcher(name)` | `jvmShared` 的 `ThreadDispatcherImpl` —— **两端共用一份** | 同左（`jvmShared`） |
-| `expect loadLibrary(name)` | 按序找 dll（策略正本在同名 `.jvm.kt`） | `System.loadLibrary` |
+| `expect loadLibrary(name)` | 按序找 dll（见「原生层」的「native 库的加载顺序」） | `System.loadLibrary` |
 | `expect monoTimeMs()` / `openFileHandle(…)` | `jvmShared`：`System.nanoTime()` / `RandomAccessFile` | 同左（`jvmShared`） |
 | `expect openResponse(options)`（`soko.ekibun.common`） | `jvmShared` 的 OkHttp 实现 —— **两端共用一份** | 同左（`jvmShared`） |
 | `expect createCallbackSession()`（`soko.ekibun.browser`） | `jvmShared` 的回环服务器 —— **两端共用一份** | 同左（`jvmShared`） |
@@ -304,8 +309,21 @@ flowchart LR
 
 落位是自动的（所有消费链的任务图都挂着 `buildJni`），**但 Hot Reload 换不了 native 库** ——
 `System.load` 在进程启动时就做完了，改完 `cxx/` 必须整进程重启，否则你以为在测新代码、其实跑的是
-旧 dll。加载顺序与 dll 查找策略的正本在
-[`platform/src/jvmMain/kotlin/soko/ekibun/Binding.jvm.kt`](../platform/src/jvmMain/kotlin/soko/ekibun/Binding.jvm.kt)。
+旧 dll。
+
+#### native 库的加载顺序
+
+`loadLibrary(name)` 在桌面端的正本是
+[`platform/src/jvmMain/kotlin/soko/ekibun/Binding.jvm.kt`](../platform/src/jvmMain/kotlin/soko/ekibun/Binding.jvm.kt)，
+它**能不解包就不解包**：`System.load` 只认文件路径，而解到 `java.io.tmpdir` 的库在 Windows 上删不掉
+（已被映射），会无限堆积。所以 dll 不进 jar，按序找磁盘上的真文件：
+
+1. **打包态**：`compose.application.resources.dir` 下的同名文件（Compose 插件设的属性）；
+2. **开发 / IDE / 测试态**：classpath 条目是目录时资源 URL 就是 `file:`，直接取路径（用 `toURI`
+   还原转义，别拿 `url.path` 拼）；
+3. **兜底**：交给 `System.loadLibrary`，让 OS 去 `java.library.path` 找。
+
+前两步是加法：属性没设、文件不在就继续往下走。文件名按平台补 `lib` 前缀与 `.dll/.so/.dylib` 后缀。
 
 ## 两条纵向能力链
 

@@ -10,13 +10,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/**
- * 插件应答 → 强类型的收窄。
- *
- * 夹具走**真的**桥（JS 求值一份对象字面量再交给 Kotlin），不是手搓 `Map`：`jsToJava`
- * 按 JS 数字的内部标签分派（整数 → `Long`、小数 → `Double`），手搓的 Map 恰好绕开了
- * 最容易被写错的那条。夹具内容照 `GET /v0/users/{u}/collections` 的实测应答剪裁。
- */
+/** 插件应答 → 强类型的收窄：夹具经真桥求值后逐字段比对。 */
 class BgmSourceMappingTest {
   @BeforeTest
   fun initPaths() {
@@ -46,7 +40,7 @@ class BgmSourceMappingTest {
   fun mapsWholeNumberScoreAndProgress() {
     val second = bgmCollectionPageOf(evalFixture(COLLECTIONS_FIXTURE)).items[1]
 
-    // 同一个字段这次是整数（`7` 而不是 `7.5`）—— 桥给的是 Long，读取器必须两个标签都认。
+    // 同一字段这次是整数（`7` 而不是 `7.5`）：读取器必须两个标签都认
     assertEquals(7.0, second.score)
     assertEquals(12, second.eps)
     assertEquals(5, second.epStatus)
@@ -66,7 +60,7 @@ class BgmSourceMappingTest {
 
   @Test
   fun itemsWithoutSubjectAreDropped() {
-    // 没有 subject / 没有 id 的项画不出来，跳过而不是塞一个空壳进列表。
+    // 没有 subject / 没有 id 的项画不出来，跳过
     val page = bgmCollectionPageOf(evalFixture("""{"data":[{"rate":5},{"subject":{"id":0}}],"total":2}"""))
 
     assertTrue(page.items.isEmpty(), "items left behind: ${page.items}")
@@ -84,12 +78,12 @@ class BgmSourceMappingTest {
 
   @Test
   fun enumValuesMatchTheV0Api() {
-    // 整数对错一个就会静默查错一档（比如把「在看」查成「看过」），而接口不会报错。
+    // 整数对错一个就会静默查错一档
     assertEquals(listOf(1, 2, 3, 4, 5), BgmCollectionStatus.entries.map { it.value })
     assertEquals(listOf(1, 2, 3, 4, 6), BgmSubjectType.entries.map { it.value })
   }
 
-  /** 夹具是 JSON（JS 对象字面量的子集），直接当表达式求值 —— 这样过的是真桥。 */
+  /** 夹具是 JSON，直接当表达式求值，过的是真桥。 */
   private fun evalFixture(json: String): Any? = runBlocking { JsEngine.instance.evaluate("($json)") }
 
   @AfterTest
@@ -99,7 +93,7 @@ class BgmSourceMappingTest {
     }
 }
 
-/** 用户夹具：头像是**嵌套对象**（`avatar.large`），取值要多走一层。 */
+/** 用户夹具：头像是嵌套对象（`avatar.large`）。 */
 private const val USER_FIXTURE = """
 {"id":12345,"username":"probe","nickname":"探针","avatar":{"large":"https://lain.bgm.tv/a.jpg"}}
 """

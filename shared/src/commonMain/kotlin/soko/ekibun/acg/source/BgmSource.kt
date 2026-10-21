@@ -3,7 +3,7 @@ package soko.ekibun.acg.source
 import soko.ekibun.acg.engine.JsEngine
 import soko.ekibun.common.settingsStore
 
-/** Bangumi 条目的收藏状态 —— **v0 的整数**枚举，不是老 API 那套 `wish` / `do` 字符串。 */
+/** Bangumi 条目的收藏状态 —— v0 的整数枚举。 */
 enum class BgmCollectionStatus(
   val value: Int,
   val label: String,
@@ -15,7 +15,7 @@ enum class BgmCollectionStatus(
   Dropped(5, "抛弃"),
 }
 
-/** Bangumi 条目类型 —— v0 的整数枚举；没有 5（「人物」那档已废）。 */
+/** Bangumi 条目类型 —— v0 的整数枚举。 */
 enum class BgmSubjectType(
   val value: Int,
   val label: String,
@@ -35,11 +35,7 @@ data class BgmUser(
   val avatarUrl: String?,
 )
 
-/**
- * 一条收藏 —— 只留界面画得出东西的字段。
- *
- * [score] / [rank] 为 0 表示没有评分 / 没有排名，界面上要按「没有」画而不是画个 0。
- */
+/** 一条收藏：界面画得出东西的字段；[score] / [rank] 为 0 表示没有。 */
 data class BgmCollectionItem(
   val subjectId: Long,
   val name: String,
@@ -58,22 +54,13 @@ data class BgmCollectionPage(
   val items: List<BgmCollectionItem>,
 )
 
-/**
- * Bangumi 客户端 —— 薄薄一层，真正的服务商知识在 `files/js/module/bgm.js` 里。
- *
- * 这一层只干两件事：
- * 1. 把插件交回来的 `Map` 收成强类型（JS 那侧拼串没有编译期检查，形状变化只会在运行期暴露）；
- * 2. 收口宿主与插件之间的键空间 —— **凭据由宿主写、登录态由插件写**（见 `docs/design/bgm-plugin.md`），
- *    所以这两个键名在两边各有一份，改一处就得改两处。
- */
+/** Bangumi 客户端：把插件交回的 `Map` 收成强类型，收口宿主与插件共用的设置键名。 */
 class BgmSource {
   companion object {
     const val CLIENT_ID_KEY = "bgm.client_id"
     const val CLIENT_SECRET_KEY = "bgm.client_secret"
 
-    /**
-     * 读凭据。两个键缺任一个都算没配 —— 少了 secret 换不到 token，报错要报在用户填的地方。
-     */
+    /** 读客户端凭据；任一项缺失或为空都返回 null。 */
     suspend fun credentials(): Pair<String, String>? {
       val stored = settingsStore.read()
       val clientId = stored[CLIENT_ID_KEY]?.takeIf(String::isNotEmpty) ?: return null
@@ -95,21 +82,21 @@ class BgmSource {
     }
   }
 
-  /** 登录态还在不在（`bgm.session` 有没有存下 token）。不校验 token 还能不能用。 */
+  /** 登录态还在不在（`bgm.session` 里有 token 即为真）。 */
   suspend fun isLoggedIn(): Boolean = call("session") != null
 
-  /** 走一遍授权码流程，并顺手问一次 `me` 把用户信息一并交回去。 */
+  /** 走一遍授权码流程，返回当前用户。 */
   suspend fun login(): BgmUser {
     call("login")
     return me()
   }
 
-  /** 退出登录：只清登录态，凭据留着。 */
+  /** 退出登录：只清登录态。 */
   suspend fun logout() {
     call("logout")
   }
 
-  /** 当前登录用户。没登录时插件会抛，异常一路到这里。 */
+  /** 当前登录用户；插件抛出的异常原样上抛。 */
   suspend fun me(): BgmUser = bgmUserOf(call("me"))
 
   /** 某个用户的收藏一页。[offset] 从 0 起。 */
@@ -128,12 +115,7 @@ class BgmSource {
   ): Any? = JsEngine.instance.callPlugin("bgm", function, *args)
 }
 
-/**
- * `/v0/me` 的应答 → [BgmUser]。
- *
- * 字段缺了或换了类型一律当**没有**，不抛：接口加字段是常事，为它把整页打不开不划算。
- * 只有「整个应答根本不是个对象」才算真出错。
- */
+/** `/v0/me` 的应答 → [BgmUser]；字段缺失或类型不符时取默认值。 */
 internal fun bgmUserOf(raw: Any?): BgmUser {
   val map = raw as? Map<*, *> ?: throw IllegalStateException("bangumi /v0/me did not return a user object")
   val avatar = (map["avatar"] as? Map<*, *>)?.get("large")
@@ -145,12 +127,7 @@ internal fun bgmUserOf(raw: Any?): BgmUser {
   )
 }
 
-/**
- * `/v0/users/{u}/collections` 的应答 → [BgmCollectionPage]。
- *
- * 每项的形状是 `{subject: {…}, subject_id, type, rate, ep_status, …}` —— 条目的名字、封面、
- * 评分挂在 `subject` 里，而**用户自己的进度**（`ep_status`）在**外层**，两边都要读。
- */
+/** `/v0/users/{u}/collections` 的应答 → [BgmCollectionPage]。 */
 internal fun bgmCollectionPageOf(raw: Any?): BgmCollectionPage {
   val map = raw as? Map<*, *> ?: throw IllegalStateException("bangumi collections did not return an object")
   val items = (map["data"] as? List<*>).orEmpty().mapNotNull { bgmCollectionItemOf(it) }
@@ -166,7 +143,7 @@ private fun bgmCollectionItemOf(raw: Any?): BgmCollectionItem? {
     subjectId = subjectId,
     name = subject["name"].asStringOrNull().orEmpty(),
     nameCn = subject["name_cn"].asStringOrNull()?.takeIf(String::isNotEmpty),
-    // 封面用 grid（100px 那档）：列表里就是小图，取 large 白等一趟大文件。
+    // 封面取 grid 档（约 100px）
     coverUrl = (subject["images"] as? Map<*, *>)?.get("grid").asStringOrNull(),
     score = subject["score"].asDoubleOrZero(),
     rank = subject["rank"].asLongOrZero().toInt(),
@@ -175,12 +152,6 @@ private fun bgmCollectionItemOf(raw: Any?): BgmCollectionItem? {
     date = subject["date"].asStringOrNull()?.takeIf(String::isNotEmpty),
   )
 }
-
-/*
- * 桥把 JS 数字按**内部标签**分派（`JS_TAG_INT` → Long、`JS_TAG_FLOAT64` → Double），
- * 而 `JSON.parse` 对 `7` 与 `7.0` 给出的标签不同 —— 同一个字段两次请求可能落到不同分支，
- * 所以读取器必须两个都认。类型不对当 0 / 没有，理由见 bgmUserOf 的 KDoc。
- */
 
 private fun Any?.asStringOrNull(): String? = this as? String
 

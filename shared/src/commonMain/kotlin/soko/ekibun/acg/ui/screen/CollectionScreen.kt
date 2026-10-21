@@ -44,21 +44,12 @@ import soko.ekibun.acg.source.BgmUser
 import soko.ekibun.acg.ui.comp.RemoteImage
 import kotlin.math.round
 
-/**
- * Bangumi 收藏页：没登录画凭据输入 + 登录，登录了画「条目类型页签 + 收藏状态筛选 + 列表」。
- *
- * 版面照 `.workbuddy/ref/Bangumi` 的 `fragment_collection.xml`：它也是顶部一行状态筛选、
- * 下面一排列出条目类型，再下面是列表；区别是那边用 `ViewPager` 每种类型一个 `Fragment`
- * （各自持有一份列表），这里用一份 [CollectionState] + 页签切换，翻页逻辑只写一遍。
- *
- * 收藏状态与条目类型都是**必选**的（接口按这两个维度分页），所以没有「全部」这一档 ——
- * 想看全部得自己把五档串起来，而那要跨五个分页游标，不是「把参数留空」能表达的。
- */
+/** Bangumi 收藏页：未登录画凭据输入，已登录画条目类型页签、状态筛选与列表。 */
 @Composable
 fun CollectionScreen(modifier: Modifier = Modifier) {
   val state = remember { CollectionState() }
 
-  // 首帧问一次登录态。`Unit` 做 key：换条目类型/收藏状态走 state 内部，不复建本页。
+  // 首帧加载一次：登录态与第一页
   LaunchedEffect(Unit) { state.load() }
 
   Surface(modifier = modifier.fillMaxSize()) {
@@ -71,20 +62,14 @@ fun CollectionScreen(modifier: Modifier = Modifier) {
   }
 }
 
-/**
- * 未登录：凭据输入与登录入口。
- *
- * 凭据是**用户自备**的（OAuth 应用得自己建），所以这里要把「去哪建、回调地址怎么填」
- * 说清楚 —— 猜错回调地址的症状是授权成功后浏览器停在错误页，跟本页毫无关联，很难倒推。
- */
+/** 未登录：凭据输入与登录入口。 */
 @Composable
 private fun LoginPane(
   state: CollectionState,
   modifier: Modifier = Modifier,
 ) {
   val scope = rememberCoroutineScope()
-  // 回填已存的凭据。key 用 state 里那份：读盘是异步的，首帧拿到的是空串，
-  // 真正的值到货时这里要跟着换一次（那时用户还没开始打字，不会打断输入）。
+  // 回填已存的凭据；值到货时跟着换一次
   var clientId by remember(state.storedClientId) { mutableStateOf(state.storedClientId) }
   var clientSecret by remember(state.storedClientSecret) { mutableStateOf(state.storedClientSecret) }
 
@@ -142,7 +127,7 @@ private fun CollectionPane(
   Column(modifier = modifier.fillMaxSize()) {
     UserBar(user, onLogout = { scope.launch { state.logout() } })
 
-    // 条目类型照参考实现固定成五档，均分宽度就够，不用可滚动的。
+    // 条目类型页签
     SecondaryTabRow(selectedTabIndex = BgmSubjectType.entries.indexOf(state.subjectType)) {
       BgmSubjectType.entries.forEach { type ->
         Tab(
@@ -153,9 +138,7 @@ private fun CollectionPane(
       }
     }
 
-    // 收藏状态照参考实现是弹出菜单；这里摊成一排 chip，一眼看得见当前选的是哪档。
-    // 加载中**不**把 chip 置灰：连点换筛选由 [CollectionState] 的 generation 兜住，
-    // 而置灰会让每次换筛选时整排闪一下、条目类型的页签又没一起灰，平白多一处不一致。
+    // 收藏状态筛选
     Row(
       modifier =
         Modifier
@@ -259,7 +242,7 @@ private fun CollectionRow(
     modifier = modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
     horizontalArrangement = Arrangement.spacedBy(12.dp),
   ) {
-    // 固定 56×78（约 1:1.4）：封面比例本来就杂，不固定的话每行高度都不一样。
+    // 固定 56×78 的封面
     RemoteImage(
       url = item.coverUrl,
       contentDescription = null,
@@ -270,7 +253,7 @@ private fun CollectionRow(
       verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
       Text(
-        // 中文名优先：这是中文收藏页，原文名做副标题。
+        // 中文名优先，原文名做副标题
         text = item.nameCn ?: item.name,
         style = MaterialTheme.typography.bodyLarge,
         maxLines = 2,
@@ -320,10 +303,7 @@ private fun itemMeta(item: BgmCollectionItem): String =
     },
   ).joinToString(" · ")
 
-/**
- * 一位小数。**不能用 `"%.1f".format()`** —— 那是 JVM 的，commonMain 里没有；
- * 手算还能顺手避开 `3.0` 被印成 `3` 的情形。
- */
+/** 格式化成一位小数。 */
 private fun formatScore(score: Double): String {
   val tenths = round(score * 10).toInt()
   return "${tenths / 10}.${tenths % 10}"

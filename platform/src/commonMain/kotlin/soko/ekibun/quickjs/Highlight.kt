@@ -134,9 +134,7 @@ object Highlight {
     }
   }
 
-  /**
-   * 一段高亮区间：[token] 类别，对应 `input[start until end]`。
-   */
+  /** 一段高亮区间：[token] 类别，对应 `input[start until end]`。 */
   data class Span(
     val token: Token,
     val start: Int,
@@ -144,9 +142,8 @@ object Highlight {
   )
 
   /**
-   * 把 `input` 切成高亮区间 —— 纯数据出口，颜色映射交给 UI 侧（`soko.ekibun.acg.ui.comp.highlight`）。
-   * 两个 `external fun` 的 JNI 符号挂在 `soko.ekibun.quickjs.Highlight` 这个 FQN 上，
-   * 别改包名 / 类名（改了 `quickjs.dll` 不重编即失效，见 cxx/AGENTS.md 的 JNI 一节）。
+   * 把 `input` 切成高亮区间；颜色映射交给 UI 侧。
+   * 两个 `external fun` 的 JNI 符号挂在本类 FQN 上，别改包名 / 类名。
    */
   fun tokenize(input: String): List<Span> {
     val spans = mutableListOf<Span>()

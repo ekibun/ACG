@@ -8,12 +8,7 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
-/**
- * `FileIO` 的 read/seek 语义回归。
- *
- * 素材是现造的临时文件（内容 `i % 251`，方便按偏移反查），**不用 `.workbuddy/` 里的
- * 真 mp4** —— 那个目录整体 gitignore，测试依赖它换台机器就红。
- */
+/** `FileIO` 的 read / seek 语义，素材是现造的临时文件（内容 `i % 251`）。 */
 class FileIOTest {
   private companion object {
     const val FILE_SIZE = 1000
@@ -43,8 +38,7 @@ class FileIOTest {
 
   @Test
   fun avseekSizeReturnsFileLength() {
-    // 核心契约：AVSEEK_SIZE 返回**总长**；返回 0 会被 ffmpeg 当成"长度为零的流"，
-    // 之后所有 seek 都判越界。
+    // AVSEEK_SIZE 返回总长
     val io = fileIO()
     assertEquals(FILE_SIZE, io.seek(0, AvFormat.AVSEEK_SIZE))
     io.close()
@@ -63,7 +57,7 @@ class FileIOTest {
     val io = fileIO()
     io.seek(100, AvIO.SEEK_SET)
     assertEquals(150, io.seek(50, AvIO.SEEK_CUR))
-    // demuxer 的"回退若干字节"试探：SEEK_CUR + 负偏移
+    // 回退若干字节：SEEK_CUR + 负偏移
     assertEquals(50, io.seek(-100, AvIO.SEEK_CUR))
     assertEquals(listOf(50 % 251, 51 % 251).map { it.toByte() }, io.readBytes(2))
     io.close()
@@ -96,9 +90,7 @@ class FileIOTest {
 
   @Test
   fun readAtEofReturnsAvErrorEof() {
-    // `RandomAccessFile.read` 的 -1 由 FileIO 翻成 **AVERROR_EOF**：aviobuf 只把负数当终止，
-    // 返回 0 会被当「读空」，wav/pcm 这类 demuxer 会在文件尾无限空转（实测 avformat 线程 100% CPU）。
-    // 「打不开」的 -1 语义与此不同，见 missingFileFailsInsteadOfThrowing。
+    // 文件尾返回 AVERROR_EOF
     val io = fileIO()
     io.seek(FILE_SIZE, AvIO.SEEK_SET)
     assertEquals(AvFormat.AVERROR_EOF, io.read(ByteArray(16), 16))
@@ -133,8 +125,7 @@ class FileIOTest {
 
   @Test
   fun missingFileFailsInsteadOfThrowing() {
-    // 打不开不是异常：native 的 io_open 回调里抛异常会 pending 在 JNI 上，
-    // 所以契约是返回 -1，由 avformat_open_input 去报错。
+    // 打不开返回 -1，不抛异常
     val io = FileIO("no-such-dir/no-such-file.mp4")
     assertEquals(-1, io.read(ByteArray(16), 16))
     assertEquals(-1, io.seek(0, AvIO.SEEK_SET))
@@ -144,7 +135,7 @@ class FileIOTest {
 
   @Test
   fun handlerAcceptsFileUrl() {
-    // avformat 会把调用方给的 url 原样送进 io_open，两种写法都得认。
+    // url 由 avformat 原样送进 io_open，两种写法都得认
     val path = Files.createTempFile("fileio-test", ".bin").also { temps.add(it) }
     Files.write(path, content())
     val url = "file:///" + path.toString().replace('\\', '/')

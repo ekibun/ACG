@@ -16,32 +16,10 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
- * [Pointer] 的契约。分割线是**句柄怎么到手**，三条路各有用例钉住：
- *
- * 1. **构造参数里交**（`Pointer(nativePtr)`）—— 绝大多数（`AvFrame` / `AvPacket` / `JSRef`…）：
- *    一个成员都不用覆写，句柄当场就在手上；
- * 2. **覆写 [Pointer.initPtr] 就地算** —— 要拿 `this` 去 native 换的那类（`QuickJS`）：
- *    第一个实参留 `null`，覆写体里现算，基类保证「首次读句柄」时才调它；
- * 3. **借用别人的**（`AvStream`）—— **不继承 [Pointer]**：借来的东西不该有 `close()`，
- *    于是 `use {}` / `invokeOnCompletion` 这类自动调用点也关不到它。
- *
- * 读句柄有三个入口：[Pointer.withPtr] / [Pointer.withPtrSync] **先查**
- * [Pointer.isClosed]（标记即抛）；[Pointer.ptr] 裸读不设门 —— 归还动作恰好跑在
- * 「已标记、未销毁」那个窗口里，直读它：
- * - [Pointer.ptr] —— 公开的裸读：不判断也不投递，给「已经确定在归属线程上」的场合
- *   （含归还窗口）；
- * - [Pointer.withPtr] —— 挂起：把「在归属线程上」与「拿到句柄」合成一个动作；
- * - [Pointer.withPtrSync] —— 同步版，给 JNI 回调链这种没有协程上下文的入口。
- *
- * 归还由基类收口（投递、只跑一次、句柄**以参数交进来**），子类只回答 [Pointer.releaseImpl]。
+ * [Pointer] 的句柄取得方式、读取门与归还语义。见 `docs/architecture.md` 的「基座」一节。
  */
 class PointerTest {
-  /**
-   * 探针：句柄在**构造参数**里交给基类（最常见的一条路），并把归还动作记下来 ——
-   * 记的是**交到手上的句柄**，用来钉「归还拿到的是参数，不是自己去读」。
-   *
-   * [dispatcher] 传了就声明归属 dispatcher；不传就表示不承诺线程归属。
-   */
+  /** 探针：句柄在构造参数里交给基类，归还收到的句柄也记下来。 */
   private class Probe(
     nativePtr: Long,
     dispatcher: ThreadDispatcher? = null,
@@ -52,14 +30,7 @@ class PointerTest {
     }
   }
 
-  /**
-   * 可数派发次数的归属 dispatcher —— **继承 [ThreadDispatcher]**（而不是自己实现一个
-   * `CoroutineDispatcher` 再包一层）正是因为归属线程由它记：[Pointer.withPtrSync] 判断
-   * 「要不要投递」问的就是 `isOnCurrentThread`，包一层就答不出来。
-   *
-   * 注意它**自己传执行器**（而不是走 [createThreadDispatcher]）：这样这条线程的名字与
-   * 底座那套（`Thread(runnable, name)`）完全一致，用例断言「归属线程是谁」时才对得上。
-   */
+  /** 可数派发次数的归属 dispatcher。 */
   private class CountingDispatcher :
     ThreadDispatcherImpl(
       "counting-owner",
@@ -77,11 +48,7 @@ class PointerTest {
     }
   }
 
-  /**
-   * 起一条归属 dispatcher（可数派发）跑 [block]，跑完 [ThreadDispatcher.close] 掉它 ——
-   * 每条用例各起一条、各关一条，不攒线程（[CountingDispatcher.dispatches] 是实例级计数，
-   * 也不该跨用例共享）。
-   */
+  /** 起一条可数派发的归属 dispatcher 跑 [block]，跑完关掉。 */
   private fun withCountingOwner(block: (CountingDispatcher) -> Unit) {
     val counting = CountingDispatcher()
     try {
@@ -91,33 +58,19 @@ class PointerTest {
     }
   }
 
-  /**
-   * 归属线程还在不在、退出没有 —— **只在 jvmTest 里要**。
-   *
-   * 「线程还在不在」是平台特有的（Kotlin/Native 的 worker 没有「活着没」这个概念），
-   * 所以它**不进** `ThreadDispatcher` 的抽象面：生产代码没有任何调用点要它，
-   * 而「`close()` 真的把线程收掉了」这条性质**必须在测试期可验**。于是测试自己强转。
-   *
-   * 底下那条线程由 `ThreadDispatcherImpl` 在构造期快照成 [Thread]，强转安全。
-   */
+  /** 归属线程。 */
   private fun ThreadDispatcher.ownerThread(): Thread = (this as ThreadDispatcherImpl).thread
 
   private fun ThreadDispatcher.isOwnerAlive(): Boolean = ownerThread().isAlive
 
-  /** 等归属线程退出，上界 [timeoutMs] 毫秒；返回是否在期限内退出了。 */
+  /** 等归属线程退出，上界 [timeoutMs] 毫秒；返回是否在期限内退出。 */
   private fun ThreadDispatcher.joinOwner(timeoutMs: Long): Boolean =
     run {
       ownerThread().join(timeoutMs)
       !ownerThread().isAlive
     }
 
-  /**
-   * [ThreadDispatcher.close] 真的把那条线程收掉 —— 它转发的就是底层执行器的关闭：
-   * **不等待**在途任务，空闲 worker 被打断、线程随后退出（`join` 拿不到就是没关掉）。
-   *
-   * 断言的是**线程真的没了**，不是旗标位 —— `isClosed` 只说明「本类决定不再接活」，
-   * 底层若没关线程（换实现、换平台）它照样为 true 而线程还在。这条钉的就是那半边。
-   */
+  /** [ThreadDispatcher.close] 真的把归属线程收掉。 */
   @Test
   fun closeShutsDownOwnerThread() {
     val owner = ThreadDispatcher("closing-owner")
@@ -127,16 +80,12 @@ class PointerTest {
     assertFalse(owner.isOwnerAlive(), "the owner thread should exit after close()")
   }
 
-  /**
-   * 覆写 [Pointer.initPtr] 提供句柄的子类 —— 「句柄要拿 `this` 去 native 换」那条路的
-   * 形态（`QuickJS` 就是它）：基类那边**不传**第一个实参（默认 `null`），覆写体里直接读
-   * 构造参数算出句柄 —— `QuickJS` 的 `initContext(this, stackSize, …)` 就是这个形状。
-   */
+  /** 覆写 [Pointer.initPtr] 提供句柄的子类。 */
   private class ComputedHandle(
     private val stackSize: Long,
     dispatcher: ThreadDispatcher? = null,
   ) : Pointer(dispatcher = dispatcher) {
-    /** 覆写体跑在哪条线程上、跑了几次 —— 钉「求值被搬到归属线程」「只算一次」用。 */
+    /** 覆写体跑在哪条线程上、跑了几次。 */
     @Volatile var initPtrThread: Thread? = null
       private set
 
@@ -157,17 +106,10 @@ class PointerTest {
     }
   }
 
-  /** 借用型的指针：`AVStream*` 归 `AvFormat` 的上下文所有，本类不拥有它。 */
+  /** 借用型的指针：`AVStream*` 不归本类所有。 */
   private fun borrowedStream() = AvStream(0L, 0, 0, 0, 0, 0, 0, 1, 1, 0L, emptyMap())
 
-  /**
-   * 关掉之后再投递 —— **当场抛 [IllegalStateException]**，不是 kotlinx 的兜底。
-   *
-   * [ThreadDispatcher] 在 `dispatch` 上自己拦了一手，理由是 kotlinx 的兜底会把「归属线程
-   * 已经没了」这件事**藏起来**：裸 `dispatch` 静默改投 `Dispatchers.IO`（native 调用就跑在
-   * IO 线程池上了），`withContext` 那条抛的是 `CancellationException` —— 看着像协程被取消，
-   * 其实是线程没了。三种投递形态各钉一遍。
-   */
+  /** 关掉之后再投递，三种形态都当场抛 [IllegalStateException]。 */
   @Test
   fun closedDispatcherRejectsFreshDispatch() {
     val owner = ThreadDispatcher("rejecting-owner")
@@ -177,25 +119,18 @@ class PointerTest {
     owner.close()
     assertTrue(owner.isClosed, "close() must mark closed first")
 
-    // 1) 挂起门：走的是 withContext(d)
+    // 1) 挂起门
     val viaSuspend = assertFailsWith<IllegalStateException> { runBlocking { probe.withPtr { it } } }
     assertTrue(viaSuspend.message!!.contains(owner.threadName), viaSuspend.message)
 
-    // 2) 同步门：走的是 runBlocking(d)，JNI 回调链那条
+    // 2) 同步门
     assertFailsWith<IllegalStateException> { probe.withPtrSync { it } }
 
-    // 3) 裸 dispatch —— 原本这条最阴：块被静默改投到 Dispatchers.IO 上照跑不误
+    // 3) 裸 dispatch
     assertFailsWith<IllegalStateException> { owner.dispatch(EmptyCoroutineContext, Runnable { }) }
   }
 
-  /**
-   * **归还被拒也当场吵**：共享 dispatcher 被（误）关掉之后，本对象再 `close()` —— 归还
-   * 投递在 `dispatch` 上被拦，异常同步冒到 [Pointer.close] 的调用方。
-   *
-   * 硬碰硬是有意留下的：不加拦截这条路**静默得彻底**（`submit {}` 起的 async 直接被取消，
-   * 归还块根本不跑），native 资源就这么漏掉，而调用方拿到的是一个「成功」的 `close()`。
-   * 现在至少炸在肇事现场附近。
-   */
+  /** 共享 dispatcher 已关时归还被拒：抛 [IllegalStateException]，归还块一次都没跑。 */
   @Test
   fun releaseIsRejectedLoudlyWhenDispatcherAlreadyClosed() {
     val shared = ThreadDispatcher("already-closed-owner")
@@ -206,18 +141,12 @@ class PointerTest {
           released++
         }
       }
-    shared.close() // someone else closes the shared one
+    shared.close() // 共享的 dispatcher 被别处关掉
     assertFailsWith<IllegalStateException> { probe.close() }
     assertEquals(0, released, "release block never ran; a missed release must be loud")
   }
 
-  /**
-   * 「自己建的 dispatcher 自己关」：在构造参数里声明独占，归还落地之后那条线程就收掉。
-   *
-   * 关闭挂在 [Pointer.closeDeferred] 的完成上而不是 [Pointer.close] 里 —— `await()` 回来时
-   * 线程已经在退出路上了（[ThreadDispatcher.close] 是 `shutdown()`，不等待在途任务，所以
-   * 这里仍 `join` 一下再断言）。**这一条正是 `AvCodec` 的形态**。
-   */
+  /** `closeDispatcherOnClose` 声明的独占线程，在归还落地之后被收掉。 */
   @Test
   fun ownedDispatcherIsClosedAfterReleaseLands() {
     val owner = ThreadDispatcher("owned-owner")
@@ -231,14 +160,7 @@ class PointerTest {
     assertFalse(owner.isOwnerAlive(), "with closeDispatcherOnClose the thread must be collected once release lands")
   }
 
-  /**
-   * 反过来的对照：**没**声明独占，跑器照旧活着。
-   *
-   * 共享实例（`QuickJS.sharedDispatcher`、`AvFormat` 的伴生对象）全靠这条默认值活下来 ——
-   * 只要有一个关掉的对象顺手把它关了，全进程往后的投递都会被 `ThreadDispatcher.dispatch`
-   * 拦下抛 `IllegalStateException`（拦不住的话见 [ThreadDispatcher.dispatch] 与 [ThreadDispatcher.close]
-   * 的 KDoc：静默改投 IO / 伪装成 `CancellationException`）。
-   */
+  /** 对照：没声明独占，归还后共享 dispatcher 的线程照旧存活。 */
   @Test
   fun sharedDispatcherOutlivesCloseWithoutOwnershipFlag() {
     val shared = ThreadDispatcher("shared-owner")
@@ -257,13 +179,7 @@ class PointerTest {
     }
   }
 
-  /**
-   * 句柄**从没建过**也得收线程：`AvCodec` 那条线程是构造期起的（[ThreadDispatcher] 的构造里
-   * 就投递过一次），所以「一次没用就 `close()`」同样欠着一条线程。
-   *
-   * 这条走的是 [Pointer.closeDeferred] 的短路分支：它返回**已完成**的 Deferred，挂在它上面的
-   * 关闭动作当场执行 —— 连「发完不管」的 [Pointer.close]（从来不 `await`）也能收干净。
-   */
+  /** 句柄从未建过，独占线程同样被收掉。 */
   @Test
   fun ownedDispatcherIsClosedEvenWhenHandleWasNeverBuilt() {
     val owner = ThreadDispatcher("never-built-owner")
@@ -278,10 +194,7 @@ class PointerTest {
     assertFalse(owner.isOwnerAlive(), "an uninitialized handle still owes a thread shutdown")
   }
 
-  /**
-   * 「不拥有」写在**类型**上：[AvStream] 不是 [AutoCloseable]，于是根本没有 `close()`
-   * 可调 —— 借用别人的指针却能被 `use {}` 自动关掉，是比「关的时候才抛异常」更早的拦截。
-   */
+  /** 借用型不在 [AutoCloseable] 家族里：[AvStream] 没有 `close()`。 */
   @Test
   fun borrowedPointerDoesNotJoinPointerFamily() {
     assertFalse(
@@ -290,24 +203,18 @@ class PointerTest {
     )
   }
 
-  /**
-   * [Pointer.ptr]：**不投递**的裸读门，但带同线程断言。
-   *
-   * 与 [Pointer.withPtr] 分工互补 —— 要挑线程就走挂起门，已经确定在归属线程上（`withPtr`
-   * 块里、native 回调链里、标记窗口里的归还）就直接读 `ptr`，别为了读一次句柄白投递一次。
-   * 跑错线程的裸读是 use-after-free 类错误，断言（测试任务的 `-ea` 下）让它当场炸。
-   */
+  /** [Pointer.ptr] 裸读：跨线程断言失败且零投递；归属线程上就地返回。 */
   @Test
   fun nakedReadNeverDispatches() =
     withCountingOwner { counting ->
       val probe = runBlocking(counting) { Probe(0x1234L, counting) }
 
-      // 从别的线程裸读：断言当场炸（零投递 —— 拦截发生在读之前，不是靠投递去拦）
+      // 从别的线程裸读：断言失败，且零投递
       val base = counting.dispatches
       assertFailsWith<AssertionError> { probe.ptr }
       assertEquals(0, counting.dispatches - base, "the assertion guard itself must not dispatch")
 
-      // 已经在归属 dispatcher 上：裸读就地返回、零投递
+      // 已经在归属 dispatcher 上：就地返回、零投递
       val (value, extra) =
         runBlocking {
           withContext(counting) {
@@ -319,12 +226,13 @@ class PointerTest {
       assertEquals(0, extra)
     }
 
+  /** 已在归属 dispatcher 上：就地执行，不重复投递。 */
   @Test
   fun withPtrDoesNotRedispatchOnOwner() =
     withCountingOwner { counting ->
       val probe = runBlocking(counting) { Probe(0x1234L, counting) }
 
-      // 已经在归属 dispatcher 上：就地执行，不再往队列里投一次
+      // 已经在归属 dispatcher 上：就地执行，不重复投递
       val (handle, extra) =
         runBlocking {
           withContext(counting) {
@@ -337,6 +245,7 @@ class PointerTest {
       assertEquals(0, extra)
     }
 
+  /** 没有 dispatcher：两扇门都不判断线程、就地读。 */
   @Test
   fun withPtrWithoutDispatcherRunsInPlace() {
     val probe = Probe(0x4321L)
@@ -348,18 +257,7 @@ class PointerTest {
     assertEquals(0x4321L, probe.withPtrSync { it })
   }
 
-  /**
-   * 对照基准：`withContext` 对**同一个** dispatcher 不会重新派发。
-   *
-   * kotlinx 在 `withContext` 里比的是**上下文里那个 interceptor 是不是同一个**（不是
-   * `isDispatchNeeded`），相同就走 undispatched 快路径。它支撑「用 [Pointer.withPtr]
-   * 顶掉手写的 `withContext(dispatcher)` 是行为保持的」—— 两者在「已在归属 dispatcher 上」
-   * 时的派发行为一致。若哪天 kotlinx 改了这条，本用例会先红，好过在 native 调用点上演成
-   * 时序问题。
-   *
-   * [ThreadDispatcher.isDispatchNeeded]（「已在归属线程上就别派发」）管的是**另一条**：
-   * `submit {}` / `CoroutineScope(d).async` 这类直接投递不看上下文，只看它。
-   */
+  /** 基准：`withContext` 对同一个 dispatcher 不重复派发。 */
   @Test
   fun withContextOnSameDispatcherDoesNotRedispatch() =
     withCountingOwner { counting ->
@@ -374,14 +272,7 @@ class PointerTest {
       assertEquals(0, extra)
     }
 
-  /**
-   * [Pointer.withPtrSync]：同步版 [Pointer.withPtr]，判据是 `isOnCurrentThread`
-   * （[Pointer.withPtr] 现在也用同一个判据 —— 见类文档「归属 dispatcher + 归属线程」）。
-   *
-   * 三句都要成立：从别的线程调要**恰好投递一次**、句柄当参数交到手里、并在归属线程上跑；
-   * 已经在归属线程上就**就地执行**。挂起门 [Pointer.withPtr] 的那三句由它一并覆盖 ——
-   * `withPtr` 在归属线程上的短路分支另有 [withPtrDoesNotRedispatchOnOwner] 盯着。
-   */
+  /** [Pointer.withPtrSync]：跨线程恰好投递一次并跑在归属线程；已在归属线程则就地执行。 */
   @Test
   fun withPtrSyncDispatchesToOwnerThread() =
     withCountingOwner { counting ->
@@ -404,6 +295,7 @@ class PointerTest {
       assertEquals(0, extra)
     }
 
+  /** 归还落在归属线程上，且只跑一次。 */
   @Test
   fun releaseRunsOnOwnerThreadAndOnlyOnce() =
     withCountingOwner { counting ->
@@ -417,7 +309,7 @@ class PointerTest {
           }
         }
 
-      // close() 只投递；等它落地要拿 closeDeferred() 去 await
+      // close() 只投递，等落地要拿 closeDeferred() 去 await
       runBlocking { probe.closeDeferred().join() }
       assertSame(releasedOn, counting.thread, "release must land on the owner thread")
       assertTrue(probe.isClosed)
@@ -426,11 +318,7 @@ class PointerTest {
       assertEquals(1, releaseCount)
     }
 
-  /**
-   * 归还动作拿到的句柄是**参数**，而且此刻 [Pointer.isClosed] 已经置位 —— 归还**不走**
-   * 查 [Pointer.isClosed] 的两扇门（直读 [Pointer.ptr]），否则归还自己就被挡在门外，
-   * 「`close()` 返回成功、其实什么都没释放」。
-   */
+  /** 归还拿到的句柄是构造参数，且此刻 [Pointer.isClosed] 已置位。 */
   @Test
   fun releaseImplReceivesHandleAfterCloseIsMarked() {
     var seen = -1L
@@ -440,7 +328,7 @@ class PointerTest {
         override suspend fun releaseImpl(ptr: Long) {
           markedWhenRead = isClosed
           seen = ptr
-          // 归还不经过查 isClosed 的两扇门：直读 ptr（此刻两扇门都会抛）
+          // 归还不经查 isClosed 的两扇门：直读 ptr
           assertEquals(0xBEEFL, ptr)
         }
       }
@@ -451,13 +339,7 @@ class PointerTest {
     assertEquals(0xBEEFL, seen, "release must receive the handle given at construction")
   }
 
-  /**
-   * 「要等线程」那类子类归还走**正常路径**：基类把归还投递到归属 dispatcher 上，
-   * 所以 `close()` 不需要抛异常、也不需要另立一个异步入口。
-   *
-   * 这里顺带钉住：句柄从没兑现过时，`close()` 不会为了「还」去现建一个 native 上下文
-   * —— [AvCodec] 的 `initPtr()` 就是一次真 native 调用，真建出来反而多一次白建白毁。
-   */
+  /** 线程绑定的子类归还走基类投递路径；句柄没兑现过则不现建，但仍先标记关闭。 */
   @Test
   fun threadBoundSubclassClosesThroughBaseDispatcher() {
     val codec = AvCodec(borrowedStream())
@@ -465,11 +347,7 @@ class PointerTest {
     assertTrue(codec.isClosed, "close must mark first, even when the handle was never built")
   }
 
-  /**
-   * 句柄**没兑现过**的 [Pointer.initPtr] 型子类：不建、不还，但**必须**先标记 ——
-   * 否则关闭之后的新操作会白白建出一个没人释放的 native 上下文（`AvSurfaceContext.postFrame`
-   * 就是靠 [Pointer.isClosed] 拦住这一手）。
-   */
+  /** 句柄没兑现过：不建、不还，但先标记关闭。 */
   @Test
   fun closeSkipsReleaseWhenHandleWasNeverBuilt() {
     val probe = ComputedHandle(256L)
@@ -479,33 +357,19 @@ class PointerTest {
     assertEquals(0, probe.releaseCalls)
   }
 
-  /**
-   * [Pointer.initPtr] 的**调用时机**：读句柄时才调，不是基类构造期调。
-   *
-   * 这一条钉的是一个静默错值：基类构造期子类字段还没有值（实测 `putfield` 排在
-   * `invokespecial <init>` 之后），那时覆写体读到的是 `0`，而且**编译器不报错**。
-   * 若哪天有人把那个调用挪回构造期，本用例会先红。
-   */
+  /** [Pointer.initPtr] 在读句柄时才调，不是在基类构造期。 */
   @Test
   fun initPtrSeesConstructionState() {
     assertEquals(2560L, runBlocking { ComputedHandle(256L).withPtr { it } })
   }
 
-  /**
-   * [Pointer.initPtr] 的**求值线程与次数**：首次读句柄那一下被搬到归属线程上，且只算一次，
-   * 所以覆写体（`QuickJS` 里就是 `initContext`，含 `JS_NewRuntime` / `JS_SetMaxStackSize` 记下的
-   * `stack_top` 基准）一定跑在归属线程上、且不会多建一个 runtime —— 挂起门与同步门两条路都钉。
-   *
-   * 线程归属**不是 `by lazy` 给的**：惰性只管「首次读才求值、只算一次」，归属是另外几条凑出来的
-   * —— [Pointer.withPtr] 把 `ptr` 读在 `withContext(d) { … }` 的**块内**、
-   * [Pointer.withPtrSync] 读在 `runBlocking(d) { … }` 的**块内**。改动任一条，本用例先红。
-   */
+  /** 求值线程与次数：首次读句柄被搬到归属线程，且只算一次；两扇门同理。 */
   @Test
   fun initPtrRunsOnOwnerThread() =
     withCountingOwner { counting ->
       val owner = counting.thread
 
-      // 挂起门：从**别的**线程（测试线程）首次读，求值必须被搬到归属线程上
+      // 挂起门：从别的线程首次读，求值被搬到归属线程
       val viaSuspend = runBlocking(counting) { ComputedHandle(256L, counting) }
       assertEquals(2560L, runBlocking { viaSuspend.withPtr { it } })
       assertTrue(
@@ -513,12 +377,11 @@ class PointerTest {
         "this case only makes sense when the owner thread differs from the caller",
       )
       assertTrue(viaSuspend.initPtrThread === owner, "initPtr must run on the owner thread")
-      // 「只算一次」也在这里：多调一次的后果是多建一个 runtime（QuickJS 的覆写体就是 initContext），
-      // 前一个既没句柄、也没人销毁。再读一次句柄，计数不能涨。
+      // 再读一次句柄，计数不能涨
       assertEquals(2560L, runBlocking { viaSuspend.withPtr { it } })
       assertEquals(1, viaSuspend.initPtrCalls, "initPtr must be evaluated exactly once")
 
-      // 同步门同理（JNI 回调链走的那条）
+      // 同步门同理
       val viaSync = runBlocking(counting) { ComputedHandle(7L, counting) }
       assertEquals(70L, viaSync.withPtrSync { it })
       assertEquals(70L, viaSync.withPtrSync { it })
@@ -526,10 +389,7 @@ class PointerTest {
       assertEquals(1, viaSync.initPtrCalls, "sync gate must evaluate initPtr exactly once")
     }
 
-  /**
-   * 覆写路径返回 `0` = **建句柄失败**，基类当场 `check` 出来。`0` 不是合法的 native
-   * 句柄，放它过去就是一路把这个值当指针用到 native 里。
-   */
+  /** 覆写路径返回 `0`：基类当场抛错。 */
   @Test
   fun initPtrReturningZeroFailsLoudly() {
     val probe =
@@ -542,10 +402,7 @@ class PointerTest {
     assertTrue(err.message!!.contains("initPtr"), err.message)
   }
 
-  /**
-   * 既没在构造参数里交句柄、也没覆写 [Pointer.initPtr] 的子类，一读句柄就抛错 ——
-   * `0` 不是合法 native 句柄，把它静默当成有效指针用下去才是真的危险。
-   */
+  /** 既没交句柄、也没覆写 [Pointer.initPtr]：一读句柄就抛。 */
   @Test
   fun missingHandleFailsLoudly() {
     val probe =
@@ -556,11 +413,7 @@ class PointerTest {
     assertTrue(err.message!!.contains("initPtr"), err.message)
   }
 
-  /**
-   * `0` 是**合法的空句柄**（借用型的空壳传的就是 `0L`），所以它不能兼任「没交句柄」的
-   * 哨兵：真的交了 `0`，就**不该**再去问 [Pointer.initPtr]，也不该因为 `ptr == 0` 就把
-   * 归还省掉 ——「没交」只由 `null` 表示。
-   */
+  /** `0` 是合法空句柄：不去问 [Pointer.initPtr]，也不省掉归还。 */
   @Test
   fun explicitZeroHandleIsNotTreatedAsMissing() {
     var releaseCalls = 0

@@ -6,11 +6,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/**
- * [SettingsStore] 的落盘行为。用 [createSettingsStore] 指到临时文件，不碰 `settingsStore` 单例。
- *
- * 不为「同一个文件上开两个实例」写用例：DataStore 明确禁止那么用，验出来的也不是本类的事。
- */
+/** [SettingsStore] 的落盘行为：空读、写盘、`null` 删键。 */
 class SettingsStoreTest {
   @Test
   fun readsEmptyBeforeAnyWrite() =

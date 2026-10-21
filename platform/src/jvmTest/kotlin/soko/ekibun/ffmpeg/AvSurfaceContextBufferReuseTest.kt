@@ -8,29 +8,10 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * 送显/送声的缓冲**必须零拷贝、且复用固定几块 native 内存** —— 直接驱动 [AvSurfaceContext]
- * （不经 [FFPlayer]）：[AvFormat] 解出包、[AvCodec] 解出帧，逐帧 `postFrame` / `flushFrame`。
- * FFPlayer 在这里缺席是有意的，被测的是 AvSurfaceContext 自己的契约，播放编排不属于它。
- *
- * 素材全部在测试里现场合成，不依赖任何入库文件：
- * - 视频：Y4M（`YUV4MPEG2` 文本头 + 裸 YUV 帧）喂 `rawvideo` 解码器 —— 它只是 memcpy，
- *   `sws` 的输入端（YUV420P）就有了。`AvFrame` 只能从解码链出来（native 构造），Kotlin 侧
- *   没有「从裸字节造 AVFrame」的口子，这是不用真编码器就能批量出帧的最短路径；输出端照旧
- *   是写死的 `AV_PIX_FMT_RGBA`。
- * - 音频：[WavMedia] 的内存 WAV，`pcm_s16le` 解码 + `swr` 重采样到 Sink 声明的输出规格。
- *
- * 判据与来由：
- * 1. 缓冲**不能每帧新建**：视频 1308×736 RGBA = 3.67 MB/帧 ⇒ 60 帧/s 的播放 20 s 会分配
- *    3250 MB，Java 堆被顶在 `-Xmx` 上。native 侧只在长度对不上时才新建（`getBufferNative`
- *    收到上一轮那块、对得上就覆写），所以**视频**尺寸恒定 ⇒ 拿到的必须是同一块数组；
- * 2. **音频**的输出长度随 swr 的样本数浮动（末帧还是残帧），复用不作保证 —— 这里只卡
- *    「规格不随帧数增长」：不同长度的种类要远少于帧数，且每帧确实有字节。
+ * [AvSurfaceContext] 的缓冲契约：视频缓冲跨帧复用同一块数组；音频缓冲非空，且长度种类远少于帧数。
  */
 class AvSurfaceContextBufferReuseTest {
-  /**
-   * 真上下文（`initNative` 真跑）+ 空设备：只记下每帧拿到的那块数组与大小。
-   * 直驱全程单线程（`AvSurfaceContext` 没有归属 dispatcher，回调就地执行），普通列表即可。
-   */
+  /** 真上下文 + 空设备：记下每帧拿到的数组与大小。 */
   private class Sink : AvSurfaceContext() {
     override val sampleRate: Int = 48_000
     override val channels: Int = 2
@@ -56,8 +37,7 @@ class AvSurfaceContextBufferReuseTest {
             audioBytes += buf.size
             audioBuffers += buf
           }
-          // 无重采样前导偏移（offset = 0），上屏时间戳即帧自身 pts —— 对应 flushFrame 的
-          // `frame.timeStamp - offset * AV_TIME_BASE / sampleRate`
+          // 音频返回帧自身 pts
           return frame.timeStamp
         }
         AVMediaType.VIDEO ->
@@ -82,11 +62,7 @@ class AvSurfaceContextBufferReuseTest {
     const val FRAMES = 5
   }
 
-  /**
-   * 现场合成一段 Y4M 流：头声明 `C420jpeg`（= `AV_PIX_FMT_YUV420P`），每帧 `FRAME\n` 后跟
-   * Y/U/V 三个平面 —— 正是 `av_image_get_buffer_size(YUV420P, w, h, 1)` 的打包布局，与
-   * `yuv4mpegdec.c` 的 `s->packet_size` 一致。内容逐帧可区分。
-   */
+  /** 现场合成 Y4M：头声明 `C420jpeg`，每帧 `FRAME\n` 后跟 Y/U/V 三个平面，内容逐帧可区分。 */
   private fun y4mStream(
     width: Int,
     height: Int,
@@ -113,7 +89,7 @@ class AvSurfaceContextBufferReuseTest {
         AvCodec(video).use { codec ->
           while (true) {
             val packet = format.getPacket(emptyList()) ?: break
-            // packet 由 sendPacketAndGetFrames 内部收掉，调用方只管帧
+            // packet 由 sendPacketAndGetFrames 收掉，调用方只管帧
             for (frame in codec.sendPacketAndGetFrames(packet)) {
               sink.postFrame(AVMediaType.VIDEO, frame)
               sink.flushFrame(AVMediaType.VIDEO, frame)
@@ -133,8 +109,7 @@ class AvSurfaceContextBufferReuseTest {
       sink.videoBuffers.size >= 2,
       "at least 2 frames must reach the sink, got ${sink.videoBuffers.size}",
     )
-    // 判据是**引用相等**（同一块数组），不是内容相等：内容相等在「每帧新建一块、但像素恰好一样」
-    // 时也成立，那样这条用例就真成了摆设。
+    // 判据是引用相等（同一块数组），不是内容相等
     val buffers = sink.videoBuffers
     assertTrue(
       buffers.zipWithNext().all { (first, second) -> first === second },
@@ -159,7 +134,7 @@ class AvSurfaceContextBufferReuseTest {
             for (frame in codec.sendPacketAndGetFrames(packet)) {
               sink.postFrame(AVMediaType.AUDIO, frame)
               val shown = sink.flushFrame(AVMediaType.AUDIO, frame)
-              // flushFrameImpl 对音频返回 0（无前导静音）⇒ 上屏时间戳就是帧自己的 pts
+              // 上屏时间戳等于帧自身 pts
               assertEquals(frame.timeStamp, shown, "flush timestamp must equal the frame pts when sink returns 0")
               frame.close()
             }
@@ -179,8 +154,7 @@ class AvSurfaceContextBufferReuseTest {
     )
     assertTrue(sink.audioBytes > 0, "the audio buffer must not be empty")
     val sizes = sink.audioBuffers.map { it.size }.distinct()
-    // swr 每帧输出的样本数不恒定（实测 32 帧 3 种规格，末帧还是残帧），所以判据不能写成
-    // 「恒同一块」—— 只能卡「规格种类远少于帧数」：真每帧新建时种类数就等于帧数。
+    // 长度种类数远少于帧数
     assertTrue(
       sizes.size * 4 <= sink.audioBuffers.size,
       "audio buffer sizes must not grow per frame, got ${sizes.size} kinds in ${sink.audioBuffers.size} frames: $sizes",

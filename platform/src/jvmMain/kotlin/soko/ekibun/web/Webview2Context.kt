@@ -11,27 +11,16 @@ import java.awt.Component
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
- * 一个 WebView2 上下文 —— **可见视图与后台页共用同一个类型**，差别只在是否
- * [attach] 到 AWT 组件上、以及视口给多大（[isHeadless] 固定 1×1）。
- *
- * 所有 `external` 调用都投到 [dispatcher] 上跑：宿主窗口、消息泵线程、以及
- * `ICoreWebView2Controller` 都归属那条线程，别的线程只能投递不能直碰 ——
- * 接口上的命令因此都是挂起的，落在归属线程上执行完才返回。
- *
- * native 侧 environment 是**进程内共享**的（同一 user data folder 上不允许并存
- * 多个），每个上下文只在这个 environment 下开自己的窗口与 controller；
- * cookie 因此天然在可见页与后台页之间共享。详见 `cxx/webview/webview.cmake`。
- *
- * 挂载与尺寸跟随（[attach] / [fitToParent] / [setBounds]）是**桌面私有**
- * 能力，不上 [WebviewContext] 接口、也不挂起 —— 调用点全在没有协程上下文的 AWT
- * 回调里，由 [WebViewSurface] 直接强转成本类型取用。
+ * 一个 WebView2 上下文：可见视图与后台页共用，差别在是否 [attach] 到 AWT 组件及视口大小。
+ * 所有 `external` 调用都投到 [dispatcher] 上执行。
+ * [attach] / [fitToParent] / [setBounds] 是桌面私有能力，不上接口、不挂起。
  */
 class Webview2Context(
   isHeadless: Boolean = false,
 ) : Pointer(dispatcher = dispatcher),
   WebviewContext {
   init {
-    // 后台页固定 1×1 视口：只要不是 0×0，页面就会真的加载 / 跑脚本。
+    // 后台页固定 1×1 视口
     if (isHeadless) submit { setBounds(ptr, 1, 1) }
   }
 
@@ -44,7 +33,7 @@ class Webview2Context(
     withPtr { ptr -> setUserAgent(ptr, ua) }
   }
 
-  /** 桌面端的 devtools 靠 [openDevTools] 直接开，没有可开关的全局位。 */
+  /** 桌面端的 devtools 由 [openDevTools] 打开，这里无操作。 */
   override suspend fun setDevtoolsEnabled(enabled: Boolean) = Unit
 
   override suspend fun navigate(
@@ -93,10 +82,7 @@ class Webview2Context(
     withPtr { ptr -> openDevTools(ptr) }
   }
 
-  /**
-   * 读 url 下的 cookie，返回 native 摊平的
-   * `"n1=v1; n2=v2"`（没有则空串）。
-   */
+  /** 读 [url] 下的 cookie，返回 native 摊平的 `"n1=v1; n2=v2"`；没有则空串。 */
   suspend fun getCookie(url: String): String =
     withPtr { ptr ->
       val result = CompletableDeferred<String>()
@@ -112,9 +98,7 @@ class Webview2Context(
       return@withPtr withTimeoutOrNull(COOKIE_TIMEOUT_MS.milliseconds) { result.await() } ?: ""
     }
 
-  /**
-   * 写一个 cookie 到本上下文自己的 manager。字段口径同 [setCookie]。
-   */
+  /** 写一条 cookie。参数为名称、值、域、路径、过期秒数、Secure、HttpOnly、SameSite。 */
   suspend fun setCookie(
     name: String,
     value: String,
@@ -140,7 +124,7 @@ class Webview2Context(
 
   suspend fun clearAllCookies() = withPtr { ptr -> clearAllCookies(ptr) }
 
-  // ---- 桌面私有能力：不上接口、不挂起（调用点在 AWT 回调里）----
+  // ---- 桌面私有能力：不上接口、不挂起 ----
 
   fun attach(view: Component) {
     submit { attach(ptr, view) }
@@ -161,7 +145,7 @@ class Webview2Context(
     submit { setBounds(ptr, width, height) }
   }
 
-  // ---- native 回调入口：由宿主线程直接调进来，故 @Keep ----
+  // ---- native 回调入口，由宿主线程直接调用 ----
 
   @Keep
   private fun onEvent(
@@ -174,7 +158,7 @@ class Webview2Context(
         "urlChanged" -> data.takeIf { it.isNotBlank() }?.let { WebViewEvent.UrlChanged(it) }
         "documentLoaded" -> data.takeIf { it.isNotBlank() }?.let { WebViewEvent.DocumentLoaded(it) }
         "historyChanged" -> {
-          // data 是 "canGoBack canGoForward"，两个都是 "1" / "0"。
+          // data 形如 "1 0"
           val parts = data.split(' ')
           WebViewEvent.HistoryChanged(
             canGoBack = parts.getOrNull(0) == "1",
@@ -209,7 +193,7 @@ class Webview2Context(
     headers: Array<String>,
   ): Boolean = onInterceptor?.invoke(url, headers.toHeaderMap(), method, isForMainFrame) == true
 
-  /** `ExecuteScript` 的结果收件人 —— 由 native 线程直接调进来，故 [Keep]。 */
+  /** `ExecuteScript` 的结果收件人。 */
   abstract class ScriptCallback {
     @Keep
     abstract fun onResult(
@@ -225,35 +209,16 @@ class Webview2Context(
   companion object {
     private val dispatcher = ThreadDispatcher("webview")
 
-    /**
-     * 传给 WebView2 的浏览器参数（`ICoreWebView2EnvironmentOptions::AdditionalBrowserArguments`）。
-     *
-     * `--disable-gpu-process-crash-limit`：本机这类 GPU 坏法下（`chrome_debug.log` 里
-     * `Failed to open persistent cache files … 另一个程序正在使用此文件 (0x20)`），GPU 进程会
-     * 反复崩；默认策略下 Chromium 崩够次数就判定「GPU 不可用」并 `CHECK` 掉**整个浏览器进程**，
-     * 所有视图一起死。带上这条之后 GPU 依旧坏，但浏览器进程不再被它带走。
-     *
-     * ⚠️ 别往这里加 `--no-sandbox` / `--disable-gpu-sandbox` —— 那是安全降级，只在诊断时用环境
-     * 变量 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 按需开（它会**追加**到本参数之后）。
-     * 依据与对照实测见 `docs/development/webview2-windows.md` §3。
-     */
+    /** 传给 WebView2 的浏览器参数（`AdditionalBrowserArguments`）。 */
     private const val BROWSER_ARGUMENTS = "--disable-gpu-process-crash-limit"
 
     init {
-      // 顺序有讲究：`webview.dll` 的导入表里有 `jawt.dll`，而后者只在 JDK 里
-      // （不在应用资源、也不在默认搜索路径上）—— 先 `System.load` 进来，
-      // loader 解析导入表时「已加载模块」排在搜索路径之前。
+      // 加载顺序：WebView2Loader、jawt、webview
       loadLibrary("WebView2Loader")
       loadLibrary("jawt")
       loadLibrary("webview")
-      // user data folder 与设置文件同在 `Paths.dataDir` 下。
       prepareEnvironment(BROWSER_ARGUMENTS, Paths.dataDir + "/webview2")
-      // 收尾在**进程还健康**时做一次：`~WebviewEnviorment`（静态析构）跑在进程退出路径上 ——
-      // 那时 STA 要么已被 `ExitProcess` 带走（`threadId_` 失效，线程走不到 `exit_thread`），
-      // 要么冻在某个 COM 调用里，于是 `releaseEnvironment()` 里那条无界的 `thread.join()` 可能永远
-      // 等不到，进程也就退不出去。放在 shutdown hook 上时泵还在转，线程能干净收场。
-      // `releaseEnvironment()` 的**唯一**调用点是这里；产品层（`desktopApp/main.kt`）不要显式调它 ——
-      // 收尾交给 hook（应用退出即 JVM 关闭、hook 自动跑），重复调用只会多一次无界 `join()` 的等待。
+      // 进程退出时释放 environment
       Runtime.getRuntime().addShutdownHook(Thread { releaseEnvironment() })
     }
 
@@ -348,11 +313,7 @@ class Webview2Context(
     @JvmStatic
     private external fun openDevTools(ptr: Long)
 
-    /**
-     * 读 url 下的 cookie，摊平成 `"n1=v1; n2=v2"` 经 [CookieCallback.onResult] 回来；
-     * 没有 cookie 也给空串。回调只来一次。走**本上下文自己**的 cookie manager（native
-     * 侧在 controller 就绪时一次取好缓存，随取随用）。
-     */
+    /** 读 [url] 下的 cookie，摊平成 `"n1=v1; n2=v2"` 经回调返回；没有 cookie 给空串。 */
     @JvmStatic
     private external fun getCookie(
       ptr: Long,
@@ -360,11 +321,7 @@ class Webview2Context(
       callback: CookieCallback,
     )
 
-    /**
-     * 写一个 cookie（结构化字段）到**本上下文自己**的 manager。域 / 路径
-     * 缺省由 Kotlin 端按 url 推好再传进来。`expiresEpochSeconds > 0` 表示带过期时间
-     * （自 Unix 纪元起的秒），否则会话 cookie。`sameSite`：0=NONE, 1=LAX, 2=STRICT。
-     */
+    /** 写一条 cookie；`expiresEpochSeconds > 0` 才带过期时间，`sameSite`：0=NONE, 1=LAX, 2=STRICT。 */
     @JvmStatic
     private external fun setCookie(
       ptr: Long,
@@ -381,7 +338,7 @@ class Webview2Context(
     @JvmStatic
     private external fun clearAllCookies(ptr: Long)
 
-    /** `getCookie` 的结果收件人 —— 由 native 线程直接调进来，故 [Keep]。 */
+    /** `getCookie` 的结果收件人。 */
     @Keep
     abstract class CookieCallback {
       @Keep
@@ -390,7 +347,7 @@ class Webview2Context(
 
     private const val SCRIPT_TIMEOUT_MS = 15_000L
 
-    /** cookie 读写的超时（比脚本短，读不到就当没有，别卡住请求）。 */
+    /** cookie 读写超时（毫秒）。 */
     internal const val COOKIE_TIMEOUT_MS = 5_000L
   }
 }

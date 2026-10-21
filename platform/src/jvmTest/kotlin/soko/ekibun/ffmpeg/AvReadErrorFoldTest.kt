@@ -9,17 +9,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
- * 读包错误路径的回归：
- *
- * - **读出错必须出声**：`AvIO.read` 返回负数（AvIO 契约里的「出错」，EOF 是 0）
- *   最终会被 avio 毒化成 EOF 状态（aviobuf.c:551-558 把任何负返回值置
- *   `eof_reached`），`getPacket` 在 API 层分不开两者 —— 但不能静默：这里断言
- *   `getPacket` 仍以 null 收场（不挂死、不抛），且标准输出上有那条 error 日志
- *   （native 侧另有两条 av_log，JVM 测试抓的是 Kotlin 这条）。
- * - **打不开的源要干净地失败**：`avformat_open_input` 失败走 initNative 的失败
- *   清理路径（GlobalRef / pb / URL 字符串都在那边收），返回 0、Kotlin 侧以
- *   [IllegalStateException] 收场 —— 泄漏本身无法从 JVM 直接观测，这条钉的是
- *   「失败路径至少能干净走完、不再崩 native」。
+ * 读包错误路径：`AvIO.read` 返回负数后 `getPacket` 以 null 收场且有 error 日志；打不开的源抛 [IllegalStateException]。
  */
 class AvReadErrorFoldTest {
   /** 包一层「第 [failAfter] 次成功 read 之后就开始返回 -1」的 Handler。 */
@@ -45,8 +35,7 @@ class AvReadErrorFoldTest {
 
   @Test
   fun ioErrorFoldsToEofButIsLogged() {
-    // 10 秒 ≈ 160 KB，要 5 次 32 KB 的 read 才读完；第 4 次起返回 -1，
-    // 错误必然落在 getPacket 阶段（前 3 次足够 find_stream_info 用）。
+    // 第 4 次 read 起返回 -1：前 3 次留给 find_stream_info，错误落在 getPacket 阶段
     val wav = WavMedia.bytes(durationSec = 10)
     val out = ByteArrayOutputStream()
     val originalOut = System.out
@@ -57,8 +46,7 @@ class AvReadErrorFoldTest {
           AvFormat("memory:test.wav", FailingAfterHandler(failAfter = 3, inner = TestIo(wav))).use { player ->
             player.getStreams()
             while (true) {
-              // downloader 模式（streams 为空收所有包）：包拿到就还，
-              // 所有权归调用方（见 AvPacket）。
+              // downloader 模式：包拿到就还，所有权归调用方
               val packet = player.getPacket(emptyList()) ?: break
               packet.close()
             }
@@ -81,9 +69,7 @@ class AvReadErrorFoldTest {
         AvFormat(
           "Z:/definitely/not/here/nope.mp4",
           object : AvIO.Handler {
-            // open 不许抛（契约见 AvIO.Handler.open 的 KDoc，抛了会 pending 在 JNI 上炸 JVM）：
-            // 打不开就返回恒失败的 IO，让 avformat_open_input 自己失败 ——
-            // FileIO 对不存在的路径正是这个行为。
+            // open 不抛，返回恒失败的 IO，由 avformat_open_input 自己失败
             override fun open(url: String): AvIO =
               object : AvIO {
                 override fun read(
