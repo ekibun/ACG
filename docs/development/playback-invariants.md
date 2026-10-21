@@ -165,7 +165,7 @@ native 侧每个 `AVIOContext` 分配一次读数组并反复用，`AvIO.read(bu
 
 ---
 
-## 三、桌面视频上传：每帧分配
+## 三、桌面输出：视频上传与音频写入
 
 桌面端每帧 `Image.makeRaster(...)` 新建一块 Skia 自管对象、`drawImageRect` 时再上传一次 GPU，
 一帧两次 CPU 拷贝 + 一次分配。这些 native 对象靠 `Cleaner` 回收，而 Cleaner 等 GC 触发——
@@ -181,6 +181,14 @@ Java 堆实际占用远低于上限时 GC 可能十秒才来一次，于是 RSS 
 **真正零每帧传输**要 native 直接产出 GPU 纹理，那是 C++ 侧改造。
 
 ⇒ Android 端没有这个问题：视频分支直写 Surface，根本不经过 JVM 数组。
+
+### 3.1 音频写入：字节序与帧基准
+
+native 产出的 float PCM 是**主机字节序**（小端），而桌面 `SourceDataLine` 收 16-bit PCM：两次转换
+（读 float、写 short）都必须显式 `ByteOrder.LITTLE_ENDIAN`，否则 float 会被按大端读成乱数。
+
+⇒ `SourceDataLine.longFramePosition` 自 `open` 起累计，`flush` **不重置**。暂停收场（`stop`）里
+flush 之后必须把已写入帧数重新锚到 `longFramePosition`，否则「已写入 − 已播放」会算成负数。
 
 ---
 
