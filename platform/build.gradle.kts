@@ -61,6 +61,8 @@ kotlin {
     // HTTP 传输层：OkHttp 一份实现覆盖桌面与 Android。
     jvmShared.dependencies {
       implementation(libs.okhttp)
+      // 传输层日志（HEADERS 级）。
+      implementation(libs.httpLogging)
     }
     jvmTest.dependencies {
       implementation(libs.kotlin.test)

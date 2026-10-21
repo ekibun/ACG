@@ -11,6 +11,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.logging.HttpLoggingInterceptor
 import java.io.IOException
 import java.io.InputStream
 import java.net.SocketTimeoutException
@@ -19,8 +20,13 @@ import java.util.concurrent.TimeUnit
 // HTTP 传输层：桌面 JVM 与 Android 共用的 OkHttp 实现，拉取式、不装 cookieJar。
 
 private val plainClient: OkHttpClient by lazy {
+  val logging =
+    HttpLoggingInterceptor().apply {
+      level = HttpLoggingInterceptor.Level.BASIC
+    }
   OkHttpClient
     .Builder()
+    .addInterceptor(logging)
     .readTimeout(Http.SOCKET_TIMEOUT_MS, TimeUnit.MILLISECONDS)
     .followRedirects(false)
     .followSslRedirects(false)
