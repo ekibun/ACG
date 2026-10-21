@@ -61,6 +61,7 @@
 
 ## 检查范围
 
+- 根 `build.gradle.kts` 的插件一律 `apply false`：否则同一个插件会在每个子项目各自的 classloader 里再加载一遍。
 - ktlint 应用在 `allprojects` 上，覆盖含根项目在内的全部自有项目。
 - ktlint 排除 `**/generated/**`。
 - IDE 不索引 `cxx/ffmpeg/ffmpeg`、`cxx/quickjs/quickjs`、`cxx/build`。

@@ -121,6 +121,9 @@ WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/de
 - `WebView2.h` 在 MinGW 下能编，但 SDK 的 C++ 辅助类（如 `WebView2EnvironmentOptions.h`）
   依赖 MSVC 专有的 `Microsoft::WRL::RuntimeClass`，MinGW 的 WRL 只移植了 `ComPtr` —— 别去引那些头。
 - **页面脚本注入为零**：`initScript` 已整体删除，`put_IsWebMessageEnabled` 恒 `FALSE`。
+- **成功才报 `DocumentCompleted` / 历史栈变化**：失败那轮没有新文档，历史栈也没动。
+- **先接父链、再改窗口样式**：反过来，窗口会在父链还没接上时就已经是控件形状。
+- **子窗口坐标相对父窗口客户区**：位置恒为 `(0, 0)`，尺寸由 Kotlin 侧给。
 - 崩溃 / 白屏 / 焦点问题，**先读** [`../docs/development/webview2-windows.md`](../docs/development/webview2-windows.md)，
   不要重新发明排查路径。
 
@@ -153,6 +156,10 @@ WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/de
   而 `stack_top` 已落在 JNI 帧里，预算必须远低于宿主线程栈。
 - **模块 loader 返回 NULL 时必须先挂一个待处理异常**（`JS_ThrowReferenceError`），
   否则 `JS_LoadModuleInternal` 会去报运行期里残留的旧异常。
+- **析构回调绝不能往外抛**：它跑在 GC 时机上，没有调用者能接，异常只能就地清。
+- **`JS_NewArrayBufferCopy` 会复制字节**：返回前必须把 Java 数组那一票放掉。
+- **`TypeError` 一类异常必须就地清掉**：留着会让后面每个「返回 NULL 却不抛」的 API 都带着旧异常。
+- **`JS_NewPromiseCapability` 往数组里写两个新持有**：resolve / reject 各造一个 `JSFunction`，别共用一票。
 
 ## ffmpeg
 

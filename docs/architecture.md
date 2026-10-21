@@ -131,7 +131,8 @@ okio `Path`，那个 `Path` 只出现在 `:platform` 内部的建表函数与懒
   进程内一共五条，按族分：`quickjs`（`QuickJS` 伴生对象）、`webview`（`Webview2Context` 伴生对象）、
   `avformat`（`AvFormat` 伴生对象）、`ffplayer`（`FFPlayer` 伴生对象的 `by lazy`）—— 这四条共享、
   **谁都不该关**；只有 `avcodec` 是每个解码器实例独占一条，随实例归还一起关掉
-  （`closeDispatcherOnClose`）。
+  （`closeDispatcherOnClose`）。反过来，共享实例误传 `closeDispatcherOnClose = true` 不会当场报错，
+  要到别的持有者下一次投递时才炸 —— 报错点离肇事点很远。
 
 `Pointer` 的两条细约束：`0` 是**合法的空句柄**（借用型的空壳传的就是 `0L`），只有 `null` 表示
 「没交句柄」；覆写 `initPtr` 返回 `0` 视为建句柄失败，基类当场 `check`。`close()` 先标记再投递，

@@ -15,6 +15,7 @@
   `jsDupValue`），而包装只销毁一次。
 - 还 `JSRef` 时还的是 `ref.ptr`，**不是** runtime 的 ctx 句柄 —— 混用就是拿 runtime 指针去
   `jsFreeValue`，当场踩坏 native 堆。
+- 句柄是**一次性**的：`jsNewString` 造出的那一票交出去就不再持有，同一个属性名要出现两次就得造两次。
 
 ## 二、关闭与泄漏清算
 

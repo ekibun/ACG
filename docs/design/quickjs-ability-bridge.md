@@ -120,6 +120,8 @@ try {
 | `Settings.get` / `Settings.set` | 异步的扁平字符串键值；值传 `null` 即删键 |
 | `encodeURI` / `encodeURIComponent` | 按字节做 `%XX` 编码，可指定编码名 |
 
+`encodeURI` / `encodeURIComponent` 的 `%XX` **必须两位补零**：`0x0a` 写成 `%0a`，`%a` 是错编码。
+
 `_binding` 的分支返回值形状：
 
 - `Response.arrayBuffer` 的 Kotlin 侧返回 `Deferred<ByteArray>`，脚本里必须 `await` 才能拿到字节数组；`decode` 是同步桥，直接收 `ByteArray`。
