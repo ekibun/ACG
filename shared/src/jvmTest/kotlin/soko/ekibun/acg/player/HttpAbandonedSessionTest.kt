@@ -4,6 +4,7 @@ import soko.ekibun.TestMediaServer
 import soko.ekibun.ffmpeg.AvIO
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -51,6 +52,29 @@ class HttpAbandonedSessionTest {
         server.exited,
         "a session was left parked (entered>exited): the response abandoned by discard is never closed",
       )
+    }
+  }
+
+  /**
+   * 首条会话挂死（只发响应头、body 不给）时，闲置超时必须丢掉它、重开一条接着读。
+   *
+   * 不重试的话 `read` 会把 [soko.ekibun.common.Http.IdleTimeoutException] 折成 -1，ffmpeg 判 IO 错误。
+   * 判据：读到的字节等于真身，且不止一条会话（说明真的换了）。
+   */
+  @Test(timeout = 120_000)
+  fun idleTimeoutReopensSessionAndKeepsReading() {
+    val body = ByteArray(4 * HttpCache.BLOCK_BYTES) { (it % 251).toByte() }
+    TestMediaServer(body, hangFirstResponse = true).use { server ->
+      val io = HttpIO(server.url, mapOf(), HttpIO.Handler())
+      try {
+        val buf = ByteArray(4096)
+        val n = io.read(buf, buf.size)
+        assertTrue(n > 0, "闲置超时后应当换会话重读，而不是返回 -1")
+        assertContentEquals(body.copyOfRange(0, n), buf.copyOf(n), "换会话后读到的必须是流首的字节")
+        assertTrue(server.requests >= 2, "首条会话挂死，应当再开一条")
+      } finally {
+        io.close()
+      }
     }
   }
 }

@@ -286,6 +286,8 @@ classDiagram
   `webviewAsync` 也住在这个文件里。细节见下文「脚本插件链」。
 - **`player`** —— `AvIO` 的两个 Kotlin 实现：`HttpIO`（range 会话 + 白读推进 + 闲置超时）与
   `FileIO`（本地文件）。它们被 native 的 avio 回调**同步调用**，是播放链唯一与网络/磁盘相接的地方。
+  `HttpIO` 之外还挂一层**进程级**的块缓存 `HttpCache`（512 块 ≈ 16 MiB、按 URL + 块号键、只当加速使，
+  命中不了就退回网络那条路；约束见 `development/playback-invariants.md` §5.7）。
 
 ### 原生层（`cxx/`）
 

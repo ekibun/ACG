@@ -12,10 +12,11 @@ import kotlin.test.assertTrue
 class HttpStreamingTest {
   @Test(timeout = 60_000)
   fun firstReadReturnsLongBeforeTheWholeBodyArrives() {
-    // 整包下发期 = 块数 × 块间隔
-    val chunks = 6
+    // 整包下发期 = 块数 × 块间隔。首读现在要装满一个 avio 块（32 KiB），
+    // 所以素材必须明显长于一块，否则「首读早于整包」这条判据就没有区分度。
+    val chunks = 30
     val chunkSize = 4096
-    val delayMs = 30L
+    val delayMs = 10L
     val totalMs = chunks * delayMs
     TestMediaServer(
       body = ByteArray(chunks * chunkSize) { (it % 251).toByte() },

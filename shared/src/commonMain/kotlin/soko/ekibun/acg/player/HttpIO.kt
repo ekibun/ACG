@@ -50,71 +50,74 @@ class HttpIO(
   private var offset = 0
   private var cachedRsp: Http.Response? = null
 
-  /** 白读推进用的丢弃缓冲，按 IO 复用。 */
-  private val discardBuf = ByteArray(16 * 1024)
+  /** 装块缓冲：块首到块尾的字节落在这里，交付时按块内偏移切片。 */
+  private val cacheBuf = ByteArray(HttpCache.BLOCK_BYTES)
 
   /** 打开一条从 [start] 起的 range 会话。 */
-  private suspend fun getRange(start: Int): Http.Response =
-    Http.request(
-      requestOptions +
-        mapOf(
-          "headers" to
-            (options["headers"] as? Map<*, *> ?: mapOf<Any, Any>()) +
-            mapOf(
-              "range" to "bytes=$start-",
-            ),
-        ),
-    )
+  private suspend fun getRange(start: Int): Http.Response {
+    val rsp =
+      Http.request(
+        requestOptions +
+          mapOf(
+            "headers" to
+              (options["headers"] as? Map<*, *> ?: mapOf<Any, Any>()) +
+              mapOf("range" to "bytes=$start-"),
+          ),
+      )
+    // 长度见到一次就记进全局表：全程命中缓存、一条会话都没建过的实例，[streamLength] 靠它答得出。
+    HttpCache.putLength(url, rsp.contentLength)
+    return rsp
+  }
 
-  /** 取出一条网络游标已推进到 `offset` 的响应；返回 null 表示读到流尾。 */
-  private suspend fun getResponseBlocking(): Http.Response? {
+  /** 把 [offset] 所在的块读满、写进缓存，返回这块的有效长度；返回 0 表示已到流尾。 */
+  private suspend fun requestCurrentBlock(): Int {
+    val reqOffset = HttpCache.blockStart(offset)
     var rsp = cachedRsp
-    if (rsp == null) {
-      rsp = getRange(offset)
+    if (rsp == null || rsp.isClosed) {
+      rsp = getRange(reqOffset)
     } else if (rsp.offset > offset) {
-      // 缓存会话越过 offset（往回 seek）：换一条
+      //   |    [////buffer////]
+      // offset
       rsp.close()
-      rsp = getRange(offset)
+      rsp = getRange(reqOffset)
     } else if (offset - rsp.offset - rsp.availableForRead > 0) {
-      // 前向跳且还没取到的部分不为零：换一条真落在 offset 上的会话
-      val newRsp = getRange(offset)
-      if (newRsp.offset == offset) {
+      // [////buffer////]   |
+      //                  offset
+      val newRsp = getRange(reqOffset)
+      if (newRsp.offset == reqOffset) {
         rsp.close()
         rsp = newRsp
       } else {
         newRsp.close()
       }
     }
-    // 白读把游标推进到 offset
-    val want = offset - rsp.offset
-    // 这条响应是否为复用缓存
-    val reused = cachedRsp === rsp
+    // 会话一律建在块首；游标不在块首说明复用错了会话
+    if (rsp.offset % cacheBuf.size != 0) error("session at ${rsp.offset}, expected block start $reqOffset")
     cachedRsp = rsp
-    val advanced =
-      try {
-        // 用 rsp.read 白读推进 want 字节
-        var left = want
-        while (left > 0) {
-          val n = rsp.read(discardBuf, len = minOf(left, discardBuf.size))
-          if (n <= 0) break // 先读到流尾，没推完
-          left -= n
-        }
-        left <= 0
-      } catch (t: Throwable) {
-        // 新建立的响应由本次读自己收场
-        if (!reused) {
-          cachedRsp = null
+    // 读满到块尾，一块一次
+    val target = HttpCache.blockStart(offset + cacheBuf.size)
+    var cacheOffset = 0
+    while (rsp.offset < target) {
+      val index = rsp.offset / cacheBuf.size
+      cacheOffset = rsp.offset % cacheBuf.size
+      val n = rsp.read(cacheBuf, cacheOffset, cacheBuf.size - cacheOffset)
+      if (n <= 0 || cacheOffset + n >= cacheBuf.size) {
+        cacheOffset = if (n <= 0) cacheOffset else cacheOffset + n
+        // 一个字节都没读到就是流尾，别往缓存里塞空块
+        if (cacheOffset > 0) HttpCache.putChunk(url, index, cacheBuf.sliceArray(0 until cacheOffset))
+        // 流尾
+        if (n <= 0) {
           rsp.close()
+          break
         }
-        throw t
       }
-    if (!advanced) {
-      // 没追到 offset 就是流尾
-      rsp.close()
-      cachedRsp = null
-      return null
     }
-    return rsp
+    if (rsp.offset > offset) {
+      return cacheOffset
+    } else {
+      rsp.close()
+      return 0
+    }
   }
 
   override fun read(
@@ -139,12 +142,12 @@ class HttpIO(
         try {
           job.await()
         } catch (e: CancellationException) {
-          // 作废收场：返回本次请求的长度，并丢掉已被关掉的会话
-          if (cachedRsp?.isClosed == true) cachedRsp = null
+          // 作废收场：返回本次请求的长度。会话可能已被关掉，但引用留着 —— streamLength 靠它答长度
           len
         } catch (e: Throwable) {
-          // 真故障
+          // 真故障：会话可能是在读到一半时抛的，游标已经不可信，关掉（引用仍留给 streamLength）
           e.printStackTrace()
+          cachedRsp?.close()
           -1
         } finally {
           // 取消哨兵并摘掉投递口
@@ -172,27 +175,36 @@ class HttpIO(
     }
   }
 
-  /** [read] 的挂起主体：循环取响应并把数据读进 [buf]，异常原样上抛。 */
+  /**
+   * [read] 的挂起主体：一次交付一块 —— 缓存有就直接给，没有就先把整块装进缓存。
+   * 块内后续读全是内存命中，一条会话读到底。
+   */
   private suspend fun readSuspend(
     buf: ByteArray,
     len: Int,
   ): Int {
+    val index = offset / HttpCache.BLOCK_BYTES
+    val withinBlock = offset - index * HttpCache.BLOCK_BYTES
+
     while (true) {
-      val rsp = getResponseBlocking() ?: return AvFormat.AVERROR_EOF
-      // 闲置超时：丢掉这条会话，等一个超时间隔后重试
-      val ret =
+      // 块内定位 = 块号 + 块内偏移；未命中时 requestCurrentBlock 先把整块装进 cacheBuf。
+      val (chunk, chunkSize) =
         try {
-          rsp.read(buf, 0, len)
+          val cache = HttpCache.chunk(url, index)
+          (cache ?: cacheBuf) to (cache?.size ?: requestCurrentBlock())
         } catch (e: Http.IdleTimeoutException) {
-          // 换一条会话接着读，不限次数
+          // 闲置超时：丢掉这条会话，等一个超时间隔后整块重来，不限次数
           delay(Http.SOCKET_TIMEOUT_MS.milliseconds)
-          rsp.close()
-          if (cachedRsp === rsp) cachedRsp = null
+          cachedRsp?.close()
           continue
         }
-      // 只推逻辑游标，网络游标由 rsp.read 推
-      if (ret > 0) offset += ret
-      return if (ret < 0) AvFormat.AVERROR_EOF else ret
+      if (withinBlock < chunkSize) {
+        val take = minOf(chunkSize - withinBlock, len)
+        chunk.copyInto(buf, 0, withinBlock, withinBlock + take)
+        offset += take
+        return take
+      }
+      return AvFormat.AVERROR_EOF
     }
   }
 
@@ -205,7 +217,7 @@ class HttpIO(
       when (whence) {
         AvFormat.AVSEEK_SIZE -> {
           // 总大小；无法确定时返回 -1
-          cachedRsp?.contentLength ?: -1L
+          streamLength()
         }
 
         AvIO.SEEK_SET -> {
@@ -219,7 +231,7 @@ class HttpIO(
         }
 
         AvIO.SEEK_END -> {
-          val size = cachedRsp?.contentLength ?: -1L
+          val size = streamLength()
           if (size < 0L) {
             -1L
           } else {
@@ -234,6 +246,9 @@ class HttpIO(
       e.printStackTrace()
       -1
     }
+
+  /** 流总长度：优先当前会话，其次全局表 —— 全程命中缓存的实例没有会话。 */
+  private fun streamLength(): Long = cachedRsp?.contentLength ?: HttpCache.length(url)
 
   /** 关闭并释放本 IO 持有的会话。 */
   override fun close() {

@@ -107,6 +107,10 @@ class HttpReadContractTest {
             )
 
             // 边界：再多跳 1s 越过存量 ⇒ 真要从网络取 ⇒ 必须重开一条会话
+            // 先清掉这条流的块缓存：2s 那次读顺带把 3s 附近的字节也留住了（MP4 的 pb 缓冲是 MB 级），
+            // 不清的话这次读会由内存满足、根本不碰会话 —— 那是缓存起作用的正确结果，但这条用例要守的
+            // 是「越过存量必须重开会话」这条判据，得在无缓存干扰的状态下测。
+            HttpCache.clear(server.url)
             format.seekTo(3_000_000)
             format.getPacket(listOf(video))?.close()
             assertEquals(

@@ -9,7 +9,7 @@ import kotlin.test.assertTrue
 
 /** 探针：传输层是拉取式的 —— 流式读时本地存量始终远小于整个 body。 */
 class HttpBodyDownloadTimingProbeTest {
-  /** 一次 `read` 里本地最多能攒多少：一个 avio 缓冲的量级。 */
+  /** 一次 `read` 里本地最多能攒多少：远小于一个 avio 缓冲（实测恒 0，见 `playback-invariants.md` 5.6）。 */
   private val bufferBound = 32 * 1024
 
   @Test(timeout = 60_000)
