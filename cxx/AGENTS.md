@@ -170,13 +170,19 @@ WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/de
   （`av_image_get_buffer_size` / `av_image_fill_arrays` / `sws_getContext` 三处必须用同一个
   格式常量，否则 `sws_scale` 写进来的布局与缓冲区对不上）。Kotlin 侧已无像素格式常量，
   也没有 `AvSurfaceContext.videoFormat` —— 平台实现只负责把 RGBA 字节贴到自己的渲染面。
-- **桌面端已开 x86 asm，Android 仍关着**（2026-09-22）：`ffmpeg.cmake` 只在 `ANDROID` 分支传
-  `--disable-asm`。桌面端构建 `HAVE_X86ASM=1`，`libavcodec/x86` / `libswscale/x86` / `libavutil/x86`
-  的 `X86ASM-OBJS` 全部编入（构建机需装 `nasm`，本机用 MSYS2 的 `mingw-w64-x86_64-nasm`）。
-  Android 侧关着是因为 **NDK 不自带 nasm**，交叉编译时 configure 找不到它会直接 `die` ——
-  **别**把它当成"顺手统一一下"挪回公共块。
-  开启后输出像素与纯 C 路径**不是逐比特一致**（1~3 LSB 舍入差）—— 口径与实测见
-  [../TODO.md](../TODO.md) B11。
+- **两端都开 asm，只有 32 位 `x86` 关**（桌面 2026-09-22 / Android 2026-10-20）：
+  `ffmpeg.cmake` 里 `--disable-asm` 只在 `ANDROID` + `CMAKE_ANDROID_ARCH=x86` 时追加。
+  x86/x86_64 的手写汇编要 `nasm`（构建机用 MSYS2 的 `mingw-w64-x86_64-nasm`；PATH 里没有时
+  configure 直接 `die`（`configure:6875`），不是静默降级），armv7/arm64 走 clang 的 `.S`。
+  32 位 x86 关着是硬限制：它的汇编**和** C 内联汇编都只出 32 位绝对重定位，链接出带 textrel 的
+  .so，而 Android 从 API 23 起拒绝加载 —— 没有干净的开关，别试着用 `-z notext` 掩盖。
+- **静态库进我们的 `.so` 必须 `-Wl,-Bsymbolic`**（Android 分支，`ffmpeg.cmake`）：汇编用
+  PC 相对 / ADRP 直接引用 C 侧常量符号（`ff_pw_32` 之流），这些符号默认可抢占，链接器不肯就地
+  解析（`relocation R_*_PC32 / ADR_PREL_PG_HI21 cannot be used …; recompile with -fPIC`）。
+  上游链接自己的 libav*.so 同样靠它（configure 把它放进 `SHFLAGS`，`configure:8033`）。
+  删掉它 x86_64 / arm64 立刻链接失败，与「像素有没有差异」无关。
+- 开启后输出像素与纯 C 路径**不是逐比特一致**（RGB 有 1~3 LSB 舍入差，alpha 恒等）⇒ 像素比对
+  别用哈希：用「帧数 / 时戳 / 尺寸 / alpha 相等 + RGB ≤ 3 LSB」。
 - **`SwsContext` / `SwrContext` 都按「源格式 + 尺寸」缓存，缓存键必须回写**：`postFrameVideo`
   比的是 `_srcVideoFormat`（对应 `postFrameAudio` 的 `_srcAudioFormat` + 声道布局 + 采样率）。
   漏了回写**编译和调用都不会失败**，只会让那个条件**每一帧都成立** → 逐帧

@@ -28,11 +28,8 @@ if (ANDROID)
             mediandk
             android
             z)
-    # 安卓侧维持 `--disable-asm`：x86/x86_64 的手写汇编要 nasm，NDK 不自带，
-    # 交叉编译时 configure 找不到它会直接报错退出。桌面端已不关，见 TODO.md 的 B11。
     set(FFMPEG_CONFIGURE_COMMAND
             ${FFMPEG_CONFIGURE_COMMAND}
-            --disable-asm
             --arch=${CMAKE_ANDROID_ARCH}
             --target-os=android
             --enable-jni
@@ -44,6 +41,11 @@ if (ANDROID)
             --extra-ldflags=--target=${ANDROID_LLVM_TRIPLE}
             --cross-prefix=${ANDROID_TOOLCHAIN_PREFIX}
             )
+    # 32 位 x86 的汇编（含 C 内联汇编）用 32 位绝对重定位，只能编出带 textrel 的 .so，
+    # 而 Android 从 API 23 起拒绝加载 textrel ⇒ 只有这一支关；armv7 / arm64 / x86_64 都开。
+    if (CMAKE_ANDROID_ARCH STREQUAL "x86")
+        list(APPEND FFMPEG_CONFIGURE_COMMAND --disable-asm)
+    endif ()
 else ()
     set(ffmpeg-lib
             z bz2 iconv lzma ole32 bcrypt)
@@ -88,3 +90,10 @@ target_link_libraries(ffmpeg PRIVATE
         avformat avcodec avutil swresample swscale
         ${ffmpeg-lib}
         )
+
+if (ANDROID)
+    # 汇编用 PC 相对 / ADRP 直接引用 C 侧的常量符号，这些符号默认可抢占，链接器不肯就地
+    # 解析（`relocation R_*_PC32 cannot be used against symbol …; recompile with -fPIC`）。
+    # 上游链接自己的 libav*.so 同样靠它：configure 把 -Wl,-Bsymbolic 放进 SHFLAGS（`configure:8033`）。
+    target_link_options(ffmpeg PRIVATE -Wl,-Bsymbolic)
+endif ()
