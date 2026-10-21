@@ -12,7 +12,10 @@ private class RandomAccessFileHandle(
 ) : FileHandle {
   override val size: Long get() = file.length()
 
-  override fun read(buf: ByteArray): Int = file.read(buf)
+  override fun read(
+    buf: ByteArray,
+    len: Int,
+  ): Int = file.read(buf, 0, len)
 
   override fun seek(position: Long) {
     file.seek(position)

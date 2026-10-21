@@ -69,17 +69,6 @@ class HttpIO(
   private val discardBuf = ByteArray(16 * 1024)
 
   /**
-   * 「往前跳多远就不如在网络上白读白丢」的阈值 —— 取 avio 缓冲的大小（[getBufferSize]，与 ffmpeg
-   * 对齐，来由见 `cxx/AGENTS.md`）。
-   *
-   * 比阈值时**要减掉本地已有的部分**（[Http.Response.availableForRead]）：那部分白读是纯内存
-   * memcpy、零网络成本。**别改成「把阈值调大来代替扣减」**（阈值是常量，扣减按实际缓冲量算）。
-   * 与 ffmpeg 官方判据（`aviobuf.c:279`，`offset1 <= buffer_size + short_seek_threshold`）的
-   * 对照见 `playback-invariants.md` 第五节（白读推进）。
-   */
-  private val skipThreshold: Int get() = getBufferSize().toInt()
-
-  /**
    * 打开一条从 [start] 起的会话，等它把响应交出来。**不用**给
    * [Http.Response.offset] 赋起点 —— 它自己从 `Content-Range` header 算，本函数只管请求、不管记账。
    *
@@ -111,12 +100,14 @@ class HttpIO(
       // 缓冲已经越过 offset（seek 往回）：这条响应给不出 offset 处的内容，必须换一条。
       rsp.close()
       rsp = getRange(offset)
-    } else if (offset - rsp.offset - rsp.availableForRead > skipThreshold) {
+    } else if (offset - rsp.offset - rsp.availableForRead > 0) {
       // [////已交付////][/本地存量/]  |
       //                             offset
-      // 往前跳得远 —— 远到**扣掉本地已有的那些**之后仍超过一个 avio 缓冲：剩下的部分还得从网络上
-      // 取，与其白读白丢，不如换一条**真落在 offset 上**的。服务端给不出这种响应时保留手上这条。
-      // 推导见 `playback-invariants.md` 第五节（白读推进）。
+      // 往前跳了、且**还没取到的部分**不为零：换一条真落在 offset 上的，比白读白丢省。
+      // 这个 `0` **不是可调阈值**：落在 `short_seek_threshold` 以内的前向跳由 aviobuf 自己用
+      // `fill_buffer` 吸收（`aviobuf.c:281-289`，地板 32768，mov 只会按索引往上抬），交到 IO 层的
+      // 必然是长跳 ⇒ 阈值判据在这里恒真、没有意义。反过来 `<= 0` 表示目标已经在本地存量里，
+      // 重开只会白花一次往返。服务端给不出精确起点时保留手上这条、退回下面的白读。
       val newRsp = getRange(offset)
       if (newRsp.offset == offset) {
         rsp.close()
@@ -164,7 +155,10 @@ class HttpIO(
     return rsp
   }
 
-  override fun read(buf: ByteArray): Int =
+  override fun read(
+    buf: ByteArray,
+    len: Int,
+  ): Int =
     // 这里是**唯一**的 `runBlocking`：`AvIO.read` 是 native 回调要求的同步签名，
     // 而下面整条链路（建立会话 / 等数据 / 推进游标）现在全是 suspend —— 阻塞只能由
     // 发起方按需包。调用方（native 的 `av_read_frame`）本来就在本线程等这批数据。
@@ -175,7 +169,7 @@ class HttpIO(
         val signal = AbortSignal()
         // 真正干活的读（建立会话 / 等数据 / 白读推进），单独一支协程 ——
         // 好让哨兵能把它**整棵取消**掉。
-        val job = async { readSuspend(buf) }
+        val job = async { readSuspend(buf, len) }
         // **旁路哨兵**：等信号，一醒来就 `cancel` 掉 `job` ⇒「叫醒」不依赖下面任何一层知道 signal 的
         // 存在，取消顺着协程树走。哨兵**只能 `cancel`、不能 `throw`** —— 抛异常会 `parentCancelled`
         // 向上取消整个 `runBlocking`（`playback-invariants.md` 第六节「async 拆父 scope」）。
@@ -191,15 +185,17 @@ class HttpIO(
           job.await()
         } catch (e: CancellationException) {
           // 哨兵叫醒的收场：`job.cancel()` 让这里抛 `CancellationException`，即「本轮作废」。
-          // 必须返回正数 `buf.size`（谎报读满 —— 字节并没有，但那条包必然被丢），不是任何错误码：
+          // 必须返回正数 `len`（谎报读满 —— 字节并没有，但那条包必然被丢），不是任何错误码：
           // 翻错误码会让 demuxer 再读一轮、重开 range 会话干等超时，`closeAsync` 被拖到 8s 量级。
+          // **不能写 `buf.size`**：数组是复用的，容量可能远大于这次请求，报大了只会被 native
+          // 的 over-ran 兜底 clamp 回来并打一条错误日志。
           // 逐档推演见 `playback-invariants.md` 第五节（私有作废信号）。
           //
           // 叫醒的代价是那条会话没了（取消 = 关连接，见 [Http.Response.isClosed]）：它必须在这里
           // 丢掉，否则下一条读会拿着一条死响应继续用，报出来的是一串 -1（= 假 EOF）。
           // 只丢**真的被掀掉**的那条：作废也可能落在建连上，那时手上这条还活着、不该陪葬。
           if (cachedRsp?.isClosed == true) cachedRsp = null
-          buf.size
+          len
         } catch (e: Throwable) {
           // 真故障才出声。被作废叫醒的读走上面那条，落不到这里 —— 不必再查旗标。
           e.printStackTrace()
@@ -240,7 +236,10 @@ class HttpIO(
    * 「作废」不经这里 —— 那是 [read] 那支哨兵**取消本协程**的事，本函数被取消时任一处
    * 挂起点都会抛 `CancellationException`。
    */
-  private suspend fun readSuspend(buf: ByteArray): Int {
+  private suspend fun readSuspend(
+    buf: ByteArray,
+    len: Int,
+  ): Int {
     while (true) {
       // 取不到响应 = 真的读到流尾（见 [getResponseBlocking]）。
       val rsp = getResponseBlocking() ?: return AvFormat.AVERROR_EOF
@@ -249,7 +248,7 @@ class HttpIO(
       // 所以就地 catch 住。
       val ret =
         try {
-          rsp.read(buf)
+          rsp.read(buf, 0, len)
         } catch (e: Http.IdleTimeoutException) {
           // 闲置超时：这条会话多半死了 ⇒ 丢掉、按同样间隔换一条，**不限次数**（抛上去会被 aviobuf
           // 毒化成 EOF、播放静默「正常结束」，见 `playback-invariants.md` 第五节）。间隔同样取

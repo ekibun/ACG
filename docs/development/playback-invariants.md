@@ -353,9 +353,18 @@ FFPlayer 每次 seek / 单帧步进都会 `abort`，而那种时刻通常没有�
 3. **每一段都走 `rsp.read`**，不要绕开它去直接摸底层流——只有它带闲置超时（§4.2）、
    且落在本协程自己的取消点上。
 
-**换会话的判据是「白读的那部分里，还得从网络上取多少」**——即 `offset - rsp.offset - rsp.availableForRead`。
-**本地已有的那部分要减掉**：白读它们是纯内存 memcpy、零网络成本，算进代价会高估，于是「其实一个字节都不用下」
-的时候也去重开会话，而重开要付 TCP 往返 + TLS + 响应头的固定成本。
+**换会话的判据只剩「还没从网络上取到的部分是否为零」**——即 `offset - rsp.offset - rsp.availableForRead > 0`。
+**这里没有可调阈值**：落在 `short_seek_threshold`（`aviobuf.c:43`，地板 32768；mov 只按索引往上抬）
+以内的前向跳由 aviobuf 自己用 `fill_buffer` 吸收成顺序读（`aviobuf.c:281-289`），**根本不会调
+`s->seek`** ⇒ 交到 IO 层的必然是长跳，重开就是对的；反过来 `<= 0` 表示落点已在本地存量里，
+重开只是白花一次 TCP 往返 + TLS + 响应头。
+**本地已有的那部分要减掉**：白读它们是纯内存 memcpy、零网络成本，算进代价会高估。
+
+> **DO:** 「保留旧会话、退回白读」是**服务端不认 Range 时的兜底**（`newRsp.offset != offset`），
+> 不是「跳得近就别重开」—— 后者在本构建里没有可生效的区间。两条路都由
+> `HttpReadContractTest` 端到端守着：`forwardSeekWithinBufferedRangeKeepsSessionButFarSeekDoesNot`
+> （落点在存量内不重开 / 越过存量必重开）与 `forwardSeekOverRangeIgnoringServerReadsEveryFrame`
+> （不认 Range 时退回白读仍能逐帧读完）。
 
 > **DO:** 这条判据只在「复用缓存会话」时生效，而那条会话的缓冲量必定已知 ⇒ 扣减量可信。
 > 新建那条的存量恒为 0、扣减退化成 0 ⇒ **只会更倾向换会话**，最坏等于扣减前。

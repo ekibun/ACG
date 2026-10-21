@@ -9,15 +9,6 @@ interface AvIO {
     const val SEEK_END = 2
   }
 
-  /**
-   * avio 协议缓冲的大小 —— native 侧 `ffmpeg.cpp` **反射调用本方法**取它当 `avio_alloc_context`
-   * 的实参（改签名会静默要不到方法、连带整个播放起不来）。
-   *
-   * **有默认实现，别在实现类里各抄一份。** 默认 32768 与 ffmpeg 的 `IO_BUFFER_SIZE` /
-   * `SHORT_SEEK_THRESHOLD` 对齐（来由与改它的连带影响见 `cxx/AGENTS.md` 的 ffmpeg 一节）。
-   */
-  fun getBufferSize(): Long = 32768L
-
   interface Handler {
     /**
      * 打开一个源。「打不开」**不许抛异常**：本函数跑在 native 的 `io_open` 回调里，Kotlin
@@ -41,7 +32,19 @@ interface AvIO {
     fun abort() {}
   }
 
-  fun read(buf: ByteArray): Int
+  /**
+   * 往 [buf] 的前 [len] 个字节里读（最多 [len] 个），返回实际读到的字节数
+   * （`AVERROR_EOF` / 其余负数 = 错误）。
+   *
+   * **必须按 [len] 截断，不能按 `buf.size` 填满**：native 侧每个 pb 只持有一个**复用**数组，
+   * [len] ≤ `buf.size`，但通常远小于它（`fill_buffer` 要的是「缓冲剩余容量」，MP4 源能被放大
+   * 到 MB 级；数组只增不减）。按 `buf.size` 填满会报出比请求量还多的字节 —— native 只能把
+   * 返回值 clamp 回去、并打一条 `AvIO read over-ran`，等于每次读都变成一条错误日志。
+   */
+  fun read(
+    buf: ByteArray,
+    len: Int,
+  ): Int
 
   fun seek(
     offset: Int,

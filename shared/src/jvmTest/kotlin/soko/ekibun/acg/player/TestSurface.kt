@@ -24,7 +24,7 @@ internal fun AvIO.readBounded(
 ): Int {
   val result = AtomicInteger(Int.MIN_VALUE)
   val reader =
-    Thread { result.set(read(ByteArray(size))) }.apply {
+    Thread { result.set(read(ByteArray(size), size)) }.apply {
       isDaemon = true
       start()
     }

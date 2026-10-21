@@ -25,8 +25,11 @@ interface FileHandle {
   /** 文件总字节数。 */
   val size: Long
 
-  /** 从当前位置读入 `buf`，返回读到的字节数；**已到末尾返回 -1**（`RandomAccessFile` 的约定）。 */
-  fun read(buf: ByteArray): Int
+  /** 从当前位置读入 `buf` 的前 `len` 个字节，返回读到的字节数；**已到末尾返回 -1**（`RandomAccessFile` 的约定）。 */
+  fun read(
+    buf: ByteArray,
+    len: Int,
+  ): Int
 
   /** 把读写位置移到绝对偏移 `position`。 */
   fun seek(position: Long)

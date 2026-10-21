@@ -27,7 +27,7 @@ class HttpSeekSemanticsTest {
   private fun open(server: TestMediaServer): HttpIO = HttpIO.Handler().open(server.url) as HttpIO
 
   /** [HttpIO.read] 与 [HttpIO.seek] 都是挂起函数：测试里一律丢进协程跑。 */
-  private fun HttpIO.readBlocking(size: Int): Int = runBlocking { read(ByteArray(size)) }
+  private fun HttpIO.readBlocking(size: Int): Int = runBlocking { read(ByteArray(size), size) }
 
   private fun HttpIO.seekBlocking(
     offset: Int,
@@ -47,7 +47,7 @@ class HttpSeekSemanticsTest {
         assertEquals(42, io.seekBlocking(42, AvIO.SEEK_SET), "SEEK_SET returns the new absolute position")
         // 位置真的是 42：读一个字节，读到的必须是第 42 个字节。
         val buf = ByteArray(1)
-        assertEquals(1, runBlocking { io.read(buf) })
+        assertEquals(1, runBlocking { io.read(buf, buf.size) })
         assertEquals(body[42], buf[0], "a read after SEEK_SET must start at that position")
       } finally {
         io.close()

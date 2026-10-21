@@ -42,7 +42,7 @@ class HttpAbortTest {
       try {
         val result = AtomicInteger(Int.MIN_VALUE)
         val reader =
-          Thread { result.set(io.read(ByteArray(4096))) }.apply {
+          Thread { result.set(io.read(ByteArray(4096), 4096)) }.apply {
             isDaemon = true
             start()
           }

@@ -42,7 +42,10 @@ class AvFormatNestedOpenFailureTest {
           TestIo(playlist).open(url)
         } else {
           object : AvIO {
-            override fun read(buf: ByteArray): Int = -1
+            override fun read(
+              buf: ByteArray,
+              len: Int,
+            ): Int = -1
 
             override fun seek(
               offset: Int,

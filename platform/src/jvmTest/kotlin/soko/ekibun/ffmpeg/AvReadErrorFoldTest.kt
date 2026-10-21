@@ -32,9 +32,12 @@ class AvReadErrorFoldTest {
     override fun open(url: String): AvIO {
       val delegate = inner.open(url)
       return object : AvIO by delegate {
-        override fun read(buf: ByteArray): Int {
+        override fun read(
+          buf: ByteArray,
+          len: Int,
+        ): Int {
           if (++reads > failAfter) return -1
-          return delegate.read(buf)
+          return delegate.read(buf, len)
         }
       }
     }
@@ -83,7 +86,10 @@ class AvReadErrorFoldTest {
             // FileIO 对不存在的路径正是这个行为。
             override fun open(url: String): AvIO =
               object : AvIO {
-                override fun read(buf: ByteArray): Int = -1
+                override fun read(
+                  buf: ByteArray,
+                  len: Int,
+                ): Int = -1
 
                 override fun seek(
                   offset: Int,

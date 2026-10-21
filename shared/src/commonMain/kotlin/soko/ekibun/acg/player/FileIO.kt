@@ -31,13 +31,16 @@ class FileIO(
   /** 逻辑读写位置，与底层文件指针保持同步。 */
   private var offset = 0L
 
-  override fun read(buf: ByteArray): Int {
+  override fun read(
+    buf: ByteArray,
+    len: Int,
+  ): Int {
     val file = file ?: return -1
     // 异常先接住（返回 -1 = 出错），EOF 与数据分开翻：
     // -1（RandomAccessFile 的 EOF）→ AVERROR_EOF；正数原样。
     val ret =
       try {
-        file.read(buf)
+        file.read(buf, len)
       } catch (e: Throwable) {
         e.printStackTrace()
         return -1

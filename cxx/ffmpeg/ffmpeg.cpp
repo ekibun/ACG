@@ -76,27 +76,43 @@ struct FormatOpaque {
   std::vector<AVIOContext*> pbs;  // io_open 建出来、还没关的 pb
 };
 
-// 还一个已经不在账上的 pb：Java 侧 close() → 还 ioCtx 的 GlobalRef → 释放缓冲与
+// 每个 pb 一份，**pb->opaque 指向它**（原来是裸的 AvIO GlobalRef）。
+// 除了持有 AvIO，它挂两样以前每次回调都要重做的东西：
+//
+// - **复用的读数组**。`fill_buffer` 一次要的是「缓冲剩余容量」，MP4 源被
+//   `ff_configure_buffers_for_index` 放大后可达 MB 级；而一次只到货一个 okio
+//   段（实测 8 KB）。按请求量 NewByteArray 等于每回调清零几百 KB 去接 8 KB ——
+//   实测那笔开销就是一次强制清零，约 16 GB/s、62 ns/KB。
+// - **缓存 methodID**。原来每次回调都 GetObjectClass + GetMethodID。
+struct IoOpaque {
+  jobject io;          // AvIO 实例的 GlobalRef
+  jbyteArray arr;      // 复用数组的 GlobalRef，只增不减；首次读时才建
+  jint cap;            // arr 的长度
+  jmethodID readMid;   // read  "([BI)I"
+  jmethodID seekMid;   // seek  "(II)I"
+  jmethodID closeMid;  // close "()V"
+};
+
+// 还一个已经不在账上的 pb：Java 侧 close() → 还两个 GlobalRef → 释放缓冲与
 // 上下文本体。三个关闭点（io_close2 / destroyNative / 打开失败）共用这一份。
 static void closeIoContext(JNIEnv* env, AVIOContext* pb) {
   if (!pb) return;
-  auto ioCtx = (jobject)pb->opaque;
-  if (ioCtx) {
-    if (jmethodID close =
-            env->GetMethodID(env->GetObjectClass(ioCtx), "close", "()V")) {
-      env->CallVoidMethod(ioCtx, close);
+  auto io = (IoOpaque*)pb->opaque;
+  if (io) {
+    if (io->closeMid) {
+      env->CallVoidMethod(io->io, io->closeMid);
       if (env->ExceptionCheck()) {
         env->ExceptionDescribe();
         env->ExceptionClear();
       }
-    } else if (env->ExceptionCheck()) {
-      env->ExceptionClear();
     }
-    env->DeleteGlobalRef(ioCtx);
+    if (io->arr) env->DeleteGlobalRef(io->arr);
+    if (io->io) env->DeleteGlobalRef(io->io);
+    delete io;
   }
   // ⚠️ **不能用 avio_close**：那是给 avio_open 的 URLContext 系 pb 用的 ——
   // 它把 s->opaque 当 URLContext* 送去 ffurl_close（avio.c），对我们这个在
-  // opaque 里放 GlobalRef(jobject) 的自定义 pb 是类型混淆，直接访问违例
+  // opaque 里放 IoOpaque* 的自定义 pb 是类型混淆，直接访问违例
   // （2026-10-02 实测：hs_err 落在 avio_close 内 `mov 0x80(%rdx)`）。
   // 自定义 pb 的正确关法：buffer 由调用方 av_free（avio.h 的契约
   // 「AVIOContext.buffer … must be later freed with av_free()」），
@@ -144,26 +160,55 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
     jstring strUrl = env->NewStringUTF(url);
     jobject ioCtx = env->CallObjectMethod(io, method, strUrl);
     env->DeleteLocalRef(strUrl);
-    long bufferSize = env->CallLongMethod(
-        ioCtx,
-        env->GetMethodID(env->GetObjectClass(ioCtx), "getBufferSize", "()J"));
+    // 一个 pb 一份记账（含缓存的 methodID 与复用数组），见 IoOpaque。
+    auto ioCtxCls = env->GetObjectClass(ioCtx);
+    auto ctxOpaque = new IoOpaque{env->NewGlobalRef(ioCtx),
+                                  nullptr,
+                                  0,
+                                  env->GetMethodID(ioCtxCls, "read", "([BI)I"),
+                                  env->GetMethodID(ioCtxCls, "seek", "(II)I"),
+                                  env->GetMethodID(ioCtxCls, "close", "()V")};
+    env->DeleteLocalRef(ioCtxCls);
+    env->DeleteLocalRef(ioCtx);
+    // 初始缓冲对齐 IO_BUFFER_SIZE（aviobuf.c:36）；MP4 源之后按索引换掉。
     *pb = avio_alloc_context(
-        (unsigned char*)av_malloc(bufferSize), bufferSize, 0,
-        env->NewGlobalRef(ioCtx),
+        (unsigned char*)av_malloc(32768), 32768, 0, ctxOpaque,
         [](void* opaque, uint8_t* buf, int buf_size) -> int {
           JNIEnv* env;
           javaVm->GetEnv((void**)&env, JNI_VERSION_1_4);
-          auto ioCtx = (jobject)opaque;
-          jmethodID method =
-              env->GetMethodID(env->GetObjectClass(ioCtx), "read", "([B)I");
-          jbyteArray arr = env->NewByteArray(buf_size);
-          int ret = env->CallIntMethod(ioCtx, method, arr);
-          if (ret > 0) env->GetByteArrayRegion(arr, 0, ret, (jbyte*)buf);
-          env->DeleteLocalRef(arr);
+          auto io = (IoOpaque*)opaque;
+          // 扩容只增不减：一次 open 里通常只发生 1~2 次（初始 32768，mov 按索引
+          // realloc 之后再涨一档）。
+          if (io->cap < buf_size) {
+            if (io->arr) env->DeleteGlobalRef(io->arr);
+            io->arr =
+                (jbyteArray)env->NewGlobalRef(env->NewByteArray(buf_size));
+            io->cap = buf_size;
+            if (!io->arr) {
+              if (env->ExceptionCheck()) {
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+              }
+              return AVERROR(ENOMEM);
+            }
+          }
+          // 长度显式传下去，不让 Kotlin 按 `buf.size` 填满 ——
+          // 数组只增不减，可能远大于这次请求，见 `AvIO.read` 的 KDoc。
+          //
+          // 最后一道防线：超量就 clamp 并打日志，不夹住的话直接拷进去就是写穿
+          // avio 缓冲。契约仍是「按 len 截断」，这里只保证不越界。
+          int ret =
+              env->CallIntMethod(io->io, io->readMid, io->arr, (jint)buf_size);
+          if (ret > buf_size) {
+            av_log(nullptr, AV_LOG_ERROR,
+                   "AvIO read over-ran: ret=%d buf_size=%d\n", ret, buf_size);
+            ret = buf_size;
+          }
+          if (ret > 0) env->GetByteArrayRegion(io->arr, 0, ret, (jbyte*)buf);
           // AvIO 的契约是 **AVERROR_EOF 表示
           // EOF、其余负数表示出错**（FileIO.read / HttpIO.read 都把各自的 EOF
-          // 翻成了 AVERROR_EOF）。错误在这一层就得出 声：aviobuf 的 fill_buffer
-          // 对任何负返回值都置 eof_reached 并把错误码 记进
+          // 翻成了 AVERROR_EOF）。错误在这一层就得出声：aviobuf 的 fill_buffer
+          // 对任何负返回值都置 eof_reached 并把错误码记进
           // s->error（aviobuf.c:551-558），此后 av_read_frame 一律以 EOF 形态
           // 上浮 —— 不在这里打日志，IO 故障在外面看起来就是"播完了"。
           if (ret < 0 && ret != AVERROR_EOF)
@@ -174,10 +219,10 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
         [](void* opaque, int64_t offset, int whence) -> int64_t {
           JNIEnv* env;
           javaVm->GetEnv((void**)&env, JNI_VERSION_1_4);
-          auto ioCtx = (jobject)opaque;
-          jmethodID method =
-              env->GetMethodID(env->GetObjectClass(ioCtx), "seek", "(II)I");
-          return env->CallIntMethod(ioCtx, method, offset, whence);
+          auto io = (IoOpaque*)opaque;
+          // 两个参数都收窄成 jint —— AvIO.seek 的签名是 (II)I，原本就是 32 位。
+          return env->CallIntMethod(io->io, io->seekMid, (jint)offset,
+                                    (jint)whence);
         });
     // 记进账本，交给 io_close2 销账或关闭路径兜底（理由见 FormatOpaque
     // 的注释）。

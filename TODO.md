@@ -29,10 +29,13 @@
 - ⚠️ **别被日志误导**：真实源起播时 stderr 会打  
   `https or dtls protocol not found, recompile FFmpeg with openssl, gnutls or securetransport enabled.`  
   与 `Protocol name not provided, cannot determine if input is local or a network protocol…`。  
-  这两条来自 `avformat_open_input` 对 CUSTOM_IO 的**协议探测**分支，**不影响功能** ——  
-  同一次运行里 `RealUrlProbeTest` 的 `open / 读 / seek` 全部通过（见 B12）。想消掉就得  
-  `av_dict_set(&opts, "protocol_whitelist", …, 0)` 或改传内联选项串，属**噪声治理**而非修 bug，  
-  已记在 B12 的完成判据之外。
+  两条都出自 `avio_find_protocol_name(s->url)`（`avio.c` 的协议表比对 + `https:` 前缀判断）：  
+  协议表为空 ⇒ 一律认不出，与功能无关，**`protocol_whitelist` 也消不掉**（CUSTOM_IO 下顶层  
+  `pb` 由我们的 `io_open` 建，白名单不参与）。入口唯一：`mov_read_header` 末尾的  
+  `ff_configure_buffers_for_index` ⇒ **只有 MP4/MOV 打这两条**，HLS/ts 不进这条链。  
+  另有一层副作用：`proto == NULL` 时它把 avio 缓冲按索引放大到 `pos_delta`（`seek.c`），  
+  本地与网络源一视同仁（`file` 协议同样没编进去）。属**噪声治理**而非修 bug ——  
+  同一次运行里 `RealUrlProbeTest` 的 `open / 读 / seek` 全部通过（见 B12）。
 
 ### B23. JS 侧流式 response（缓做，随 E8 数据源契约落地）
 
@@ -81,8 +84,8 @@
 - **方向**：`ffmpeg.cpp` 的 io_open 里 `av_dict_get(*options, "key"/"iv")` 读出 hex 串（到  
   io_open 这一层 dict 里仍是 hex 字符串，二进制转换发生在 avio_open2 应用 dict 时）、识别并剥掉  
   `crypto+` / `crypto:` 前缀，把（真实 URL、key、iv）传给 Kotlin —— 扩 `Handler.open` 签名，  
-  **`ffmpeg.cpp` 的 `GetMethodID` 签名字符串必须同步**（改漏即「静默要不到方法」，与  
-  `AvIO.getBufferSize` KDoc 警告同款）；Kotlin 侧拉密文 + AES-128-CBC 解密。
+  **`ffmpeg.cpp` 的 `GetMethodID` 签名字符串必须同步**（改漏即「静默要不到方法」，与同一函数里  
+  `open` / `read` 的签名字符串同款）；Kotlin 侧拉密文 + AES-128-CBC 解密。
 - **SAMPLE-AES 不在此列**：不走 `crypto+` URL，是 hls 取包后自己用 `av_aes_ctx` 解密  
   （`hls.c:2657` 附近），本项目没有接口，暂不支持。
 - **测试材料**：在线 AES-128 流与本地生成法见 skill `build-and-test` 的「在线测试流」一节。
@@ -166,11 +169,10 @@
   - `AvFormat.resetChannel` **57 行 → 17 行**：归属线程的论证 `playback-invariants.md` 第五节（私有作废信号）  
     已有，`packetChannel` / `readerJob` **不加 `@Volatile`** 那 22 行（含访问点表与  
     「拆掉 `FFPlayer.pause` 的 join 就变真竞态」）搬进 `playback-invariants.md`；
-  - `AvIO.getBufferSize` 的 ffmpeg 常量来由（`aviobuf.c:36` / `:43` + 官方注释）→  
+  - avio 初始缓冲 32768 的来由（`aviobuf.c:36` / `:43` + 官方注释）→  
     `cxx/AGENTS.md` 的 ffmpeg 一节；
   - `AvPlayback.isReadTimeOut` **29 行 → 14 行**：耗时特性（pause 的 join 上界 = 一个轮次、  
     实测 7～108 ms）搬进 `docs/development/debugging.md`；
-  - `HttpIO.skipThreshold` **16 行 → 9 行**：判据论证 `playback-invariants.md` 第五节（白读推进）已有全文；
   - `FileIO` 类 KDoc **14 行 → 10 行**：wav / pcm 在文件尾 **100% CPU 空转**的实测与  
     `aviobuf.c:551-558` 的判据搬进 `playback-invariants.md`；
   - `Http.requestStreaming` 内 5 组行内注释（done/ready、session scope、catch、await、finally）  

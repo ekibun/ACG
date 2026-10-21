@@ -22,10 +22,13 @@ class TestIo(
     object : AvIO {
       private var offset = 0L
 
-      override fun read(buf: ByteArray): Int {
+      override fun read(
+        buf: ByteArray,
+        len: Int,
+      ): Int {
         if (aborted.get()) return AvFormat.AVERROR_EOF
         if (offset >= bytes.size) return AvFormat.AVERROR_EOF
-        val n = minOf(buf.size.toLong(), bytes.size - offset).toInt()
+        val n = minOf(len.toLong(), bytes.size - offset).toInt()
         bytes.copyInto(buf, 0, offset.toInt(), offset.toInt() + n)
         offset += n
         return n

@@ -195,16 +195,23 @@ WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/de
 - 自定义 AVIO 下的 seek 能力由 `HttpIO.seek` 的模拟质量决定（`aviobuf.c` 会因 seek 回调非空
   判为 `AVIO_SEEKABLE_NORMAL`）；语义有专属用例 `HttpSeekSemanticsTest` /
   `SeekWindowSemanticsTest`，动这块必须让它们保持绿。
-- **`AvIO.getBufferSize()` 默认 32768 是与 ffmpeg 对齐的，不是随手取的整数**
-  （`cxx/ffmpeg/ffmpeg/libavformat/aviobuf.c`）：
-  - `:36` `#define IO_BUFFER_SIZE 32768` —— avio 缓冲的默认值；
-  - `:43` `#define SHORT_SEEK_THRESHOLD 32768` —— 前向小跳「白读而不重开」的距离
-    （官方注释：*Do seeks within this distance ahead of the current buffer by skipping data
-    instead of calling the protocol seek function*）。
-
-  ⇒ 改它要连带三个地方：两个 IO 实现（它们共用这一个，`HttpIO.skipThreshold` 取的就是它）
-  与上面那条 seek 判据。⚠️ native 侧 `ffmpeg.cpp` **反射调用这个方法**取 `avio_alloc_context`
-  的实参 —— 改签名会静默要不到方法、连带整个播放起不来。
+- **avio 初始缓冲的 32768 是 `ffmpeg.cpp` 的 `io_open` 里直接写死的**，与 `IO_BUFFER_SIZE`
+  （`cxx/ffmpeg/ffmpeg/libavformat/aviobuf.c:36`）对齐，不是随手取的整数。它**只管初始值**：
+  MP4 源在 `mov_read_header` 末尾会被按索引换掉（`ff_configure_buffers_for_index`），实际大小
+  由文件决定。Kotlin 侧没有这个数 —— 别再往 `AvIO` 上加回反射方法。
+- **`AvIO.read(buf, len)` 必须按 `len` 截断，不许按 `buf.size` 填满**：native 侧每个 pb 只持有
+  **一个复用数组**（`IoOpaque::arr`，按需扩容、只增不减），它的容量是历史最大请求量，通常远大于
+  这次请求（`fill_buffer` 要的是「缓冲剩余容量」，MP4 源能被放大到 MB 级）。按 `buf.size` 读会
+  报出比请求量还多的字节 —— `fill_buffer` 拿返回值定 `buf_end`，等同谎报；native 侧只能把
+  `ret > buf_size` clamp 回去并打一条 `AvIO read over-ran`（每轮读一条）。同款「谎报读满」在
+  `HttpIO` 的作废分支里，那里返回的是 `len`，别改回 `buf.size`。
+- **`pb->opaque` 是 `IoOpaque*`，不是裸 `jobject`**（里面装着 AvIO 的 GlobalRef、复用数组、
+  缓存的三组 methodID）。读/seek/关三条路径都从它取，`closeIoContext` 负责整体释放 ——
+  加字段时记得在那一处收干净，HLS 一次 open 会开/关多个 pb。
+- **前向「白读 vs 重开」不归 Kotlin 管**：`aviobuf.c:281-289` 先用 `short_seek_threshold`
+  （`:43`，默认 32768，mov 只会照索引往上抬）把近跳用 `fill_buffer` 吸收成顺序读，交到
+  `HttpIO.seek` 的只能是长跳 ⇒ IO 层不设阈值（`HttpIO` 那个 `> 0` 判的是「还没取到的部分
+  非零」，不是阈值），只负责「重开一条落在落点上的会话，服务端给不出就保留旧会话退回白读」。
 - **`AvIO.Handler.open` 不许抛异常**：它跑在 native 的 `io_open` 回调里，Kotlin 异常会
   pending 在 JNI 上没人接，下一个 JNI 调用直接 abort 整个 JVM（hs_err 的 Problematic frame
   在 `initNative`）。「打不开」要学 `FileIO`：返回句柄为 null 的 IO（read/seek 恒 -1），

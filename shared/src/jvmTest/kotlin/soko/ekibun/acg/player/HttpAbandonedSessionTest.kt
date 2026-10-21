@@ -37,7 +37,7 @@ class HttpAbandonedSessionTest {
       io.seek(150_000, AvIO.SEEK_SET)
       val result = AtomicInteger(Int.MIN_VALUE)
       val reader =
-        Thread { result.set(io.read(ByteArray(4096))) }.apply {
+        Thread { result.set(io.read(ByteArray(4096), 4096)) }.apply {
           isDaemon = true
           start()
         }

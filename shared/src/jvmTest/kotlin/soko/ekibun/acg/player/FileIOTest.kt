@@ -32,7 +32,7 @@ class FileIOTest {
 
   private fun FileIO.readBytes(count: Int): List<Byte> {
     val buf = ByteArray(count)
-    val ret = read(buf)
+    val ret = read(buf, buf.size)
     return buf.take(ret)
   }
 
@@ -101,7 +101,7 @@ class FileIOTest {
     // 「打不开」的 -1 语义与此不同，见 missingFileFailsInsteadOfThrowing。
     val io = fileIO()
     io.seek(FILE_SIZE, AvIO.SEEK_SET)
-    assertEquals(AvFormat.AVERROR_EOF, io.read(ByteArray(16)))
+    assertEquals(AvFormat.AVERROR_EOF, io.read(ByteArray(16), 16))
     io.close()
   }
 
@@ -109,8 +109,8 @@ class FileIOTest {
   fun readAcrossEofReturnsOnlyRemainder() {
     val io = fileIO()
     io.seek(FILE_SIZE - 10, AvIO.SEEK_SET)
-    assertEquals(10, io.read(ByteArray(64)))
-    assertEquals(AvFormat.AVERROR_EOF, io.read(ByteArray(64)))
+    assertEquals(10, io.read(ByteArray(64), 64))
+    assertEquals(AvFormat.AVERROR_EOF, io.read(ByteArray(64), 64))
     io.close()
   }
 
@@ -120,7 +120,7 @@ class FileIOTest {
     val buf = ByteArray(64)
     val read = ArrayList<Byte>()
     while (true) {
-      val ret = io.read(buf)
+      val ret = io.read(buf, buf.size)
       if (ret < 0) {
         assertEquals(AvFormat.AVERROR_EOF, ret)
         break
@@ -136,7 +136,7 @@ class FileIOTest {
     // 打不开不是异常：native 的 io_open 回调里抛异常会 pending 在 JNI 上，
     // 所以契约是返回 -1，由 avformat_open_input 去报错。
     val io = FileIO("no-such-dir/no-such-file.mp4")
-    assertEquals(-1, io.read(ByteArray(16)))
+    assertEquals(-1, io.read(ByteArray(16), 16))
     assertEquals(-1, io.seek(0, AvIO.SEEK_SET))
     assertEquals(-1, io.seek(0, AvFormat.AVSEEK_SIZE))
     io.close()
