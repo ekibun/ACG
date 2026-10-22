@@ -24,7 +24,7 @@ class FFPlayerAudioOnlyTest {
     val media = TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART)
     runBlocking {
       val player =
-        FFPlayer(media.toString(), FileIO.Handler(), playback) {
+        FFPlayer(media.toString(), IOHandler(), playback) {
           if (it is FFPlayer.Event.Frame) {
             events.add(it.pts)
           }

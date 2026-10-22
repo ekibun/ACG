@@ -152,7 +152,7 @@ class FFPlayerStallMidPlaybackTest {
       val timeoutEvents: MutableList<FFPlayer.Event> =
         Collections.synchronizedList(ArrayList<FFPlayer.Event>())
       val player =
-        FFPlayer(server.url, HttpIO.Handler(), sink) { event ->
+        FFPlayer(server.url, IOHandler(), sink) { event ->
           if (event !is FFPlayer.Event.Frame) timeoutEvents.add(event)
         }
       try {
@@ -215,7 +215,7 @@ class FFPlayerStallMidPlaybackTest {
             pauseReturned,
             "[FFPlayer] could not wind down its playback round after the network stalled mid-playback -- " +
               "pause() did not return within 5s. Root cause chain: the read job is parked in " +
-              "getPacketNative -> HttpIO.read's runBlocking, blocking the single-threaded formatDispatcher " +
+              "getPacketNative -> BaseIO.read's runBlocking, blocking the single-threaded formatDispatcher " +
               "(ThreadDispatcher is newSingleThreadExecutor, pure queueing). Whether the read timeout can " +
               "save it depends on the consumer competing for that thread: AvFormat.getPacket's " +
               "`for (v in channel)` runs on the caller's own thread and withPtr only wraps the background " +
@@ -250,7 +250,7 @@ class FFPlayerStallMidPlaybackTest {
             "closeAsync() did not return within 5s after the network stalled mid-playback -- cannot close " +
               "a stream that has already lost its network. Root cause chain: if the round-invalidating " +
               "io.abort() is issued inside formatDispatcher (or queued through closeDeferred()'s " +
-              "submit{}), it lands behind the read job's HttpIO.read runBlocking -- ThreadDispatcher is " +
+              "submit{}), it lands behind the read job's BaseIO.read runBlocking -- ThreadDispatcher is " +
               "newSingleThreadExecutor with pure queueing and no event loop to borrow. The fix is for " +
               "resetChannel() to abort in place on playerDispatcher without queueing, and it cannot rely " +
               "on releaseImpl as a fallback (that queues behind the same thread too).",

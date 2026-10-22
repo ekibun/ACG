@@ -16,7 +16,7 @@ class HttpAbortTest {
     val body = ByteArray(256 * 1024) { (it % 251).toByte() }
     // 只有第一条响应停住，后续正常发完
     TestMediaServer(body, chunkSize = 16 * 1024, hangFirstResponse = true).use { server ->
-      val handler = HttpIO.Handler()
+      val handler = IOHandler()
       val io = handler.open(server.url)
       try {
         val result = AtomicInteger(Int.MIN_VALUE)
@@ -39,7 +39,7 @@ class HttpAbortTest {
           4096,
           result.get(),
           "an aborted read must report the positive 'read a full buf.size' value so the demuxer stops at once " +
-            "instead of reading again (see HttpIO.read)",
+            "instead of reading again (see BaseIO.read)",
         )
 
         // 作废信号只活在那一次 read 里，这次读直接重发

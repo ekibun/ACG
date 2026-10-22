@@ -1,10 +1,6 @@
 package soko.ekibun.acg.player
 
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.runBlocking
 import soko.ekibun.common.Http
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvIO
@@ -16,34 +12,9 @@ class HttpIO(
   private val url: String,
   /** 源的选项（`headers` 等，不含 `url`）。 */
   private val options: Map<String, Any>,
-  /** 创建本 IO 的 [Handler]，用于登记「本次读的投递口」。 */
-  private val handler: Handler,
-) : AvIO {
-  class Handler(
-    private val options: Map<String, Any>? = null,
-  ) : AvIO.Handler {
-    /** 当前正在等数据的那次读的投递口，由 [HttpIO.read] 挂上 / 摘掉；`@Volatile` 供跨线程读写。 */
-    @Volatile
-    private var raise: (() -> Unit)? = null
-
-    override fun open(url: String): AvIO =
-      HttpIO(
-        url = url,
-        options = options ?: mapOf(),
-        handler = this,
-      )
-
-    /** 叫醒当前正在等数据的那次读；没读在等则空操作。 */
-    override fun abort() {
-      raise?.invoke()
-    }
-
-    /** 登记当前的投递口。 */
-    internal fun onSignal(block: (() -> Unit)?) {
-      raise = block
-    }
-  }
-
+  /** 创建本 IO 的 [IOHandler]，用于登记「本次读的投递口」。 */
+  handler: IOHandler,
+) : BaseIO(handler) {
   /** 交给 [Http.request] 的选项，`url` 在这里补上。 */
   private val requestOptions: Map<String, Any> = options + mapOf("url" to url)
 
@@ -120,66 +91,8 @@ class HttpIO(
     }
   }
 
-  override fun read(
-    buf: ByteArray,
-    len: Int,
-  ): Int =
-    // 本类唯一一处 runBlocking：把挂起链路折成同步的 read
-    try {
-      runBlocking {
-        // 本次读的作废信号
-        val signal = AbortSignal()
-        // 干活的读单独起一支协程
-        val job = async { readSuspend(buf, len) }
-        // 旁路哨兵：signal 一到就取消 job
-        val abort =
-          async {
-            signal.await()
-            job.cancel()
-          }
-        // 挂上投递口
-        handler.onSignal { signal.raise() }
-        try {
-          job.await()
-        } catch (e: CancellationException) {
-          // 作废收场：返回本次请求的长度。会话可能已被关掉，但引用留着 —— streamLength 靠它答长度
-          len
-        } catch (e: Throwable) {
-          // 真故障：会话可能是在读到一半时抛的，游标已经不可信，关掉（引用仍留给 streamLength）
-          e.printStackTrace()
-          cachedRsp?.close()
-          -1
-        } finally {
-          // 取消哨兵并摘掉投递口
-          abort.cancel()
-          handler.onSignal(null)
-        }
-      }
-    } catch (e: Throwable) {
-      e.printStackTrace()
-      -1
-    }
-
-  /** 「作废」信号：一次性事件，只在 [read] 里声明与消费。 */
-  private class AbortSignal {
-    private val raised = CompletableDeferred<Unit>()
-
-    /** 投一次「作废」，任意线程可调，重复投等价一次。 */
-    fun raise() {
-      raised.complete(Unit)
-    }
-
-    /** 等到「作废」投来为止（已投过则立刻返回）。 */
-    suspend fun await() {
-      raised.await()
-    }
-  }
-
-  /**
-   * [read] 的挂起主体：一次交付一块 —— 缓存有就直接给，没有就先把整块装进缓存。
-   * 块内后续读全是内存命中，一条会话读到底。
-   */
-  private suspend fun readSuspend(
+  /** 一次交付一块；作废与故障的收场在 [BaseIO.read]。 */
+  override suspend fun runSuspend(
     buf: ByteArray,
     len: Int,
   ): Int {
@@ -206,6 +119,11 @@ class HttpIO(
       }
       return AvFormat.AVERROR_EOF
     }
+  }
+
+  /** 读到一半抛错时游标不可信，关掉会话；引用仍留给 [streamLength]。 */
+  override fun onReadFailed() {
+    cachedRsp?.close()
   }
 
   override fun seek(

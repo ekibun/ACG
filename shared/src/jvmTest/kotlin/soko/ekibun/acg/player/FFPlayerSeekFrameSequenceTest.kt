@@ -55,7 +55,7 @@ class FFPlayerSeekFrameSequenceTest {
   ): FFPlayer =
     FFPlayer(
       TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART).toString(),
-      FileIO.Handler(),
+      IOHandler(),
       surface,
     ) { if (it is FFPlayer.Event.Frame) frames.add(it.pts) }
 
@@ -81,7 +81,7 @@ class FFPlayerSeekFrameSequenceTest {
       val format =
         AvFormat(
           TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART).toString(),
-          FileIO.Handler(),
+          IOHandler(),
         )
       try {
         val video = format.getStreams().first { it.codecType == AVMediaType.VIDEO }

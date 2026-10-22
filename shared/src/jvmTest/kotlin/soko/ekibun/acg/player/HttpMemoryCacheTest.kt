@@ -35,7 +35,7 @@ class HttpMemoryCacheTest {
     val body = pattern(8 * BLOCK_BYTES)
     TestMediaServer(body).use { server ->
       val url = "${server.url}?case=seek-back"
-      val io = HttpIO(url, mapOf(), HttpIO.Handler())
+      val io = HttpIO(url, mapOf(), IOHandler())
       try {
         val buf = ByteArray(BLOCK_BYTES)
         // 顺序读满 3 块。按**累计字节数**收而不是按次数：`read` 允许短读（网络给多少读多少）。
@@ -73,7 +73,7 @@ class HttpMemoryCacheTest {
       val url = "${server.url}?case=replay"
       val buf = ByteArray(BLOCK_BYTES)
       // 第一次播放：整条流都过一遍网络，顺带把两块与长度都留下。
-      val first = HttpIO(url, mapOf(), HttpIO.Handler())
+      val first = HttpIO(url, mapOf(), IOHandler())
       try {
         var pos = 0
         while (pos < body.size) {
@@ -89,7 +89,7 @@ class HttpMemoryCacheTest {
       assertEquals(1, afterFirst, "第一次播放一条会话就够")
 
       // 第二次播放：全新实例 —— 缓存是**进程级**的，不随实例走。
-      val second = HttpIO(url, mapOf(), HttpIO.Handler())
+      val second = HttpIO(url, mapOf(), IOHandler())
       try {
         assertEquals(
           body.size,
@@ -122,7 +122,7 @@ class HttpMemoryCacheTest {
     val body = pattern(104 * BLOCK_BYTES)
     TestMediaServer(body).use { server ->
       val url = "${server.url}?case=mid-block"
-      val io = HttpIO(url, mapOf(), HttpIO.Handler())
+      val io = HttpIO(url, mapOf(), IOHandler())
       try {
         val target = 100 * BLOCK_BYTES + 1000
         io.seek(target, AvIO.SEEK_SET)
@@ -151,7 +151,7 @@ class HttpMemoryCacheTest {
     val body = pattern(104 * BLOCK_BYTES)
     TestMediaServer(body).use { server ->
       val url = "${server.url}?case=past-cache"
-      val io = HttpIO(url, mapOf(), HttpIO.Handler())
+      val io = HttpIO(url, mapOf(), IOHandler())
       val buf = ByteArray(BLOCK_BYTES)
       try {
         // 顺序读满 3 块：0/1/2 进缓存，会话游标也跟着走到第 3 块。
@@ -221,7 +221,7 @@ class HttpMemoryCacheTest {
     val body = pattern(110 * BLOCK_BYTES)
     TestMediaServer(body).use { server ->
       val url = "${server.url}?case=half-cached"
-      val io = HttpIO(url, mapOf(), HttpIO.Handler())
+      val io = HttpIO(url, mapOf(), IOHandler())
       try {
         // 起点就在第 100 块：全新实例、没有会话 ⇒ 建一条落在第 100 块上的，连读 5 块。
         io.seek(100 * BLOCK_BYTES, AvIO.SEEK_SET)
@@ -257,7 +257,7 @@ class HttpMemoryCacheTest {
     val body = pattern(110 * BLOCK_BYTES)
     TestMediaServer(body).use { server ->
       val url = "${server.url}?case=cache-edge"
-      val io = HttpIO(url, mapOf(), HttpIO.Handler())
+      val io = HttpIO(url, mapOf(), IOHandler())
       try {
         // 第 100..104 块整块进缓存。
         io.seek(100 * BLOCK_BYTES, AvIO.SEEK_SET)
@@ -294,7 +294,7 @@ class HttpMemoryCacheTest {
     TestMediaServer(body).use { server ->
       val url = "${server.url}?case=trailing-block"
 
-      val first = HttpIO(url, mapOf(), HttpIO.Handler())
+      val first = HttpIO(url, mapOf(), IOHandler())
       try {
         assertEquals(body.size, readToEnd(first), "整条流应读完且不多不少")
       } finally {
@@ -305,7 +305,7 @@ class HttpMemoryCacheTest {
       assertContentEquals(body.copyOfRange(2 * BLOCK_BYTES, body.size), tail, "尾块字节与真身不符")
 
       val requestsAfterFirst = server.requests
-      val second = HttpIO(url, mapOf(), HttpIO.Handler())
+      val second = HttpIO(url, mapOf(), IOHandler())
       try {
         assertEquals(body.size, readToEnd(second), "重播不该多读（尾块命中后不能再要一次网络）")
         assertEquals(requestsAfterFirst, server.requests, "重播整条命中缓存，不该再发请求")
@@ -326,7 +326,7 @@ class HttpMemoryCacheTest {
       val url = "${server.url}?case=half-block"
       val buf = ByteArray(4096)
 
-      val first = HttpIO(url, mapOf(), HttpIO.Handler())
+      val first = HttpIO(url, mapOf(), IOHandler())
       try {
         // 落在第 1 块中间：会话从块首起、整块读进缓存，只读 4096 就收手。
         first.seek(BLOCK_BYTES + 1000, AvIO.SEEK_SET)
@@ -346,7 +346,7 @@ class HttpMemoryCacheTest {
       assertContentEquals(body.copyOfRange(BLOCK_BYTES, 2 * BLOCK_BYTES), chunk)
 
       val requestsAfterFirst = server.requests
-      val second = HttpIO(url, mapOf(), HttpIO.Handler())
+      val second = HttpIO(url, mapOf(), IOHandler())
       try {
         second.seek(BLOCK_BYTES + 1000, AvIO.SEEK_SET)
         assertEquals(4096, second.read(buf, buf.size), "整块已缓存，应当命中")
@@ -366,7 +366,7 @@ class HttpMemoryCacheTest {
     val body = pattern(8 * BLOCK_BYTES)
     TestMediaServer(body).use { server ->
       val url = "${server.url}?case=small-reads"
-      val io = HttpIO(url, mapOf(), HttpIO.Handler())
+      val io = HttpIO(url, mapOf(), IOHandler())
       val buf = ByteArray(4096)
       try {
         var got = 0
@@ -392,7 +392,7 @@ class HttpMemoryCacheTest {
     val body = pattern(16 * BLOCK_BYTES)
     TestMediaServer(body).use { server ->
       val url = "${server.url}?case=step-back"
-      val io = HttpIO(url, mapOf(), HttpIO.Handler())
+      val io = HttpIO(url, mapOf(), IOHandler())
       val buf = ByteArray(BLOCK_BYTES)
       try {
         var pos = 0
@@ -426,7 +426,7 @@ class HttpMemoryCacheTest {
     val body = pattern(110 * BLOCK_BYTES)
     TestMediaServer(body).use { server ->
       val url = "${server.url}?case=unaligned-start"
-      val io = HttpIO(url, mapOf(), HttpIO.Handler())
+      val io = HttpIO(url, mapOf(), IOHandler())
       try {
         // 落点故意不在块首：会话从它所在的**块首**起，块内前缀一并装进缓存。
         val inBlock = 1000

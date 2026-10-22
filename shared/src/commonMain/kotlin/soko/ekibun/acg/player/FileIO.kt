@@ -7,18 +7,14 @@ import soko.ekibun.ffmpeg.AvIO
 /** 本地文件的 [AvIO]：EOF 返回 [AvFormat.AVERROR_EOF]，出错返回 -1，只支持小于 2 GiB 的文件。 */
 class FileIO(
   path: String,
-) : AvIO {
-  class Handler : AvIO.Handler {
-    override fun open(url: String): AvIO = FileIO(urlToPath(url))
-  }
-
+) : BaseIO() {
   /** 底层文件句柄；打开失败时为 null。 */
   private val file = File.open(path, "r")
 
   /** 逻辑读写位置，与底层文件指针保持同步。 */
   private var offset = 0L
 
-  override fun read(
+  override suspend fun runSuspend(
     buf: ByteArray,
     len: Int,
   ): Int {
@@ -69,12 +65,4 @@ class FileIO(
       // 关闭失败不向上抛
     }
   }
-}
-
-/**
- * 把 `file://` 形式的 URL 还原成平台路径，并去掉 Windows 盘符前的多余斜杠。
- */
-private fun urlToPath(url: String): String {
-  val path = url.removePrefix("file://")
-  return if (path.length > 3 && path[0] == '/' && path[2] == ':') path.substring(1) else path
 }

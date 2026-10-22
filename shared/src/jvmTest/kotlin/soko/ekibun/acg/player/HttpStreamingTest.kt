@@ -24,7 +24,7 @@ class HttpStreamingTest {
       honorRange = false,
       declareLength = false,
     ).use { server ->
-      val io = HttpIO.Handler().open(server.url)
+      val io = IOHandler().open(server.url)
       try {
         val t0 = System.nanoTime()
         val first = io.readBounded(chunkSize)
@@ -54,7 +54,7 @@ class HttpStreamingTest {
       honorRange = false,
       declareLength = false,
     ).use { server ->
-      val handler = HttpIO.Handler()
+      val handler = IOHandler()
       val io = handler.open(server.url)
       try {
         assertTrue(io.readBounded(4096) > 0, "the first read should get data")
@@ -82,7 +82,7 @@ class HttpStreamingTest {
       honorRange = false,
       declareLength = false,
     ).use { server ->
-      val handler = HttpIO.Handler()
+      val handler = IOHandler()
       val io = handler.open(server.url)
       try {
         val result = AtomicInteger(Int.MIN_VALUE)
@@ -102,7 +102,7 @@ class HttpStreamingTest {
           4096,
           result.get(),
           "an aborted read must report the positive 'read a full buf.size' value so the demuxer stops at once " +
-            "instead of reading again (see HttpIO.read)",
+            "instead of reading again (see BaseIO.read)",
         )
 
         // 下一次 read 自带新信号，手上那条会话已作废 ⇒ 重发

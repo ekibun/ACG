@@ -265,8 +265,9 @@ classDiagram
 | --- | --- | --- |
 | `expect VideoSurface(onSurfaceContext, …)` | 建 `DesktopSurfaceContext`：Skia `makeRaster` 绘制 + `javax.sound.sampled` | 建 `AndroidSurfaceContext`：`Surface` 贴图 |
 
-树外接口是 `AvIO`（+ `AvIO.Handler`），实现落在 `:shared` 的 `HttpIO` / `FileIO` —— native 的 avio
-回调从这里进来（见下文「播放链」）。它反过来：实现不持 native 句柄，只被 native 同步调用。
+树外接口是 `AvIO`（+ `AvIO.Handler`），实现落在 `:shared` 的 `player` 包：`BaseIO` 折平同步读，`HttpIO` /
+`FileIO` 只写挂起主体，`IOHandler` 持「叫醒当前读」的投递口并按 url 的 scheme 分发 —— native
+的 avio 回调从这里进来（见下文「播放链」）。它反过来：实现不持 native 句柄，只被 native 同步调用。
 
 ### 业务层（`:shared`）—— 两族的调用方
 
@@ -284,8 +285,9 @@ classDiagram
 - **`engine`** —— `JsEngine`，全进程单例（`JsEngine.instance`）。持一个惰性建的 QuickJS runtime，
   把 JS 侧那一**份**能力桥 `_binding(method, args)` 落到 Kotlin 原语上；后台 WebView 驱动
   `webviewAsync` 也住在这个文件里。细节见下文「脚本插件链」。
-- **`player`** —— `AvIO` 的两个 Kotlin 实现：`HttpIO`（range 会话 + 白读推进 + 闲置超时）与
-  `FileIO`（本地文件）。它们被 native 的 avio 回调**同步调用**，是播放链唯一与网络/磁盘相接的地方。
+- **`player`** —— 播放链与网络 / 磁盘相接的唯一处：`BaseIO`（唯一一处 `runBlocking` + 作废投递口）、
+  `HttpIO`（range 会话 + 白读推进 + 闲置超时）、`FileIO`（本地文件）、`IOHandler`（native `io_open` 的
+  入口，按 scheme 分发到上面两者）。它们被 native 的 avio 回调**同步调用**。
   `HttpIO` 之外还挂一层**进程级**的块缓存 `HttpCache`（512 块 ≈ 16 MiB、按 URL + 块号键、只当加速使，
   命中不了就退回网络那条路；约束见 `development/playback-invariants.md` §5.7）。
 
@@ -410,8 +412,8 @@ flowchart TD
   之间的帧（`resyncTo` 收敛，对应 ffplay 的 `frame_drops_early`）。两者缺一不可。
 - **送显与丢帧的先后**：同一轮内相邻两帧必须**先等上一帧送显完**，否则上一帧会显示成本帧的像素。
 - **暂停不停取包**：轮次判据不含 `pts.playing`，暂停期间照常解码入队 —— 这就是预读缓存。
-- **`HttpIO.read` 里存在唯一的 `runBlocking`**（native 回调要同步签名）；数据没到时在 IO 层阻塞
-  等，「作废」由 `Handler.abort()` 叫醒 —— 叫醒的手段是掀掉那条连接，那条会话跟着作废、下一条读重发。
+- **`BaseIO.read` 里存在唯一的 `runBlocking`**（native 回调要同步签名）；数据没到时在 IO 层阻塞
+  等，「作废」由 `IOHandler.abort()` 叫醒 —— 叫醒的手段是掀掉那条连接，那条会话跟着作废、下一条读重发。
 
 ## 跨层的三条约定
 

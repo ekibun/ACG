@@ -293,7 +293,7 @@ okhttp 的 `readTimeout` 恰好就是这个语义（okio 的 `AsyncTimeout` 在�
 > 读作业后面，永远跑不到。`AvFormat.releaseImpl` 因此**不能**「顺手」在里面补一次——它正是经
 > `submit { }` 排进同一根线程。
 
-形态：一次读一条私有信号，`Handler` 只持一个投递口（`onSignal` 登记的 `raise`）：
+形态：一次读一条私有信号，`IOHandler` 只持一个投递口（`onSignal` 登记的 `raise`）：
 
 - 有读在等时 `abort()` 投到那条读的信号 ⇒ 建立期/读块**全被覆盖**（它在那一次读内部新建，覆盖那次读全部等待）；
 - 没读在等时（两条分片之间、seek 间隙）投递口空 ⇒ **no-op**；
@@ -313,11 +313,11 @@ native 单线程串行调 `read`，旧那条 `read` 早已返回、投递口已�
 
 ```kotlin
 val signal = AbortSignal()
-val job = async { readSuspend(buf) }
+val job = async { runSuspend(buf, len) }
 val abort = async { signal.await(); job.cancel() }   // 只 cancel，不作声
 handler.onSignal { signal.raise() }
 try { job.await() }
-catch (e: CancellationException) { buf.size }        // 谎报读满，见下一小节
+catch (e: CancellationException) { len }              // 谎报读满，见下一小节
 finally { abort.cancel(); handler.onSignal(null) }
 ```
 
@@ -335,13 +335,14 @@ finally { abort.cancel(); handler.onSignal(null) }
 > 不取消它 `runBlocking` 会一直等）、`handler.onSignal(null)`（摘投递口——正常返回/作废收场/真故障三条路都要摘，
 > 否则下一条会话会被上一条的死读误伤）。
 
-**作废收场返回正数 `buf.size`，不是任何错误码**（三档后果表见 §1.3）：被叫醒的那次读必须返回一个**正数**，
-且取本次请求的长度 `buf.size`（`buf` 是调用方的、并没有真的填），这是让 demuxer **就此收手**的唯一办法。
+**作废收场返回正数 `len`，不是任何错误码**（三档后果表见 §1.3）：被叫醒的那次读必须返回一个**正数**，
+且取本次请求的长度 `len`（`buf` 是调用方的、并没有真的填），这是让 demuxer **就此收手**的唯一办法。
 「谎报读满」安全：返回字节没真读出，但这数据必被丢——读作业交进 `AvFormat.packetChannel` 时通道已被
 `resetChannel` 掀掉，`send` 当场抛错、读作业收场，包到不了解码器。「谎报读满」只是让 demuxer 停下的手段。
 
-> **DO:** 值取 `buf.size` 而不是随便一个正数。`append_packet_chunked`（utils.c）的 `do/while`
-> 靠 `ret == read_size` 才继续凑包（`ret != read_size` 即 `break`），一次请求的长度正好对上。
+> **DO:** 值取 `len` 而不是随便一个正数（也不能写 `buf.size`：数组是复用的，容量可能远大于本次请求）。
+> `append_packet_chunked`（utils.c）的 `do/while` 靠 `ret == read_size` 才继续凑包（`ret != read_size` 即
+> `break`），一次请求的长度正好对上。
 
 ### 5.3 abort 叫醒了读，代价是那条会话作废
 

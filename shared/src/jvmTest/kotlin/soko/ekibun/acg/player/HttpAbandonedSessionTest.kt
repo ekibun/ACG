@@ -20,7 +20,7 @@ class HttpAbandonedSessionTest {
       declareLength = false,
       heartbeat = true,
     ).use { server ->
-      val handler = HttpIO.Handler()
+      val handler = IOHandler()
       val io = handler.open(server.url)
       // 先读一次让会话存在，再把它丢掉
       assertTrue(io.readBounded(4096) > 0, "first read")
@@ -65,7 +65,7 @@ class HttpAbandonedSessionTest {
   fun idleTimeoutReopensSessionAndKeepsReading() {
     val body = ByteArray(4 * HttpCache.BLOCK_BYTES) { (it % 251).toByte() }
     TestMediaServer(body, hangFirstResponse = true).use { server ->
-      val io = HttpIO(server.url, mapOf(), HttpIO.Handler())
+      val io = HttpIO(server.url, mapOf(), IOHandler())
       try {
         val buf = ByteArray(4096)
         val n = io.read(buf, buf.size)

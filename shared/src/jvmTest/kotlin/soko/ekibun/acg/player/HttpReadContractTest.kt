@@ -18,9 +18,9 @@ class HttpReadContractTest {
   @Test
   fun rangedServerReadsEveryFrame() {
     val media = TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART)
-    val reference = decodeVideoPts(AvFormat(media.toString(), FileIO.Handler()))
+    val reference = decodeVideoPts(AvFormat(media.toString(), IOHandler()))
     TestMediaServer(Files.readAllBytes(media), chunkDelayMs = 10).use { server ->
-      val overHttp = decodeVideoPts(AvFormat(server.url, HttpIO.Handler()))
+      val overHttp = decodeVideoPts(AvFormat(server.url, IOHandler()))
       assertEquals(
         reference,
         overHttp,
@@ -33,11 +33,11 @@ class HttpReadContractTest {
   @Test
   fun forwardSeekOverRangeIgnoringServerReadsEveryFrame() {
     val media = TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART)
-    val reference = decodeVideoPts(AvFormat(media.toString(), FileIO.Handler()))
+    val reference = decodeVideoPts(AvFormat(media.toString(), IOHandler()))
     TestMediaServer(Files.readAllBytes(media), chunkDelayMs = 10, honorRange = false).use { server ->
       val afterSeek =
         runBlocking {
-          val format = AvFormat(server.url, HttpIO.Handler())
+          val format = AvFormat(server.url, IOHandler())
           try {
             val video = format.getStreams().first { it.codecType == AVMediaType.VIDEO }
             val codec = AvCodec(video)
@@ -81,7 +81,7 @@ class HttpReadContractTest {
     val media = TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART)
     TestMediaServer(Files.readAllBytes(media), chunkDelayMs = 10).use { server ->
       runBlocking {
-        val format = AvFormat(server.url, HttpIO.Handler())
+        val format = AvFormat(server.url, IOHandler())
         try {
           val video = format.getStreams().first { it.codecType == AVMediaType.VIDEO }
           val codec = AvCodec(video)

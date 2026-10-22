@@ -23,7 +23,7 @@ class FFPlayerStepTest {
     val frames: MutableList<Long?> = Collections.synchronizedList(ArrayList<Long?>())
     runBlocking {
       val player =
-        FFPlayer(media.toString(), FileIO.Handler(), sink) {
+        FFPlayer(media.toString(), IOHandler(), sink) {
           if (it is FFPlayer.Event.Frame) frames.add(it.pts)
         }
       try {

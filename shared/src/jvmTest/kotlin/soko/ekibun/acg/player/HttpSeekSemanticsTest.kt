@@ -12,10 +12,10 @@ import kotlin.test.assertTrue
 class HttpSeekSemanticsTest {
   private fun bytes(size: Int): ByteArray = ByteArray(size) { (it % 251).toByte() }
 
-  /** 转回真实现：这个 Handler 只会造 [HttpIO]。 */
-  private fun open(server: TestMediaServer): HttpIO = HttpIO.Handler().open(server.url) as HttpIO
+  /** 直接建 [HttpIO]：本文件只判它自己的 whence 语义。 */
+  private fun open(server: TestMediaServer): HttpIO = HttpIO(server.url, mapOf(), IOHandler())
 
-  /** [HttpIO.read] 是挂起函数，测试里丢进协程跑。 */
+  /** read 会阻塞到数据到手，测试里丢进协程跑。 */
   private fun HttpIO.readBlocking(size: Int): Int = runBlocking { read(ByteArray(size), size) }
 
   private fun HttpIO.seekBlocking(

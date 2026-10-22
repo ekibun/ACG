@@ -16,14 +16,17 @@
 
 ⇒ 数据没到就一直等，不能返回 0 让上层重试；返回 0 在 aviobuf 的 bypass 分支里是原地死循环。
 
-⇒ 阻塞只允许出现在 `HttpIO.read` 一处（`runBlocking`）：`AvIO.read` 要同步签名，而建会话 / 等数据 /
-推游标整条链路都是 `suspend`。
+⇒ 阻塞只允许出现在 `BaseIO.read` 一处（`runBlocking`）：`AvIO.read` 要同步签名，而建会话 / 等数据 /
+推游标整条链路都是 `suspend`。`HttpIO` / `FileIO` 各自只写挂起主体 `runSuspend`。
 
 ### 1.2 叫醒阻塞读的手段是取消协程
 
 读卡在 `av_read_frame` 里，协程取消够不到它，只能由 `AvIO.Handler.abort` 从另一条线程投递信号。
 
 ⇒ 信号实现是 `AbortSignal`（`CompletableDeferred`）：投一次即够，没读在等时投递口为空、等于 no-op。
+
+⇒ 投递口由 `IOHandler` 持有（`onSignal` 挂上 / 摘掉），`abort()` 投的正是它。
+所以一个 handler 只能服务一路读：HLS 换分片是「上片读完并关掉、才开下片」，串行成立。
 
 ⇒ 旁路哨兵**只能 `cancel` 掉读作业，不能 `throw`**。哨兵是 `runBlocking` scope 里的子协程，抛出的异常
 不是留给 `await` 的值而是未捕获异常，会 `parentCancelled` 拆掉整个 scope，`catch (CancellationException)`
@@ -83,6 +86,9 @@
 ---
 
 ## 二、本地文件的 `AvIO`（`player/FileIO.kt`）
+
+⇒ 读同样走 `BaseIO.read`（`runBlocking` + 作废时返回 `len`）：本地读不等网络，但收场语义必须与 HTTP
+一致，否则 `AvFormat.resetChannel` 的作废对两种实现是两套行为。`FileIO` 只有 `runSuspend` 是自己写的。
 
 ⇒ EOF 必须翻成 `AvFormat.AVERROR_EOF`，不能返回 0：aviobuf 只把 `AVERROR_EOF` / 负数当终止，返回 0 是
 「读空，继续要数据」，`wav` / `pcm` 这类 demuxer 会在文件尾无限空转（依据见 playback-invariants.md §1.2）。

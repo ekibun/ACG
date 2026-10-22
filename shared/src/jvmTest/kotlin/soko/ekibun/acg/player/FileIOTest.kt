@@ -139,7 +139,7 @@ class FileIOTest {
     val path = Files.createTempFile("fileio-test", ".bin").also { temps.add(it) }
     Files.write(path, content())
     val url = "file:///" + path.toString().replace('\\', '/')
-    val io = FileIO.Handler().open(url)
+    val io = IOHandler().open(url)
     assertEquals(FILE_SIZE, io.seek(0, AvFormat.AVSEEK_SIZE))
     assertEquals(7, io.seek(7, AvIO.SEEK_SET))
     io.close()
@@ -149,7 +149,7 @@ class FileIOTest {
   fun handlerAcceptsPlainPath() {
     val path = Files.createTempFile("fileio-test", ".bin").also { temps.add(it) }
     Files.write(path, content())
-    val io = FileIO.Handler().open(path.toString())
+    val io = IOHandler().open(path.toString())
     assertEquals(FILE_SIZE, io.seek(0, AvFormat.AVSEEK_SIZE))
     io.close()
   }

@@ -21,7 +21,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
-import soko.ekibun.acg.player.HttpIO
+import soko.ekibun.acg.player.IOHandler
 import soko.ekibun.ffmpeg.AVMediaType
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvStream
@@ -66,7 +66,7 @@ fun PlayScreen() {
                   val newPlayer =
                     FFPlayer(
                       url.value,
-                      HttpIO.Handler(),
+                      IOHandler(),
                       surfaceContext.value,
                       onEvent = {
                         when (it) {
