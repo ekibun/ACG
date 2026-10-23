@@ -5,7 +5,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Slider
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
 import soko.ekibun.acg.player.IOHandler
+import soko.ekibun.acg.ui.comp.PlayerSlider
 import soko.ekibun.ffmpeg.AVMediaType
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvStream
@@ -50,6 +51,9 @@ fun PlayScreen() {
       }
     }
   }
+
+  // 总时长未知（0）时 Slider 的区间退化成 0..0（分数会除零），给它一个空轨道兜底
+  val totalUs = duration.floatValue.takeIf { it > 0f } ?: 1f
 
   Surface {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -155,10 +159,13 @@ fun PlayScreen() {
         ) {
           Text("+1f")
         }
-        Slider(
+        PlayerSlider(
           value = pts.floatValue,
-          modifier = Modifier.weight(1f),
-          valueRange = 0f..duration.floatValue,
+          // 缓冲进度暂未接入：demuxer 侧还没有可读的“已读到哪里”，先只画已播放段
+          buffered = 0f,
+          valueRange = 0f..totalUs,
+          enabled = duration.floatValue > 0f,
+          modifier = Modifier.weight(1f).wrapContentHeight(),
           onValueChange = {
             seeking.value = true
             pts.floatValue = it
@@ -180,9 +187,13 @@ fun PlayScreen() {
 }
 
 fun formatTime(time: Long): String {
-  val s = time / AvFormat.AV_TIME_BASE
+  val ms = time * 1000 / AvFormat.AV_TIME_BASE
+  val s = ms / 1000
   val m = s / 60
   val h = m / 60
-  val ms = (m % 60).toString().padStart(2, '0') + ":" + (s % 60).toString().padStart(2, '0')
-  return if (h == 0L) ms else "$h:$ms"
+  val mss =
+    (m % 60).toString().padStart(2, '0') +
+      ":" + (s % 60).toString().padStart(2, '0') +
+      "." + (ms % 1000).toString().padStart(3, '0')
+  return if (h == 0L) mss else "$h:$mss"
 }
