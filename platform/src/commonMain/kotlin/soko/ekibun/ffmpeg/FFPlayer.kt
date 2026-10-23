@@ -60,9 +60,6 @@ class FFPlayer(
     private val playerDispatcher by lazy { ThreadDispatcher("ffplayer") }
   }
 
-  /** 视频帧相对主时钟的最大可丢弃跨度（微秒，对应 `AV_NOSYNC_THRESHOLD`）。 */
-  private val maxResyncDropDistance = 10 * AV_TIME_BASE.toLong()
-
   /** 开一轮独占播放：作废上一轮并等它收干净；本轮身份由 [PTS] 对象标识。 */
   private suspend fun takeOverPlayback(): Boolean {
     val before = pts
@@ -73,9 +70,6 @@ class FFPlayer(
   /** 单帧步进用的两个时间戳：画面上那一帧与其前一帧（后者可为空）。 */
   private var lastFrameTs: Long? = null
   private var prevFrameTs: Long? = null
-
-  /** 最近量到的帧间隔（微秒）：[stepBack] 空探靠它定步长，冷启动时改用 [seekEpsilonUs]。 */
-  private var frameIntervalUs: Long? = null
 
   suspend fun play(
     streams: Map<Int, AvStream>,
@@ -117,6 +111,10 @@ class FFPlayer(
     maxTs: Long = Long.MAX_VALUE,
     flags: Int = 0,
     resumeAfter: Boolean,
+    /** 本轮收敛到的目标；`null` = 用 [ts]。 */
+    resyncTo: Long? = null,
+    /** 退帧轮（mpv 的 `hrseek_backstep`）：停到 `resyncTo` 之前的最后一帧。 */
+    backstep: Boolean = false,
   ) = withContext(playerDispatcher) {
     val oldPts = pts ?: throw Exception("no pts data")
     val newPts = PTS(oldPts.streams, ts)
@@ -137,9 +135,9 @@ class FFPlayer(
     when {
       // 视频轨在：步进轮靠「下一帧画面」停住，续播轮带 resyncTo 做丢帧收敛
       newPts.streams.containsKey(AVMediaType.VIDEO) ->
-        resume(stopOnNextFrame = !resumeAfter, resyncTo = ts)
+        resume(stopOnNextFrame = !resumeAfter, resyncTo = resyncTo ?: ts, backstep = backstep)
       // 纯音频没有「下一帧画面」，stopOnNextFrame 会一路解到 EOF
-      resumeAfter -> resume(resyncTo = ts)
+      resumeAfter -> resume(resyncTo = resyncTo ?: ts, backstep = backstep)
     }
   }
 
@@ -147,15 +145,16 @@ class FFPlayer(
   suspend fun resume(
     stopOnNextFrame: Boolean = false,
     resyncTo: Long? = null,
+    backstep: Boolean = false,
   ) = withContext(playerDispatcher) {
     if (stopOnNextFrame) {
       val hitFrame =
         suspendCancellableCoroutine<Boolean> {
-          playingJob = async(playerDispatcher) { resumeImpl(it, resyncTo) }
+          playingJob = async(playerDispatcher) { resumeImpl(it, resyncTo, backstep) }
         }
       if (hitFrame) pause()
     } else {
-      playingJob = async(playerDispatcher) { resumeImpl(null, resyncTo) }
+      playingJob = async(playerDispatcher) { resumeImpl(null, resyncTo, backstep) }
     }
   }
 
@@ -177,23 +176,13 @@ class FFPlayer(
     withContext(playerDispatcher) {
       val current = lastFrameTs ?: return@withContext false
       if (!takeOverPlayback()) return@withContext false
-      if (prevFrameTs == null) {
-        // 步长要大于容器时基的半格、又小于一个帧间隔，见 [seekEpsilonUs]
-        val eps = frameIntervalUs?.let { it * 3 / 4 } ?: seekEpsilonUs() ?: 1
-        seekImpl(maxOf(current - eps, 0), resumeAfter = false)
-      }
-      val target = prevFrameTs ?: return@withContext false
-      seekImpl(target, resumeAfter = false)
-      true
-    }
 
-  /** 冷启动时 [stepBack] 空探的步长（微秒）；取 3/4 个 tick，`null` = 时基拿不到。 */
-  private fun seekEpsilonUs(): Long? {
-    val stream = pts?.streams?.get(AVMediaType.VIDEO) ?: return null
-    if (stream.timeBaseNum <= 0 || stream.timeBaseDen <= 0) return null
-    // +1 才是「严格大于半格」；maxOf(1, …) 兜住细时基（除法给 0）
-    return maxOf(1L, 3L * stream.timeBaseNum * 1_000_000L / (4L * stream.timeBaseDen) + 1)
-  }
+      // mpv 的 backstep：只跳一次，目标取当前帧往前 3/4 帧；容器落在关键帧上，
+      // 剩下的由送显端补成「前一帧」
+      val eps = maxOf((pts?.streams?.get(AVMediaType.VIDEO)?.frameIntervalUs ?: 0) * 3 / 4, 1)
+      seekImpl(maxOf(current - eps, 0), resumeAfter = false, resyncTo = current, backstep = true)
+      lastFrameTs != current
+    }
 
   private val codecs = HashMap<Int, AvCodec>()
   private val frames = HashMap<Int, ArrayList<AvFrame>>()
@@ -202,6 +191,8 @@ class FFPlayer(
     onNextFrame: CancellableContinuation<Boolean>?,
     /** 本轮起跑要收敛到的目标时间戳（seek 后才有）。见 [resume]。 */
     resyncTo: Long?,
+    /** 退帧轮：`resyncTo` 就是要退回去的原 pts。 */
+    backstep: Boolean,
   ) = withContext(playerDispatcher) {
     val pts = pts ?: return@withContext
     // 必须带上「对象没换」：换位置的路径会换 [PTS]，这就是「本轮还作不作数」
@@ -211,6 +202,7 @@ class FFPlayer(
     // seek 后把画面从关键帧快进到目标：落后的视频帧解码后立刻丢（ffplay frame_drops_early）
     var lastDropped: Long? = null
     var converging = resyncTo != null
+    var backstepping = backstep && resyncTo != null
     val playJobs =
       pts.streams.map { (codecType, stream) ->
         async(playerDispatcher) {
@@ -237,13 +229,44 @@ class FFPlayer(
                 // 先等上一帧送显完再写这一帧：每种流只有一块输出缓冲，反了就是上一帧显示成本帧的像素
                 lastUpdate?.join()
                 if (!isPlaying()) return@updateJob
+                // 退帧：只显示原 pts 之前的最后一帧
+                var backstepFrame = false
+                val from = resyncTo
+                if (
+                  backstepping &&
+                  from != null &&
+                  codecType == AVMediaType.VIDEO &&
+                  frame.timeStamp < from
+                ) {
+                  val step = stream.frameIntervalUs.takeIf { it > 0 }
+                  backstepFrame =
+                    if (step != null) {
+                      // 前一帧离原 pts 不超过一个帧间隔
+                      from - frame.timeStamp <= step * 3 / 2
+                    } else {
+                      // 还没有帧间隔：等下一帧入队再判
+                      var waited = 0
+                      while (
+                        isPlaying() &&
+                        waited++ < 1000 &&
+                        frames[stream.index]?.any { f -> f.timeStamp > frame.timeStamp } != true
+                      ) {
+                        delay(1.milliseconds)
+                      }
+                      if (!isPlaying()) return@updateJob
+                      frames[stream.index]?.any { f ->
+                        f.timeStamp > frame.timeStamp && f.timeStamp < from
+                      } != true
+                    }
+                  if (!backstepFrame) {
+                    consumed = true
+                    return@updateJob
+                  }
+                  backstepping = false
+                }
                 if (!muted) surfaceContext?.postFrame(codecType, frame)
                 // 丢帧收敛必须排在送显之前，音频也要丢（落点是容器级的）
-                if (resyncTo != null &&
-                  frame.timeStamp < resyncTo &&
-                  resyncTo - frame.timeStamp < maxResyncDropDistance
-                ) {
-                  // 退帧要的「前一帧」就在被丢掉的帧里，记下最后那一帧
+                if (!backstepFrame && resyncTo != null && frame.timeStamp < resyncTo) {
                   if (codecType == AVMediaType.VIDEO) lastDropped = frame.timeStamp
                   consumed = true
                   return@updateJob
@@ -281,7 +304,7 @@ class FFPlayer(
                   // 只有真看到连续两帧时，差值才是可信的帧间隔
                   val prev = prevFrameTs
                   if (prev != null && frame.timeStamp > prev) {
-                    frameIntervalUs = frame.timeStamp - prev
+                    stream.frameIntervalUs = frame.timeStamp - prev
                   }
                   if (onNextFrame?.isActive == true) {
                     pts.update(frame.timeStamp)

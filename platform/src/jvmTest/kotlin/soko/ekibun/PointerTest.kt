@@ -107,7 +107,7 @@ class PointerTest {
   }
 
   /** 借用型的指针：`AVStream*` 不归本类所有。 */
-  private fun borrowedStream() = AvStream(0L, 0, 0, 0, 0, 0, 0, 1, 1, 0L, emptyMap())
+  private fun borrowedStream() = AvStream(0L, 0, 0, 0, 0, 0, 0, 0f, 0L, emptyMap())
 
   /** 关掉之后再投递，三种形态都当场抛 [IllegalStateException]。 */
   @Test

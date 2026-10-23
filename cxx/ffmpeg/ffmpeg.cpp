@@ -229,7 +229,7 @@ Java_soko_ekibun_ffmpeg_AvFormat_getStreamsNative(JNIEnv* env, jobject thiz,
   jclass streamClass = env->FindClass("soko/ekibun/ffmpeg/AvStream");
   // 时基一并递上去：`stream->time_base` 是这条流时间戳的最小刻度。
   jmethodID constructor =
-      env->GetMethodID(streamClass, "<init>", "(JIIIIIIIIJLjava/util/Map;)V");
+      env->GetMethodID(streamClass, "<init>", "(JIIIIIIFJLjava/util/Map;)V");
   jobjectArray streams =
       env->NewObjectArray(ctx->nb_streams, streamClass, nullptr);
   for (int i = 0; i < ctx->nb_streams; ++i) {
@@ -241,13 +241,15 @@ Java_soko_ekibun_ffmpeg_AvFormat_getStreamsNative(JNIEnv* env, jobject thiz,
             ? 0
             : (jlong)(stream->duration * av_q2d(stream->time_base) *
                       AV_TIME_BASE);
+    // 平均帧率优先，没有就退回 r_frame_rate：帧间隔的默认值由它换算。
+    AVRational fr = stream->avg_frame_rate.num > 0 ? stream->avg_frame_rate
+                                                   : stream->r_frame_rate;
     jobject streamObj = env->NewObject(
         streamClass, constructor, (jlong)stream, i,
         (jint)stream->codecpar->codec_type, (jint)stream->codecpar->sample_rate,
         (jint)stream->codecpar->ch_layout.nb_channels,
         (jint)stream->codecpar->width, (jint)stream->codecpar->height,
-        (jint)stream->time_base.num, (jint)stream->time_base.den, durationUs,
-        metadata);
+        (jfloat)av_q2d(fr), durationUs, metadata);
     env->DeleteLocalRef(metadata);
     env->SetObjectArrayElement(streams, i, streamObj);
     env->DeleteLocalRef(streamObj);
