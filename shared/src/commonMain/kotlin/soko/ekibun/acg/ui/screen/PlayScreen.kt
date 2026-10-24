@@ -37,7 +37,7 @@ import soko.ekibun.ffmpeg.VideoSurface
 fun PlayScreen() {
   val surfaceContext = remember { mutableStateOf<SurfaceContext?>(null) }
   val url =
-    remember { mutableStateOf("http://127.0.0.1:8099/media") }
+    remember { mutableStateOf("http://127.0.0.1:8099/media/hls-ad/playlist.m3u8") }
   val player = remember { mutableStateOf<FFPlayer?>(null) }
   val duration = remember { mutableFloatStateOf(0f) }
   val pts = remember { mutableFloatStateOf(0f) }

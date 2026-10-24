@@ -60,10 +60,6 @@ class DevToolsAgent {
             add("soko.ekibun.DevServerKt")
             add("--port")
             add(port)
-            System.getProperty("acg.dev.media")?.let {
-              add("--media")
-              add(it)
-            }
           }
         val process =
           ProcessBuilder(command)

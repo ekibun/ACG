@@ -138,7 +138,4 @@ project(":desktopApp")
       "-Dacg.dev.logfile=" + devMediaServerLog.get().asFile.absolutePath,
       "-Dacg.dev.workdir=" + rootProject.projectDir.absolutePath,
     )
-    providers.gradleProperty("devMedia").orNull?.let { media ->
-      jvmArgs("-Dacg.dev.media=$media")
-    }
   }

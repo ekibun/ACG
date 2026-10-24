@@ -449,5 +449,6 @@ Gradle 只传 `-javaagent` 与 `-D`。
 两处 jvmTest 的资源都从 `cxx/build/bin` 取 native 库（`jvmTestProcessResources` 显式
 `dependsOn(":desktopApp:buildJni")`），保证「改了 `cxx/` 只跑测试」也不会静默用旧 dll。
 
-`PlayScreen` 默认指向 `http://127.0.0.1:8099/media`。控制条能冻结 / 恢复 / 限速，用法见
+`PlayScreen` 默认指向 `http://127.0.0.1:8099/media/hls-ad/playlist.m3u8`（夹广告的 HLS 素材，
+逐帧能看到烧录的时间码与分片序号）。控制条能冻结 / 恢复 / 限速，用法见
 [development/debug-playback.md](./development/debug-playback.md)。

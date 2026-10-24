@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicLong
  * 本地媒体服务端：行为由构造参数选档（Range、长度声明、慢发、限速、心跳、冻结、首响应挂起、按字节掐断）。
  */
 internal class TestMediaServer(
-  /** 响应体。 */
+  /** 响应体：`/media/<路径>` 没命中文件时整发它。 */
   private val body: ByteArray,
   /** 端口。0 = ephemeral（测试）；dev 给固定端口。 */
   port: Int = 0,
@@ -84,6 +84,7 @@ internal class TestMediaServer(
     val index = requestCount.getAndIncrement()
     enteredCount.incrementAndGet()
     try {
+      val payload = resolveFile(exchange.requestURI.path) ?: body
       val rangeStart =
         exchange.requestHeaders
           .getFirst("Range")
@@ -91,17 +92,20 @@ internal class TestMediaServer(
           ?.removePrefix("bytes=")
           ?.substringBefore('-')
           ?.toIntOrNull()
-          ?.coerceIn(0, body.size)
+          ?.coerceIn(0, payload.size)
           ?: 0
       // 已发满上限：只发响应头，正文不写
       val cutOff = servedLimit != null && servedBytes.get() >= servedLimit
       val hangFirst = hangFirstResponse && index == 0
       val status = if (rangeStart > 0) 206 else 200
       if (status == 206) {
-        exchange.responseHeaders.add("Content-Range", "bytes $rangeStart-${body.size - 1}/${body.size}")
+        exchange.responseHeaders.add(
+          "Content-Range",
+          "bytes $rangeStart-${payload.size - 1}/${payload.size}",
+        )
       }
       // 挂住第一条时用分块传输：声明了固定长度却不发，客户端读到的是连接异常
-      val declaredLength = if (declareLength && !hangFirst) (body.size - rangeStart).toLong() else 0L
+      val declaredLength = if (declareLength && !hangFirst) (payload.size - rangeStart).toLong() else 0L
       exchange.sendResponseHeaders(status, declaredLength)
       val out = exchange.responseBody
       try {
@@ -111,7 +115,7 @@ internal class TestMediaServer(
           if (hangFirst) firstResponseHanging.countDown()
           parkForever(out)
         } else {
-          writeBody(out, rangeStart)
+          writeBody(out, payload, rangeStart)
           if (heartbeat) {
             while (stopped.count != 0L) {
               out.write(1)
@@ -131,6 +135,18 @@ internal class TestMediaServer(
     }
   }
 
+  /** `/media/<相对路径>` 命中分包里的素材就返回它的字节（HLS 分片、播放列表）；否则 null（回落成 [body]）。 */
+  private fun resolveFile(path: String?): ByteArray? {
+    val relative =
+      path?.removePrefix("/media")?.removePrefix("/")?.takeIf { it.isNotEmpty() } ?: return null
+    if (relative.split('/').any { it.isEmpty() || it == "." || it == ".." }) return null
+    return runCatching {
+      TestMedia::class.java.classLoader.getResourceAsStream("media/$relative")?.use {
+        it.readBytes()
+      }
+    }.getOrNull()
+  }
+
   /** 停笔并把响应体挂在 [parked] 上，等 [close] 统一收掉。 */
   private fun parkForever(out: OutputStream) {
     parked += out
@@ -140,6 +156,7 @@ internal class TestMediaServer(
   /** 写正文；到 [servedLimit] 就停笔交给 [parked]。 */
   private fun writeBody(
     out: OutputStream,
+    body: ByteArray,
     from: Int,
   ) {
     var position = from

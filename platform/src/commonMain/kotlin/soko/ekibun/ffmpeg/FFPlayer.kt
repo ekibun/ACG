@@ -58,6 +58,12 @@ class FFPlayer(
   companion object {
     /** 播放侧的归属线程：播放入口只在它上面调。全进程共用，从不关闭。 */
     private val playerDispatcher by lazy { ThreadDispatcher("ffplayer") }
+
+    /**
+     * 退帧的最小退距（微秒）：落在分片首帧时，退距小于「首帧 pts 与片头 dts 的差」就跨不过
+     * 分片边界，会退回当前帧。取 1 s 覆盖常见 B 帧延迟，代价是多解一小段帧。
+     */
+    private const val STEP_BACK_MARGIN_US = 1_000_000L
   }
 
   /** 开一轮独占播放：作废上一轮并等它收干净；本轮身份由 [PTS] 对象标识。 */
@@ -177,9 +183,11 @@ class FFPlayer(
       val current = lastFrameTs ?: return@withContext false
       if (!takeOverPlayback()) return@withContext false
 
-      // mpv 的 backstep：只跳一次，目标取当前帧往前 3/4 帧；容器落在关键帧上，
-      // 剩下的由送显端补成「前一帧」
-      val eps = maxOf((pts?.streams?.get(AVMediaType.VIDEO)?.frameIntervalUs ?: 0) * 3 / 4, 1)
+      // mpv 的 backstep：只跳一次，剩下的由送显端补成「前一帧」。
+      // 退距不能只取 3/4 帧：当前帧正好是分片首帧时，容器的落点不会早于片头，
+      // 3/4 帧退回同一片就白跳；退足 [STEP_BACK_MARGIN_US] 才能跨过分片边界
+      val interval = pts?.streams?.get(AVMediaType.VIDEO)?.frameIntervalUs ?: 0
+      val eps = maxOf(interval * 3 / 4, STEP_BACK_MARGIN_US, 1)
       seekImpl(maxOf(current - eps, 0), resumeAfter = false, resyncTo = current, backstep = true)
       lastFrameTs != current
     }
@@ -229,39 +237,34 @@ class FFPlayer(
                 // 先等上一帧送显完再写这一帧：每种流只有一块输出缓冲，反了就是上一帧显示成本帧的像素
                 lastUpdate?.join()
                 if (!isPlaying()) return@updateJob
-                // 退帧：只显示原 pts 之前的最后一帧
+                // 退帧：只显示原 pts 之前的最后一帧。判据看队列里的下一帧 —— 本帧之后还有帧、
+                // 且仍早于原 pts，就说明它不是「前一帧」；判中的那帧要跳过下面的收敛丢弃
                 var backstepFrame = false
                 val from = resyncTo
-                if (
-                  backstepping &&
+                if (backstepping &&
                   from != null &&
                   codecType == AVMediaType.VIDEO &&
                   frame.timeStamp < from
                 ) {
-                  val step = stream.frameIntervalUs.takeIf { it > 0 }
-                  backstepFrame =
-                    if (step != null) {
-                      // 前一帧离原 pts 不超过一个帧间隔
-                      from - frame.timeStamp <= step * 3 / 2
-                    } else {
-                      // 还没有帧间隔：等下一帧入队再判
-                      var waited = 0
-                      while (
-                        isPlaying() &&
-                        waited++ < 1000 &&
-                        frames[stream.index]?.any { f -> f.timeStamp > frame.timeStamp } != true
-                      ) {
-                        delay(1.milliseconds)
-                      }
-                      if (!isPlaying()) return@updateJob
-                      frames[stream.index]?.any { f ->
-                        f.timeStamp > frame.timeStamp && f.timeStamp < from
-                      } != true
-                    }
-                  if (!backstepFrame) {
+                  // 下一帧可能还在解码：等它进队列再判，否则会把倒数第二帧误当成前一帧
+                  var waited = 0
+                  while (
+                    isPlaying() &&
+                    waited++ < 1000 &&
+                    frames[stream.index]?.any { f -> f.timeStamp > frame.timeStamp } != true
+                  ) {
+                    delay(1.milliseconds)
+                  }
+                  if (!isPlaying()) return@updateJob
+                  val hasLater =
+                    frames[stream.index]?.any { f ->
+                      f.timeStamp > frame.timeStamp && f.timeStamp < from
+                    } == true
+                  if (hasLater) {
                     consumed = true
                     return@updateJob
                   }
+                  backstepFrame = true
                   backstepping = false
                 }
                 if (!muted) surfaceContext?.postFrame(codecType, frame)

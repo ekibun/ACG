@@ -23,6 +23,12 @@ guard_count=$(grep -c '^#if CONFIG_NETWORK$' libavformat/hls.patched.c || true)
 [ "$guard_count" = 1 ] ||
     { echo "error: hls.sed did not apply (upstream hls.c changed?), guards=$guard_count" >&2; exit 1; }
 
+# 第 4 条（包时间戳平移到声明轴）同样要验收：字段与改写主体各出现一次。
+drift_field=$(grep -c 'int64_t ff_drift_seq;' libavformat/hls.patched.c || true)
+drift_body=$(grep -c 'pls->ff_drift = ff_start - ff_us;' libavformat/hls.patched.c || true)
+[ "$drift_field" = 1 ] && [ "$drift_body" = 1 ] ||
+    { echo "error: hls.sed drift patch incomplete (field=$drift_field body=$drift_body)" >&2; exit 1; }
+
 # 显式规则优先于 ffbuild/common.mak 的 `%.o: %.c`。副本不在源码树里，
 # `#include "avformat.h"` 这类源码相对的包含要显式补 -I。
 # 编译决策交给 make：副本每次 configure 都重写，靠 mtime 就会重编 hls.o。
