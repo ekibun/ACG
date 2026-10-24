@@ -73,4 +73,62 @@ class FFPlayerStepTest {
       }
     }
   }
+
+  /**
+   * 片尾退一帧：解码器重排缓冲里的尾帧必须能在「是不是前一帧」判定之前进队列（见
+   * `playback-invariants` 1.8）。drain 排在读循环之后、而循环以「队列空」为退出条件时，退帧轮里
+   * 队列不会空（有一帧正等着判），尾帧永远出不来 —— 判据等满超时后把倒数第三帧当成前一帧，
+   * 或者说末尾两帧之间留出一个帧间隔的空洞。
+   */
+  @Test(timeout = 120_000)
+  fun stepBackAtEndOfStreamShowsTheFrameBeforeLast() {
+    val media = TestMedia.path(TestMedia.HLS_AD_PLAYLIST)
+    val sink = TestSurface()
+    val frames: MutableList<Long?> = Collections.synchronizedList(ArrayList<Long?>())
+
+    fun snapshot() = synchronized(frames) { frames.toList() }
+
+    runBlocking {
+      val player =
+        FFPlayer(media.toString(), IOHandler(), sink) {
+          if (it is FFPlayer.Event.Frame) frames.add(it.pts)
+        }
+      try {
+        val video = player.getStreams().first { it.codecType == AVMediaType.VIDEO }
+        // 从片尾前 5 秒起播，别为了一帧播满整段
+        val playJob =
+          launch { player.play(mapOf(AVMediaType.VIDEO to video), 24_000_000) }
+        // 播到片尾：末尾会发一条 Frame(null)
+        withTimeout(60_000) { while (snapshot().none { it == null }) delay(10) }
+        playJob.join()
+
+        val shown = snapshot().filterNotNull()
+        val last = shown.last()
+        val previous = shown[shown.size - 2]
+        // 常规帧间隔：取末尾若干次相邻差值的众数（24fps 下是 41666/41667 交替，允许一格的抖动）
+        val interval =
+          shown
+            .takeLast(21)
+            .zipWithNext { a, b -> b - a }
+            .groupingBy { it }
+            .eachCount()
+            .maxBy { it.value }
+            .key
+        assertTrue(
+          last - previous <= interval + interval / 2,
+          "末尾两帧之间有一个帧间隔的空洞（帧间隔 $interval）: $previous -> $last",
+        )
+        val mark = snapshot().size
+
+        assertTrue(player.stepBack(), "stepBack at the end of the stream must succeed")
+        assertEquals(
+          listOf(previous),
+          snapshot().drop(mark).filterNotNull(),
+          "退帧必须只退一帧：末帧=$last 次末帧=$previous",
+        )
+      } finally {
+        player.closeAsync()
+      }
+    }
+  }
 }

@@ -12,6 +12,9 @@ internal object TestMedia {
    */
   const val BBB_640X360_12S_FASTSTART = "media/bbb-640x360-12s-faststart.mp4"
 
+  /** 夹广告的 HLS（12s 主片 + 5.1s 广告 + 12s 主片），见 `media/README.md`。 */
+  const val HLS_AD_PLAYLIST = "media/hls-ad/playlist.m3u8"
+
   /** 取素材的真实路径：能解析出文件就用文件，否则复制成临时文件。 */
   fun path(name: String): Path = resourcePath(name) ?: copyToTemp(name)
 

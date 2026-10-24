@@ -56,8 +56,7 @@
 
 - `:shared:devMediaServer` 手动常驻启动（`DevServerKt`），工作目录为仓库根。
 - `hotRun` 链路把 agent 挂到应用进程，传 `-javaagent`、`-Dacg.dev.server.port`、
-  `-Dacg.dev.classpath`、`-Dacg.dev.pidfile`、`-Dacg.dev.logfile`、`-Dacg.dev.workdir`，
-  可选 `-Dacg.dev.media`。
+  `-Dacg.dev.classpath`、`-Dacg.dev.pidfile`、`-Dacg.dev.logfile`、`-Dacg.dev.workdir`。
 
 ## 检查范围
 

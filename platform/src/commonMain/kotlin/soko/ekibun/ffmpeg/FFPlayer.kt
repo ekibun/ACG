@@ -338,6 +338,10 @@ class FFPlayer(
       if (!stepMode) surfaceContext?.resume()
       var sendingPacket = 0
       var isReadTimeout = false
+      // 尾帧还在解码器的重排缓冲里，只有 drain 能取出来。读到 EOF 就地 drain 一次：
+      // 退帧轮里队列不会空（有一帧正等着判「是不是前一帧」），而原来的 drain 排在循环之后、
+      // 又以「队列空」为出循环条件 ⇒ 尾部两帧永远不出队，门控等满超时后把倒数第三帧当成了前一帧。
+      var drainedTail = false
       while (isPlaying()) {
         if (sendingPacket > 3 || (frames.map { it.value.size }.minOrNull() ?: 0) > 3) {
           delay(1.milliseconds)
@@ -356,6 +360,22 @@ class FFPlayer(
         isReadTimeout = false
 
         if (packet == null) {
+          if (!drainedTail) {
+            drainedTail = true
+            val drained =
+              codecs
+                .map { (index, codec) ->
+                  async(playerDispatcher) { index to codec.drain() }
+                }.awaitAll()
+            if (pts == this@FFPlayer.pts) {
+              drained.forEach { (index, list) ->
+                if (list.isNotEmpty()) frames.getOrPut(index) { arrayListOf() }.addAll(list)
+              }
+            } else {
+              drained.forEach { (_, list) -> list.forEach { it.close() } }
+            }
+            continue
+          }
           if (frames.map { it.value.size }.sum() == 0) {
             break
           }
@@ -396,30 +416,6 @@ class FFPlayer(
           }
           if (decoded.isEmpty()) return@async
           frames.getOrPut(stream.index) { arrayListOf() }.addAll(decoded)
-        }
-      }
-      // EOF 前 drain 出解码器缓存的尾帧。
-      if (isPlaying()) {
-        val drained =
-          codecs
-            .map { (index, codec) ->
-              async(playerDispatcher) { index to codec.drain() }
-            }.awaitAll()
-        if (pts == this@FFPlayer.pts) {
-          val pending = drained.sumOf { it.second.size }
-          if (pending > 0) {
-            drained.forEach { (index, list) ->
-              if (list.isNotEmpty()) frames.getOrPut(index) { arrayListOf() }.addAll(list)
-            }
-            // 等播放协程把这些帧消费掉，再走 finally
-            while (isPlaying() && frames.any { it.value.isNotEmpty() }) {
-              delay(10.milliseconds)
-            }
-          } else {
-            drained.forEach { (_, list) -> list.forEach { it.close() } }
-          }
-        } else {
-          drained.forEach { (_, list) -> list.forEach { it.close() } }
         }
       }
     } finally {

@@ -156,7 +156,7 @@ internal class TestMediaServer(
   /** 写正文；到 [servedLimit] 就停笔交给 [parked]。 */
   private fun writeBody(
     out: OutputStream,
-    body: ByteArray,
+    payload: ByteArray,
     from: Int,
   ) {
     var position = from
@@ -165,7 +165,7 @@ internal class TestMediaServer(
     var sentHere = 0L
     // 掐断用 out.close() 这个信号，handle 的 finally 再关一次也无害
     val cutAt = cutAfterBytes
-    while (position < body.size) {
+    while (position < payload.size) {
       if (!awaitWhileFrozen(out)) break
       val limit = servedLimit
       if (limit != null && servedBytes.get() >= limit) {
@@ -176,11 +176,11 @@ internal class TestMediaServer(
         runCatching { out.close() }
         return
       }
-      var n = minOf(chunkSize, body.size - position)
+      var n = minOf(chunkSize, payload.size - position)
       // 一次不越过上限
       if (limit != null) n = minOf(n, (limit - servedBytes.get()).toInt().coerceAtLeast(1))
       if (cutAt != null) n = minOf(n, (cutAt - sentHere).toInt().coerceAtLeast(1))
-      out.write(body, position, n)
+      out.write(payload, position, n)
       out.flush()
       position += n
       servedBytes.addAndGet(n.toLong())

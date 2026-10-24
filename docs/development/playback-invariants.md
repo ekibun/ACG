@@ -123,6 +123,19 @@ native 侧每个 `AVIOContext` 分配一次读数组并反复用，`AvIO.read(bu
 占它声明的时长），HLS 的 seek 也回到 BACKWARD 语义（片头 dts 恰好等于声明起点 ⇒ `ts_diff == 0`
 当场接受，不再跳过整段）。EVENT（直播/滚动）播放列表不走这条路，保持上游行为。
 
+### 1.8 片尾的尾帧只能靠 drain 取出，drain 得排在「等队列空」之前
+
+解码器有重排缓冲（`has_b_frames`），读到 EOF 时最后 1~2 帧还在里头，不 drain 一个都拿不到。
+`resumeImpl` 原来把 drain 排在读循环之后，而循环的退出条件是「队列空」：
+
+- 正常播放：没有帧被扣住 ⇒ 队列会空 ⇒ break ⇒ drain ⇒ 尾帧补进队列 ⇒ 播放协程消费掉；
+- 退帧轮：门控扣着一帧等「后面还有没有帧」⇒ 队列永远不空 ⇒ 永远走不到 drain ⇒ 尾帧永远缺席。
+  于是门控等满 1000 次 `delay(1 ms)` 才超时（Windows 的定时器粒度是 15.6 ms，实测合计十几秒），
+  然后把**倒数第三帧**当成「前一帧」——症状就是「片尾按 -1f 卡一下、退两帧」。
+
+⇒ drain 只留一处，且必须在读到 EOF 的当场做（只做一次），之后才轮到「等队列空」。
+`FFPlayerStepTest.stepBackAtEndOfStreamShowsTheFrameBeforeLast` 盯着这条。
+
 ---
 
 ## 二、native 输出端：每流一块缓冲
