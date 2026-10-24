@@ -34,6 +34,15 @@ class FFPlayer(
     data object ReadTimeout : Event
 
     data object ReadTimeoutResume : Event
+
+    /**
+     * 解复用器跳过了一段插播广告。[from]/[to] 是声明轴上的位置（微秒），
+     * 在画面真正走到 [to] 之后才发出（读包是预读的，读到时发会比画面早好几秒）。
+     */
+    data class AdSkipped(
+      val from: Long,
+      val to: Long,
+    ) : Event
   }
 
   /** 播放基准点；`relate` 由音频帧校正为实际重采样时间戳。 */
@@ -64,6 +73,18 @@ class FFPlayer(
      * 分片边界，会退回当前帧。取 1 s 覆盖常见 B 帧延迟，代价是多解一小段帧。
      */
     private const val STEP_BACK_MARGIN_US = 1_000_000L
+
+    /**
+     * 相邻包的声明时间差超过它，就认为解复用器跳过分片了（正常只差一帧）。
+     * 判定在 `hls.c` 里，见 `docs/design/hls-ad-skip.md`。
+     */
+    private const val AD_GAP_US = 1_000_000L
+
+    /** 学习帧间隔的上限：跳过广告后相邻送显帧会差十几秒，学进去会让退帧一次退十几秒。 */
+    private const val MAX_FRAME_INTERVAL_US = 200_000L
+
+    /** 空档末端之前这么多也算「已过空档」：B 帧重排让接上的首帧比它早一两帧（实测 42ms）。 */
+    private const val AD_SKIP_EDGE_US = 500_000L
   }
 
   /** 开一轮独占播放：作废上一轮并等它收干净；本轮身份由 [PTS] 对象标识。 */
@@ -211,6 +232,13 @@ class FFPlayer(
     var lastDropped: Long? = null
     var converging = resyncTo != null
     var backstepping = backstep && resyncTo != null
+    // 广告跳段留下的声明轴空档：按视频流的相邻包识别，等画面走到空档末端才上报。
+    // 只跟一条流：音视频各自都会出现同一个空档，跟两条会重复上报。
+    val skipTrackIndex = (pts.streams[AVMediaType.VIDEO] ?: pts.streams.values.firstOrNull())?.index
+    // 时钟由音频帧推进（`flushFrame` 只对音频返回时间戳）；纯视频流没有它，跳过广告后要自己抬时钟。
+    val clockDrivenByAudio = pts.streams.containsKey(AVMediaType.AUDIO)
+    var skipLastPts = -1L
+    val pendingSkips = ArrayDeque<Pair<Long, Long>>()
     val playJobs =
       pts.streams.map { (codecType, stream) ->
         async(playerDispatcher) {
@@ -275,6 +303,15 @@ class FFPlayer(
                   return@updateJob
                 }
                 if (codecType == AVMediaType.VIDEO && onNextFrame?.isActive != true) {
+                  // 跳过广告后声明轴直接跳过一整段。有音频时它推着时钟走；纯视频流没人推，
+                  // 这一帧会被下面的门限挡住整整一个广告时长，所以这里把时钟抬到空档之后。
+                  val skip = pendingSkips.firstOrNull()
+                  if (!clockDrivenByAudio &&
+                    skip != null &&
+                    frame.timeStamp >= skip.second - AD_SKIP_EDGE_US
+                  ) {
+                    pts.update(frame.timeStamp)
+                  }
                   // 等到本帧到达播放时刻；中途停播就退出本轮
                   while (frame.timeStamp > pts.now(surfaceContext?.speedRatio ?: 1f)) {
                     delay(1.milliseconds)
@@ -300,14 +337,20 @@ class FFPlayer(
                 if (!isPlaying()) return@updateJob
                 if (timeStamp >= 0) pts.update(timeStamp)
                 if (codecType == AVMediaType.VIDEO) {
+                  // 画面走到空档之后才提示；读包是预读的，读到时发会比画面早好几秒
+                  while (pendingSkips.isNotEmpty() && pendingSkips.first().second <= frame.timeStamp) {
+                    val (skippedFrom, skippedTo) = pendingSkips.removeFirst()
+                    onEvent(Event.AdSkipped(skippedFrom, skippedTo))
+                  }
                   // 本轮收敛过就用丢帧结果补前一帧，未收敛时沿用上一次的当前帧
                   prevFrameTs = if (converging) lastDropped else lastFrameTs
                   converging = false
                   lastFrameTs = frame.timeStamp
-                  // 只有真看到连续两帧时，差值才是可信的帧间隔
+                  // 只有真看到连续两帧时，差值才是可信的帧间隔；跳过广告那一段差十几秒，不能学
                   val prev = prevFrameTs
-                  if (prev != null && frame.timeStamp > prev) {
-                    stream.frameIntervalUs = frame.timeStamp - prev
+                  if (prev != null) {
+                    val delta = frame.timeStamp - prev
+                    if (delta in 1..MAX_FRAME_INTERVAL_US) stream.frameIntervalUs = delta
                   }
                   if (onNextFrame?.isActive == true) {
                     pts.update(frame.timeStamp)
@@ -395,6 +438,15 @@ class FFPlayer(
         // 记投出去还没回来的解码作业数
         sendingPacket++
         val stream = pts.streams.values.first { it.index == packet.streamIndex }
+        if (stream.index == skipTrackIndex) {
+          val declared = packet.ptsUs
+          if (declared >= 0) {
+            if (skipLastPts >= 0 && declared - skipLastPts > AD_GAP_US) {
+              pendingSkips.addLast(skipLastPts to declared)
+            }
+            skipLastPts = declared
+          }
+        }
         val codec =
           codecs.getOrPut(stream.index) {
             AvCodec(stream)

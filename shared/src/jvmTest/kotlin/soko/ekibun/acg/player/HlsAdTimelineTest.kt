@@ -11,11 +11,14 @@ import kotlin.test.Test
 import kotlin.test.assertTrue
 
 /**
- * 素材 `hls-ad` 在分片边界藏了两次时间轴断裂：主片 0–12 s、广告 12–17.1 s（自己的 PTS 从 1.4 s
+ * 素材 `hls-ad` 在分片边界藏了两次时间轴断裂：主片 0–12 s、广告 12–17.1 s（自己的 PTS 从 1.48 s
  * 重新起算）、主片接着 17.1 s 往下。demuxer 已把包平移到声明轴（见 `hls.sed` 第 4 条与
  * `playback-invariants` 1.7），所以送显时间戳必须跨过这两处继续连续。
  *
- * 改写失效时的症状是 5 秒的空洞：广告帧退回 1.4 s，被 `resyncTo` 当成「还没收敛」整段丢掉。
+ * 这里要的是「平移本身」，所以先关掉广告跳过（`setSkipAd(false)`）：开着的话这两处会变成 5.1 s
+ * 的空档，验的就不是平移了。
+ *
+ * 改写失效时的症状是 5 秒的空洞：广告帧退回 1.48 s，被 `resyncTo` 当成「还没收敛」整段丢掉。
  */
 class HlsAdTimelineTest {
   @Test(timeout = 120_000)
@@ -46,6 +49,7 @@ class HlsAdTimelineTest {
           if (it is FFPlayer.Event.Frame) it.pts?.let(frames::add)
         }
       try {
+        player.setSkipAd(false)
         val streams = player.getStreams().associateBy { it.codecType }
         val job = launch { player.play(streams, from) }
         withTimeout(30_000) {

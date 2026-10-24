@@ -11,6 +11,10 @@ extern "C" {
 #include "libavutil/imgutils.h"
 #include "libswresample/swresample.h"
 #include "libswscale/swscale.h"
+
+// hls.c 的本地补丁（cxx/ffmpeg/patches/hls.sed 第 5
+// 条）：关掉插播广告的自动跳过。
+int acg_hls_set_skip_ad(AVFormatContext* s, int on);
 }
 
 jobject av_dict_to_map(JNIEnv* env, AVDictionary* d) {
@@ -300,13 +304,32 @@ extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_ffmpeg_AvPacket_closeNative(
 
 extern "C" JNIEXPORT jint JNICALL
 Java_soko_ekibun_ffmpeg_AvFormat_getPacketNative(JNIEnv* env, jobject thiz,
-                                                 jlong ctx, jlong packet) {
-  int ret = av_read_frame((AVFormatContext*)ctx, (AVPacket*)packet);
+                                                 jlong ctx, jlong packet,
+                                                 jlongArray pts_out) {
+  auto fmt = (AVFormatContext*)ctx;
+  auto pkt = (AVPacket*)packet;
+  int ret = av_read_frame(fmt, pkt);
   // 非 EOF 的负返回值打错误日志。
   if (ret < 0 && ret != AVERROR_EOF)
     av_log(nullptr, AV_LOG_ERROR,
            "av_read_frame error ret=%d (folded to EOF by caller)\n", ret);
-  return ret ? fmin(ret, -1) : ((AVPacket*)packet)->stream_index;
+  // 包时间戳（微秒，已按分片平移到声明轴）与标志位。上层靠它判断相邻包之间是否被跳过了
+  // 分片，以及跳过之后接上的那一包是不是关键帧。
+  if (ret >= 0 && pts_out != nullptr) {
+    jlong ts = -1;
+    if (pkt->pts != AV_NOPTS_VALUE && pkt->stream_index >= 0 &&
+        pkt->stream_index < (int)fmt->nb_streams)
+      ts = av_rescale_q(pkt->pts, fmt->streams[pkt->stream_index]->time_base,
+                        AV_TIME_BASE_Q);
+    jlong out[2] = {ts, (jlong)pkt->flags};
+    env->SetLongArrayRegion(pts_out, 0, 2, out);
+  }
+  return ret ? fmin(ret, -1) : pkt->stream_index;
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_soko_ekibun_ffmpeg_AvFormat_setSkipAdNative(JNIEnv* env, jobject thiz,
+                                                 jlong ctx, jboolean on) {
+  return acg_hls_set_skip_ad((AVFormatContext*)ctx, on ? 1 : 0);
 }
 extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvCodec_initNative(
     JNIEnv* env, jobject thiz, jlong stream) {

@@ -9,6 +9,12 @@ class AvPacket : Pointer() {
 
   var streamIndex: Int = -1
 
+  /** 包时间戳（微秒，已平移到声明轴）；容器没给时为 `-1`。 */
+  var ptsUs: Long = -1
+
+  /** 包标志位，见 [AvFormat.AV_PKT_FLAG_KEY] 等。 */
+  var flags: Int = 0
+
   companion object {
     init {
       loadLibrary("ffmpeg")

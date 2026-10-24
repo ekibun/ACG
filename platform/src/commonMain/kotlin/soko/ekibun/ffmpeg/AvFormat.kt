@@ -26,6 +26,11 @@ open class AvFormat(
     /** 允许落在非关键帧上（仅在 demuxer 支持时有效）。 */
     const val AVSEEK_FLAG_ANY = 4
 
+    // libavcodec/packet.h 的 AV_PKT_FLAG_*
+
+    /** 关键帧。跳过广告之后接上的第一包必须是它，否则解码器没有参考帧。 */
+    const val AV_PKT_FLAG_KEY = 1
+
     // AVSampleFormat 枚举值。
     const val AV_SAMPLE_FMT_NONE = -1
     const val AV_SAMPLE_FMT_U8 = 0
@@ -63,15 +68,24 @@ open class AvFormat(
       flags: Int,
     ): Int
 
-    // < 0：出错；>= 0：流索引
+    // < 0：出错；>= 0：流索引。`out[0]` 回填包时间戳（微秒，容器没给为 -1），
+    // `out[1]` 回填 `AV_PKT_FLAG_*`。
     @JvmStatic
     private external fun getPacketNative(
       ctx: Long,
       packet: Long,
+      ptsOut: LongArray,
     ): Int
 
     @JvmStatic
     private external fun destroyNative(ctx: Long)
+
+    /** 关掉 HLS 插播广告的自动跳过（默认开）。 */
+    @JvmStatic
+    private external fun setSkipAdNative(
+      ctx: Long,
+      on: Boolean,
+    ): Int
   }
 
   /** 建上下文；本类唯一留在类体里的 `external fun`（要用 `thiz`），别挪进 companion。 */
@@ -91,6 +105,12 @@ open class AvFormat(
 
   /** 容器总时长（微秒）；容器没给返回 0。须在 [getStreams] 之后调。 */
   suspend fun getDurationUs(): Long = withPtr { ptr -> getDurationNative(ptr) }
+
+  /**
+   * 关掉 HLS 插播广告的自动跳过（默认开）。只对 HLS 有效，非 HLS 返回非 0。
+   * 误判时用：先关掉再 `seekTo` 回广告位置重播，整条流都不再跳过。
+   */
+  suspend fun setSkipAd(on: Boolean): Int = withPtr { ptr -> setSkipAdNative(ptr, on) }
 
   /** 容器级 seek；`stream` 为 null 时单位是 `AV_TIME_BASE` 微秒，否则用该流的 `time_base`。 */
   open suspend fun seekTo(
@@ -137,12 +157,14 @@ open class AvFormat(
             withPtr { ptr ->
               // 未交出去的包由下面的 finally 归还。
               var inFlight: AvPacket? = null
+              // 复用同一个数组，避免每包一次分配。
+              val ptsOut = LongArray(2)
               try {
                 while (true) {
                   val packet = AvPacket()
                   inFlight = packet
                   while (true) {
-                    val ret = getPacketNative(ptr, packet.ptr)
+                    val ret = getPacketNative(ptr, packet.ptr, ptsOut)
                     if (ret < 0) {
                       // 交不出去就地归还；作废收场（AVERROR_EXIT）不出声。
                       packet.close()
@@ -155,6 +177,8 @@ open class AvFormat(
                     // `streams.isEmpty()` 是下载器模式，别当冗余删掉。
                     if (streams.isEmpty() || streams.firstOrNull { it.index == ret } != null) {
                       packet.streamIndex = ret
+                      packet.ptsUs = ptsOut[0]
+                      packet.flags = ptsOut[1].toInt()
                       channel.send(packet)
                       // 所有权归通道（没被收走时由 onUndeliveredElement 归还）。
                       inFlight = null

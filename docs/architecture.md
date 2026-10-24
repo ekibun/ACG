@@ -450,5 +450,6 @@ Gradle 只传 `-javaagent` 与 `-D`。
 `dependsOn(":desktopApp:buildJni")`），保证「改了 `cxx/` 只跑测试」也不会静默用旧 dll。
 
 `PlayScreen` 默认指向 `http://127.0.0.1:8099/media/hls-ad/playlist.m3u8`（夹广告的 HLS 素材，
-逐帧能看到烧录的时间码与分片序号）。控制条能冻结 / 恢复 / 限速，用法见
+逐帧能看到烧录的时间码与分片序号；广告在声明 12 s 处，播到那里会被解复用器直接跳过，
+见 [design/hls-ad-skip.md](./design/hls-ad-skip.md)）。控制条能冻结 / 恢复 / 限速，用法见
 [development/debug-playback.md](./development/debug-playback.md)。

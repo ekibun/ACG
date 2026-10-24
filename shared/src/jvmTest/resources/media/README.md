@@ -48,7 +48,8 @@
   **接着自己的 PTS 走**，于是广告之后「媒体轴」永远落后「声明轴」一个广告时长。
   真实的片源（`EXTINF` 累加 vs 分片内 PTS）就是这么错开的，`stepBack` 落不到目标之前也源于此。
 - **结构**：`m000–m005`（2.0s ×6）+ `#EXT-X-DISCONTINUITY` + `a000–a002`（1.7s ×3，广告）
-  + `#EXT-X-DISCONTINUITY` + `m006–m011`（2.0s ×6）。
+  + `#EXT-X-DISCONTINUITY` + `m006–m011`（2.0s ×6）。声明轴总长 29.1s。广告在声明 12s 处，
+  媒体时间从 1.483s 重新起算 ⇒ 回跳 11.9s，够过判据的 `FF_AD_JUMP_US = 5s`。
 - **画面**：主片黑底，中央两行是 `HH:MM:SS.mmm` 时间码（白）与帧号 `#000`–`#575`（黄），
   左下角是分片序号 `S00`–`S11`；广告红底 + 大 `AD`，下面是它自己的帧号 `#000`–`#122`，
   左上角时间码、左下角 `A0`–`A2`。
@@ -67,5 +68,8 @@
   ```
   然后按上面的顺序拼 `playlist.m3u8`（`EXTINF` 分别 2.0 / 1.7）。序号按 `trunc(t/片长)` 算，
   分片正是按整 2.0 / 1.7 s 切的，所以每片首帧的标注就是该片的序号。
+- **三个用例共用它**：`HlsAdTimelineTest`（验平移，先 `setSkipAd(false)`）看接缝 12s / 17.1s 两侧
+  连续；`HlsAdSkipTest.adSegmentsNeverReachTheCaller` 看广告分片的包根本没到上层；
+  `HlsAdSkipTest.skipDoesNotStallPlayback` 看纯视频流跳过后不冻结。
 - **怎么用**：dev 媒体服务器按 `/media/<路径>` 直接取分包里的素材（`TestMediaServer.resolveFile`），
   所以 `hotRun` 起来后可以直接播 `http://127.0.0.1:8099/media/hls-ad/playlist.m3u8`。

@@ -123,6 +123,9 @@ native 侧每个 `AVIOContext` 分配一次读数组并反复用，`AvIO.read(bu
 占它声明的时长），HLS 的 seek 也回到 BACKWARD 语义（片头 dts 恰好等于声明起点 ⇒ `ts_diff == 0`
 当场接受，不再跳过整段）。EVENT（直播/滚动）播放列表不走这条路，保持上游行为。
 
+⇒ 平移之后广告与正片在播放侧**无法区分**（进度条连续正是症状消失的证据）。识别广告要靠平移前那一刻的
+`drift`，判据与落点见 [design/hls-ad-skip.md](../design/hls-ad-skip.md)。
+
 ### 1.8 片尾的尾帧只能靠 drain 取出，drain 得排在「等队列空」之前
 
 解码器有重排缓冲（`has_b_frames`），读到 EOF 时最后 1~2 帧还在里头，不 drain 一个都拿不到。

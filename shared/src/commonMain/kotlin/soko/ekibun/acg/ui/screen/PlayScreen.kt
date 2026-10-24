@@ -80,6 +80,7 @@ fun PlayScreen() {
                             if (p != null && !seeking.value) pts.floatValue = p.toFloat()
                           }
                           FFPlayer.Event.ReadTimeout, FFPlayer.Event.ReadTimeoutResume -> println(it)
+                          is FFPlayer.Event.AdSkipped -> println(it)
                         }
                       },
                     )

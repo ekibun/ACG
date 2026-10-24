@@ -74,6 +74,15 @@ ExternalProject_Add(
         INSTALL_COMMAND ${BASH_EXEC} make install
 )
 
+# 补丁文件变了要让 configure 重跑（hls.patched.c 只在 configure 时重写，ExternalProject
+# 默认不盯它的输入），否则改了 hls.sed 构建出来还是旧代码。
+ExternalProject_Add_Step(
+        ffmpeg_lib patch_inputs
+        DEPENDERS configure
+        DEPENDS "${CMAKE_CURRENT_LIST_DIR}/patches/configure.sh"
+                "${CMAKE_CURRENT_LIST_DIR}/patches/hls.sed"
+)
+
 add_library(ffmpeg SHARED
         ${CMAKE_CURRENT_LIST_DIR}/ffmpeg.cpp)
 
