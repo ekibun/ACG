@@ -154,12 +154,13 @@ open class AvFormat(
         packetChannel = channel
         readerJob =
           submit {
-            withPtr { ptr ->
-              // 未交出去的包由下面的 finally 归还。
-              var inFlight: AvPacket? = null
-              // 复用同一个数组，避免每包一次分配。
-              val ptsOut = LongArray(2)
-              try {
+            // 未交出去的包由下面的 finally 归还。声明在 withPtr 外面：守卫抛异常时
+            // lambda 根本没跑，只有放到这层才能让 finally 覆盖到那条路径。
+            var inFlight: AvPacket? = null
+            try {
+              withPtr { ptr ->
+                // 复用同一个数组，避免每包一次分配。
+                val ptsOut = LongArray(2)
                 while (true) {
                   val packet = AvPacket()
                   inFlight = packet
@@ -186,11 +187,11 @@ open class AvFormat(
                     }
                   }
                 }
-              } finally {
-                // 手里还攥着包就地归还；再关通道。
-                inFlight?.close()
-                channel.close()
               }
+            } finally {
+              // 手里还攥着包就地归还；再关通道（含上面守卫抛出的那条路径）。
+              inFlight?.close()
+              channel.close()
             }
           }
         channel

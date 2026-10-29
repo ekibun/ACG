@@ -122,10 +122,23 @@ abstract class Pointer protected constructor(
     return runBlocking(d) { block(ptr) }
   }
 
-  /** 把动作投递到归属 dispatcher，返回其 [Job]。 */
+  /**
+   * 把动作投递到归属 dispatcher，返回其 [Job]。
+   *
+   * 投递过来的动作可能排到句柄关掉之后才开跑（关闭与后台作业本来就是并发的）：那种情况下
+   * [withPtr] 的守卫会抛 `isClosed`，就地吞掉 —— 这个协程作用域没有异常处理器，漏出去会
+   * 直接杀掉进程（连点 load 的闪退就是这么来的）。其它异常照旧抛。
+   */
   internal fun submit(block: suspend () -> Unit): Job =
-    dispatcher?.let { CoroutineScope(it).launch { block() } }
-      ?: CompletableDeferred(value = runBlocking { block() })
+    dispatcher?.let {
+      CoroutineScope(it).launch {
+        try {
+          block()
+        } catch (e: IllegalStateException) {
+          if (!isClosed) throw e
+        }
+      }
+    } ?: CompletableDeferred(value = runBlocking { block() })
 
   private val closedFlag = AtomicBoolean(false)
 
