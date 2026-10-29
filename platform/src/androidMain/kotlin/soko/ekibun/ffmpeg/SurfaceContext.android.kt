@@ -7,6 +7,7 @@ import android.media.AudioManager
 import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.view.Surface
+import kotlinx.coroutines.delay
 
 class AndroidSurfaceContext(
   var surfaceTexture: SurfaceTexture,
@@ -87,19 +88,37 @@ class AndroidSurfaceContext(
 
   var frameWrite = 0L
 
-  fun flushAudioBuffer(buf: ByteArray): Int {
+  suspend fun flushAudioBuffer(buf: ByteArray): Int {
     val size = buf.size
     if (audio.playState != AudioTrack.PLAYSTATE_PLAYING) audio.play()
-    // 走 write(byte[], offset, size, mode)。，不再包一层
-    if (size > 0) audio.write(buf, 0, size, AudioTrack.WRITE_BLOCKING)
-    // AudioTrack 的 framePosition 以采样帧为单位，与 channels 无关，不要再除
-    frameWrite += size / (audio.channelCount * bytesPerSampleOf(audio.audioFormat))
-    val timestamp = AudioTimestamp()
-    return if (audio.getTimestamp(timestamp)) {
-      (frameWrite - timestamp.framePosition).toInt()
-    } else {
-      -1
+    // 非阻塞写。音频与视频的送显作业跑在同一条播放线程上，阻塞写会在音频队列满时把整条线程
+    // 卡住几百毫秒 —— 画面跟着停一下再连补几帧，时钟读数的锯齿也是它造成的。
+    // 写不进去就返回短计数，让出线程（delay 会把线程让给视频作业）再接着写。
+    var offset = 0
+    while (offset < size) {
+      val written = audio.write(buf, offset, size - offset, AudioTrack.WRITE_NON_BLOCKING)
+      if (written < 0) break
+      if (written == 0) {
+        // 暂停 / 停止已落地：缓冲区不再被消费，再等就是死等
+        if (audio.playState != AudioTrack.PLAYSTATE_PLAYING) break
+        delay(1)
+        continue
+      }
+      offset += written
     }
+    // 只记真写进去的量：被打断时剩下的没进声卡
+    // AudioTrack 的 framePosition 以采样帧为单位，与 channels 无关，不要再除
+    frameWrite += offset / (audio.channelCount * bytesPerSampleOf(audio.audioFormat))
+    if (offset < size) return -1
+    val timestamp = AudioTimestamp()
+    if (!audio.getTimestamp(timestamp)) return -1
+    // framePosition 每 10ms 左右才走一格，直接拿它算延迟就是台阶：时钟、以及被时钟
+    // 门控的画面都会跟着跳。把「采样时刻之后又播了多少帧」按名义采样率补回去，
+    // 延迟才是连续的（与 animix 的 PlaybackImpl 同款做法）。
+    val elapsedNs = System.nanoTime() - timestamp.nanoTime
+    val played = timestamp.framePosition + elapsedNs * audio.sampleRate / 1_000_000_000L
+    // 补出来的值理论上不会超过写进去的量；超过说明这一拍插值偏了，钳住别让时钟倒着跳。
+    return (frameWrite - played).coerceAtLeast(0L).toInt()
   }
 
   private fun bytesPerSampleOf(encoding: Int): Int =

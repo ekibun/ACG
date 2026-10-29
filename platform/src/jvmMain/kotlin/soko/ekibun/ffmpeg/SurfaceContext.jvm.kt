@@ -1,6 +1,7 @@
 package soko.ekibun.ffmpeg
 
 import androidx.compose.runtime.mutableLongStateOf
+import kotlinx.coroutines.delay
 import org.jetbrains.skia.ColorAlphaType
 import org.jetbrains.skia.ColorType
 import org.jetbrains.skia.Image
@@ -11,6 +12,7 @@ import javax.sound.sampled.AudioFormat
 import javax.sound.sampled.AudioSystem
 import javax.sound.sampled.DataLine
 import javax.sound.sampled.SourceDataLine
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * 桌面端播放实现：音频走 javax.sound.sampled；视频把 native 拷进复用 `ByteArray` 的整帧经
@@ -75,16 +77,26 @@ class DesktopSurfaceContext : SurfaceContext() {
 
   var frameWrite = 0L
 
-  fun flushAudioBuffer(buf: ByteArray): Int {
+  /**
+   * 播放意图。写循环靠它判断暂停是否已落地 —— `SourceDataLine.isRunning` 不能拿来当这个判据，
+   * 它跟的是 `started` 字段，缓冲区一欠载就翻成 `false`（JDK `AbstractDataLine.java:216-232`）。
+   */
+  @Volatile
+  private var wantPlaying = false
+
+  /** 一帧 PCM 的字节数（16 bit）。`write` 只收整帧，否则抛 `IllegalArgumentException`。 */
+  private val frameBytes get() = channels * 2
+
+  suspend fun flushAudioBuffer(buf: ByteArray): Int {
     val out = line
-    // 必须用 isRunning：向未 start 的 line 写入，缓冲区满后会永久阻塞
-    if (!out.isRunning) out.start()
+    // 声卡欠载会自己停住，写进去也播不出来
+    if (wantPlaying && !out.isRunning) out.start()
 
     // 显式按 LITTLE_ENDIAN 读。
     val floats = ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
     val frames = floats.limit() / channels
+    val pcm = ByteArray(frames * frameBytes)
     if (frames > 0) {
-      val pcm = ByteArray(frames * channels * 2)
       val shorts = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
       for (i in 0 until frames) {
         val l = floats.get(i * channels)
@@ -92,11 +104,47 @@ class DesktopSurfaceContext : SurfaceContext() {
         shorts.put(i * channels, toPcm16(l))
         if (channels > 1) shorts.put(i * channels + 1, toPcm16(r))
       }
-      out.write(pcm, 0, pcm.size)
     }
-    frameWrite += frames
+    val written = writePcm(out, pcm)
+    // 只记真写进去的量：被打断时剩下的没进声卡
+    frameWrite += written / frameBytes
+    // 没写完说明这一拍被暂停打断，不给时钟
+    if (written < pcm.size) return -1
     // 与 Android 的 framePosition 等价：已播放的帧数
     return (frameWrite - out.longFramePosition).toInt()
+  }
+
+  /**
+   * 分片写：一次只写 [SourceDataLine.available] 那么多，写不进去就让出线程。
+   *
+   * 阻塞写会把整条播放线程钉在声卡上 —— 音频与视频的送显作业共用这条线程，音频队列满的那
+   * 几百毫秒里视频一帧都送不出去，画面停一下再连补几帧，时钟读数也跟着台阶化。它还是条死路：
+   * [pause] / [stop] 之后缓冲区不再被消费，阻塞中的写永远等不到空间。
+   *
+   * @return 实际写进去的字节数；被暂停打断时小于 [pcm] 的长度。
+   */
+  private suspend fun writePcm(
+    out: SourceDataLine,
+    pcm: ByteArray,
+  ): Int {
+    var offset = 0
+    while (offset < pcm.size) {
+      // 暂停 / 停止已落地：剩下的不写了，收场归 pause() / stop()
+      if (!wantPlaying) return offset
+      // available() 按字节报、不保证整帧，向下取整到帧边界
+      val room = out.available() / frameBytes * frameBytes
+      if (room <= 0) {
+        delay(1.milliseconds)
+        continue
+      }
+      val wrote = out.write(pcm, offset, minOf(room, pcm.size - offset))
+      if (wrote <= 0) {
+        delay(1.milliseconds)
+        continue
+      }
+      offset += wrote
+    }
+    return offset
   }
 
   private fun toPcm16(value: Float): Short = (value.coerceIn(-1f, 1f) * 32767f).toInt().toShort()
@@ -116,11 +164,18 @@ class DesktopSurfaceContext : SurfaceContext() {
     }
   }
 
-  override suspend fun resume() = line.start()
+  override suspend fun resume() {
+    wantPlaying = true
+    line.start()
+  }
 
-  override suspend fun pause() = line.stop()
+  override suspend fun pause() {
+    wantPlaying = false
+    line.stop()
+  }
 
   override suspend fun stop() {
+    wantPlaying = false
     val out = line
     out.stop()
     out.flush()
@@ -129,6 +184,7 @@ class DesktopSurfaceContext : SurfaceContext() {
   }
 
   override fun close() {
+    wantPlaying = false
     super.close()
     frameState.value = 0
     lineRef?.let {

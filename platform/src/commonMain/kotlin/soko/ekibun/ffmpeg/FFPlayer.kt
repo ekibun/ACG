@@ -246,6 +246,8 @@ class FFPlayer(
     val clockDrivenByAudio = pts.streams.containsKey(AVMediaType.AUDIO)
     var skipLastPts = -1L
     val pendingSkips = ArrayDeque<Pair<Long, Long>>()
+    // 时间轴的上报源：有音频只报音频，没有才报视频。判据见 playback-invariants §2.7
+    val ptsFromAudio = pts.streams.containsKey(AVMediaType.AUDIO)
     val playJobs =
       pts.streams.map { (codecType, stream) ->
         async(playerDispatcher) {
@@ -364,6 +366,8 @@ class FFPlayer(
                     onNextFrame.resumeWith(Result.success(true))
                   }
                 }
+                // 步进轮音频整轮静音，不报时间戳，这一轮只能由画面报
+                if (ptsFromAudio && codecType != AVMediaType.AUDIO && !stepMode) return@updateJob
                 onEvent(Event.Frame(frame.timeStamp))
               }.also { job ->
                 job.invokeOnCompletion {
