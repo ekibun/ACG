@@ -23,6 +23,13 @@ class FFPlayer(
   url: String,
   io: AvIO.Handler,
   val surfaceContext: AvSurfaceContext? = null,
+  /**
+   * 视频解码优先走硬件：桌面用 D3D11VA，Android 用 MediaCodec。只是偏好，拿不到设备
+   * 或这个 codec 没有加速版本时 native 自动回落软解。硬解出来的帧在 native 侧已经
+   * 转回内存，所以送显链路不区分两种情况。解码器的输出形态在 open 时定死，
+   * 之后改不了 —— 要换得新建播放器。
+   */
+  val hardware: Boolean = true,
   val onEvent: (Event) -> Unit,
 ) : AvFormat(url, io) {
   /** 播放侧状态上报：每送显一帧回调 [Frame]（结束以 `pts = null`），读超时回调 [ReadTimeout]。 */
@@ -449,7 +456,7 @@ class FFPlayer(
         }
         val codec =
           codecs.getOrPut(stream.index) {
-            AvCodec(stream)
+            AvCodec(stream, hardware)
           }
         @Suppress("DeferredResultUnused")
         async(playerDispatcher) {

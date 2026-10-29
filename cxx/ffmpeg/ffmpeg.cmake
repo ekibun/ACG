@@ -47,12 +47,16 @@ if (ANDROID)
         list(APPEND FFMPEG_CONFIGURE_COMMAND --disable-asm)
     endif ()
 else ()
+    # d3d11 / dxgi 是 libavutil 的 d3d11va 设备上下文要调的东西，缺了链接就找不到符号。
     set(ffmpeg-lib
-            z bz2 iconv lzma ole32 bcrypt)
+            z bz2 iconv lzma ole32 bcrypt d3d11 dxgi)
     set(FFMPEG_CONFIGURE_COMMAND
             ${FFMPEG_CONFIGURE_COMMAND}
             --arch=x86_64
             --target-os=mingw32
+            # 硬解要在 libavutil 里编出 d3d11va 的 hwcontext。它是 autodetect，头文件
+            # 缺了会静默关掉，所以显式打开：缺依赖就让 configure 直接失败。
+            --enable-d3d11va
             )
 endif ()
 

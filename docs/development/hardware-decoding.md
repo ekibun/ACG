@@ -1,8 +1,9 @@
 # 硬解：帧的归属、输出池与两端改动面
 
-只收录**从本地 submodule 源码核实过的外部行为**，以及由它们推导出的改动面估算。当前仓库**未实现硬解**，
-本文是动手前的评估基线；实现落地后只把「不报错只失效」的判据补进
-[playback-invariants.md](./playback-invariants.md)。不在 agent 自动决策路径上。
+只收录**从本地 submodule 源码核实过的外部行为**，以及它们决定的实现形态。已落地：桌面 D3D11VA、
+Android MediaCodec 的 ByteBuffer 路线，落点在 `cxx/ffmpeg/ffmpeg.cpp` 的 `AvCodec_initNative` 与
+`frameToMemory`；「不报错只失效」的判据在 [playback-invariants.md](./playback-invariants.md) §2.6。
+不在 agent 自动决策路径上。
 播放时序的前提见 [playback-invariants.md](./playback-invariants.md)，模块划分见 [../architecture.md](../architecture.md)。
 所有 ffmpeg 行号对应 `cxx/ffmpeg/ffmpeg/` 下的当前 submodule 版本。
 
@@ -57,13 +58,14 @@
 
 ### 1.4 现有的背压已经够用
 
-`FFPlayer.kt:431` 的闸门是 `sendingPacket > 3 || min(queue) > 3` 就停读 ⇒ 预读深度 ≤ 3~4 帧，
-与池子同一量级。**不需要新增限速器**；要改的是另一件事：
+`FFPlayer.kt` 的闸门是 `sendingPacket > 3 || min(queue) > 3` 就停读 ⇒ 预读深度 ≤ 3~4 帧，
+与池子同一量级。**不需要新增限速器**。
 
-⚠️ `ffmpeg.cpp:390-403` 的 `kMaxSendRetry = 16` 建立在软解前提上（注释：「输出的帧全部读完之后再送，
-不会再返回 EAGAIN」）。硬解下帧已经交给 Java、却仍占着池子：`receive_frame` 收不出新帧、
-`send_packet` 也进不去，于是 16 次空转后**丢包并打一条 "reference chain will be broken"**。
-这是误判 —— 硬解落地时必须让 EAGAIN 原样上浮，交给 §1.4 那个闸门去等。
+⚠️ `ffmpeg.cpp` 的 `kMaxSendRetry = 16` 建立在「帧不会长期卡在解码器外面」的前提上。
+只在 **surface 路线**下会被推翻：帧已经交给 Java、却仍占着池子，`receive_frame` 收不出新帧、
+`send_packet` 也进不去，于是 16 次空转后丢包并打一条错误日志 —— 那是误判。
+本实现走 §2.2 的 ByteBuffer 路线，出帧时当场 `releaseOutputBuffer`，帧不占池子，
+所以这个上限原样保留；换成 ImageReader / surface 回读时才需要让 EAGAIN 原样上浮。
 
 ---
 
@@ -118,31 +120,39 @@ stride / slice-height / crop 拷贝 → `releaseOutputBuffer(index, 0)` **当场
 依赖是 `dxva_h ID3D11VideoDecoder ID3D11VideoContext`（`:3402`），mingw-w64 自带这些头
 ⇒ 不需要 Windows SDK / MSVC。BtbN 的官方 Windows 构建同样是 MinGW 产物，带全套硬解。
 
-⚠️ 头文件缺失时 configure **静默关闭**该组件，不报错。当前 `cxx/ffmpeg/ffmpeg.cmake` 未显式开关，
-且 `cxx/build/` 已清空 ⇒ `CONFIG_D3D11VA` 尚未确认。落地时应显式写 `--enable-d3d11va`
-（缺依赖则 configure 直接失败，而不是悄悄降级）。
+⚠️ 头文件缺失时 configure **静默关闭**该组件，不报错。所以 `cxx/ffmpeg/ffmpeg.cmake` 显式写了
+`--enable-d3d11va`（缺依赖则 configure 直接失败，而不是悄悄降级），并在桌面侧补上
+`d3d11` / `dxgi` 两个链接库 —— `hwcontext_d3d11va.o` 直接调它们。
 
 ### 3.2 接线与两个坑
 
 `av_hwdevice_ctx_create(AV_HWDEVICE_TYPE_D3D11VA)` → `ctx->hw_device_ctx` → `get_format` 挑
-`AV_PIX_FMT_D3D11` → `postFrameVideo` 里 `av_hwframe_transfer_data` 成 NV12 → 原 sws 管线。
+`AV_PIX_FMT_D3D11` → **收帧处**（`frameToMemory`）`av_hwframe_transfer_data` 成软件帧
+（通常 NV12，10bit 片源是 P010）→ 原 sws 管线。
 
 ⚠️ **设备必须由 FFmpeg 自建**。`ID3D10Multithread_SetMultithreadProtected(TRUE)` 只在
 `d3d11va_device_create` 内部执行（`hwcontext_d3d11va.c:685-689`）。传外部 device 时这段不执行，
 而 `AvCodec`（自有 `avcodec` 线程）与 `postFrame`（播放线程）分处两个线程。
 
-⚠️ **sws 的缓存键必须取 transfer 结果**，不能取 `frame->format`（硬解下恒为 `AV_PIX_FMT_D3D11`，
-10bit 片源 transfer 出来是 P010）。同一类坑已经在 `ffmpeg.cpp:543-550` 记过一次。
+⚠️ **transfer 必须在收帧处做，不能留给 `postFrameVideo`**。两处原因：一是 `newAvFrame` 读的
+`best_effort_timestamp` 只有 `av_frame_copy_props` 之后才有（transfer 只搬像素，
+`hwcontext.c:398` 不搬属性），晚一步每帧的时间戳就是 0；二是 sws 的缓存键于是天然取到 transfer
+结果（10bit 片源是 P010），不会退化成恒为 `AV_PIX_FMT_D3D11` 的常量。
 
 ---
 
 ## 四、改动面
 
-| 平台 | 落点 | 内容 | 估算 |
-| --- | --- | --- | --- |
-| 桌面 | `cxx/ffmpeg/ffmpeg.cpp` + `ffmpeg.cmake` | 建设备、`get_format`、transfer 分支 | 60-80 行，Kotlin 0 |
-| Android（ByteBuffer 路线） | `AvCodec.kt` + `ffmpeg.cpp` | 按名字换解码器、失败回落软解 | ~20 行 |
-| Android（ImageReader 回读路线） | 上述 + `AvSurfaceContext` / `FFPlayer` / `AndroidSurfaceContext` | 自建离屏 Surface、回读、帧/Image 配对 | ~150 行 |
+已落地的是前两行（桌面 D3D11VA、Android ByteBuffer 路线），第三行的回读路线没有做：
+
+| 平台 | 落点 | 内容 |
+| --- | --- | --- |
+| 桌面 | `cxx/ffmpeg/ffmpeg.cpp` + `ffmpeg.cmake` | `--enable-d3d11va` + `d3d11`/`dxgi`、建设备、`get_format`、`frameToMemory` |
+| Android（ByteBuffer 路线） | `AvCodec.kt` + `ffmpeg.cpp` | 按名字换解码器、`pkt_timebase`、失败回落软解 |
+| Android（ImageReader 回读路线） | 上述 + `AvSurfaceContext` / `FFPlayer` / `AndroidSurfaceContext` | 自建离屏 Surface、回读、帧/Image 配对（**未实现**） |
+
+Kotlin 侧只多一个 `hardware: Boolean`（`FFPlayer` 默认开、`AvCodec` 默认关），
+送显链路一行没改 —— 两种情况在 `frameToMemory` 之后就分不出来了。
 
 回读路线只在 ByteBuffer 路线不可行时才需要，形态与代价：
 
@@ -155,22 +165,26 @@ stride / slice-height / crop 拷贝 → `releaseOutputBuffer(index, 0)` **当场
 
 ---
 
-## 五、验证顺序
+## 五、验证
 
 两端都没有 `ffmpeg` CLI 可用（`--disable-programs`），验证只能靠 native 日志。
 
-1. **Android 先走便宜的**：`avcodec_find_decoder_by_name("h264_mediacodec")`（HEVC 同理）、**不传 surface**，
-   打 `frame->format` 与 configure 失败码。拿到 `NV12` / `YUV420P` 即成立，不必上 ImageReader。
-2. **桌面**：先只建设备、打 `frame->format`（配合 `av_hwdevice_iterate_types`），确认拿到
-   `AV_PIX_FMT_D3D11` 再接 transfer —— 反过来先接 transfer，出问题分不清是设备还是格式。
-3. 两端都要确认 `--disable-encoders` 不影响解码侧硬解（只关编码）；`--disable-avfilter` 与
+1. **走的是哪条路**：`AvCodec_initNative` 在选中的分支上打 `video decode: d3d11va` /
+   `video decode: h264_mediacodec`，都不成立时打
+   `no hardware decoder for <name>, decoding on the cpu`。看到最后一条就是回落，不是失败。
+2. **桌面**：`CONFIG_D3D11VA` 由 `--enable-d3d11va` 保证（configure 缺依赖会直接失败）。
+   帧形态看 `frameToMemory` 里 `hardware frame transfer failed` 有没有出现。
+3. **Android**：MediaCodec 的 configure 失败会退到软解，日志里先出现 `video decode:` 的那一行
+   就说明选上了；拿到 NV12 之后 `postFrameVideo` 与软解走同一条 sws。
+4. 两端都要确认 `--disable-encoders` 不影响解码侧硬解（只关编码）；`--disable-avfilter` 与
    `postFrameVideo` 的 sws 无关（sws 在 libswscale）。
 
 ---
 
 ## 六、未决
 
-- 桌面 `CONFIG_D3D11VA` 未确认（构建目录已清），需重跑 configure。
 - Android ByteBuffer 模式在目标机型上的实际 `color-format` 未知，需真机探针。
-- 10bit / HDR 无方案：两条 Android 路线都拿不到 P010。
-- 硬解下 `EAGAIN` 的处理方式（§1.4）尚未设计。
+- `COLOR_FormatYUV420Flexible` 不在映射表 ⇒ 只声明 flexible 输出的机型会 init 失败，
+  日志里是 `Output color format 0x7f420888 ... is not supported`，之后回落软解。
+- 10bit / HDR 无方案：两条 Android 路线都拿不到 P010（桌面 transfer 出来是 P010，能走）。
+- 桌面 transfer 的下载成本吃掉大半收益，真正省下来要让帧留在 GPU 上。

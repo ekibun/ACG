@@ -16,7 +16,7 @@ Android `android.webkit.WebView`）与**播放内核**（FFmpeg）。两族各�
 | 还没做完的事 | [TODO.md](../TODO.md) |
 | 未落地的设计草案（领域模型、数据源契约、落地顺序） | [design/architecture-design.md](./design/architecture-design.md) |
 | 「不报错只失效」的现象 | [development/playback-invariants.md](./development/playback-invariants.md)、[development/troubleshooting.md](./development/troubleshooting.md) |
-| 硬解可行吗、帧和输出池归谁、要改多少 | [development/hardware-decoding.md](./development/hardware-decoding.md) |
+| 硬解怎么接、帧归谁、输出池怎么约束 | [development/hardware-decoding.md](./development/hardware-decoding.md) |
 | JS 引用计数、关闭顺序、JS ↔ Java 转换 | [development/quickjs-lifetime.md](./development/quickjs-lifetime.md) |
 | `:shared` 的 HTTP / 文件 IO、JS 引擎、界面层约束 | [development/shared-layer.md](./development/shared-layer.md) |
 | 测试为什么这样断言、硬编码值的来由 | [development/testing.md](./development/testing.md) |

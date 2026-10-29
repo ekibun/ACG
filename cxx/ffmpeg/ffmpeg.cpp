@@ -1,13 +1,16 @@
 #include <jni.h>
 
+#include <cstdio>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <vector>
 
 extern "C" {
 #include "libavcodec/avcodec.h"
 #include "libavcodec/jni.h"
 #include "libavformat/avformat.h"
+#include "libavutil/hwcontext.h"
 #include "libavutil/imgutils.h"
 #include "libswresample/swresample.h"
 #include "libswscale/swscale.h"
@@ -331,18 +334,87 @@ Java_soko_ekibun_ffmpeg_AvFormat_setSkipAdNative(JNIEnv* env, jobject thiz,
                                                  jlong ctx, jboolean on) {
   return acg_hls_set_skip_ad((AVFormatContext*)ctx, on ? 1 : 0);
 }
-extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvCodec_initNative(
-    JNIEnv* env, jobject thiz, jlong stream) {
-  auto pstream = (AVStream*)stream;
-  auto pCodec = avcodec_find_decoder(pstream->codecpar->codec_id);
-  if (!pCodec) return 0;
-  AVCodecContext* ctx = avcodec_alloc_context3(pCodec);
-  int ret = avcodec_parameters_to_context(ctx, pstream->codecpar);
-  if (ret == 0) {
-    ret = avcodec_open2(ctx, pCodec, nullptr);
-    if (ret == 0) return (jlong)ctx;
+// 按这条流的参数建一个还没 open 的上下文；分配或参数搬运失败都返回 null，
+// 调用方据此回落下一个解码器。
+static AVCodecContext* allocCodecContext(AVStream* stream,
+                                         const AVCodec* decoder) {
+  if (!decoder) return nullptr;
+  AVCodecContext* ctx = avcodec_alloc_context3(decoder);
+  if (!ctx) return nullptr;
+  if (avcodec_parameters_to_context(ctx, stream->codecpar) < 0) {
+    avcodec_free_context(&ctx);
+    return nullptr;
   }
-  if (ctx) avcodec_free_context(&ctx);
+  return ctx;
+}
+
+#if defined(_WIN32)
+// 建了设备后解码器才把 GPU 格式列进候选，这里挑 D3D11。
+// 没有设备时列表里只有软件格式，取第一个即软解。
+static enum AVPixelFormat selectHwFormat(AVCodecContext* ctx,
+                                         const enum AVPixelFormat* formats) {
+  if (ctx->hw_device_ctx != nullptr)
+    for (const enum AVPixelFormat* p = formats; *p != AV_PIX_FMT_NONE; ++p)
+      if (*p == AV_PIX_FMT_D3D11) return *p;
+  return formats[0];
+}
+#endif
+
+// 视频解码优先走硬件。这只是偏好，不是保证：设备不存在、这个 codec 没有
+// 加速版本、加速器不吃这个 profile，三种情况都落到软解上，都不算错误。
+// 输出形态在 open 时就定了，所以这个选择随上下文走、之后不能改。
+extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvCodec_initNative(
+    JNIEnv* env, jobject thiz, jlong stream, jboolean hardware) {
+  auto pstream = (AVStream*)stream;
+  const AVCodec* software = avcodec_find_decoder(pstream->codecpar->codec_id);
+  if (!software) return 0;
+
+  if (hardware && pstream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+#if defined(_WIN32)
+    // 设备必须由 FFmpeg 自建：多线程保护只在 create 里设。
+    // 外部传进来的 device 带不上它，而解码与 postFrame 分处两个线程。
+    AVCodecContext* ctx = allocCodecContext(pstream, software);
+    if (ctx) {
+      AVBufferRef* device = nullptr;
+      if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_D3D11VA, nullptr,
+                                 nullptr, 0) == 0) {
+        // 设备归上下文所有，由 avcodec_free_context 放，这里不重复 unref。
+        ctx->hw_device_ctx = device;
+        ctx->get_format = selectHwFormat;
+        if (avcodec_open2(ctx, software, nullptr) >= 0) {
+          av_log(ctx, AV_LOG_INFO, "video decode: d3d11va\n");
+          return (jlong)ctx;
+        }
+      }
+      avcodec_free_context(&ctx);
+    }
+#elif defined(__ANDROID__)
+    // 只能走 MediaCodec 自己的解码器：libavutil 的 mediacodec 设备
+    // 没有 transfer。不配 surface 时它自己把画面按 NV12 拷回内存
+    // （mediacodecdec_common.c:490），上层照旧不用改。
+    char name[64];
+    snprintf(name, sizeof(name), "%s_mediacodec", software->name);
+    const AVCodec* mediaCodec = avcodec_find_decoder_by_name(name);
+    AVCodecContext* ctx = allocCodecContext(pstream, mediaCodec);
+    if (ctx) {
+      // 它报的呈现时间是微秒，把画面拷出输出 buffer 时按这个时基换算
+      // （mediacodecdec_common.c:471）；不给的话 pts 会被当成刻度值。
+      ctx->pkt_timebase = pstream->time_base;
+      if (avcodec_open2(ctx, mediaCodec, nullptr) >= 0) {
+        av_log(ctx, AV_LOG_INFO, "video decode: %s\n", name);
+        return (jlong)ctx;
+      }
+      avcodec_free_context(&ctx);
+    }
+#endif
+    av_log(nullptr, AV_LOG_WARNING,
+           "no hardware decoder for %s, decoding on the cpu\n", software->name);
+  }
+
+  AVCodecContext* ctx = allocCodecContext(pstream, software);
+  if (!ctx) return 0;
+  if (avcodec_open2(ctx, software, nullptr) >= 0) return (jlong)ctx;
+  avcodec_free_context(&ctx);
   return 0;
 }
 // 解码产出按 FFmpeg 的收/发分离协议收集：send_packet 返回 EAGAIN 时先收帧，
@@ -363,6 +435,24 @@ static jobject newAvFrame(JNIEnv* env, AVFrame* frame, AVStream* stream) {
                         (jint)frame->width, (jint)frame->height);
 }
 
+// 硬解出的帧不是像素，是显存里的纹理：上层只会读 data 指针，所以先转回内存。
+// transfer 只搬像素、不搬属性（hwcontext.c:398），时间戳得手工补 —— 少了这步
+// best_effort_timestamp 是空的，每帧都算成 0。
+static AVFrame* frameToMemory(AVFrame* frame) {
+  if (!frame->hw_frames_ctx) return frame;
+  AVFrame* picture = av_frame_alloc();
+  if (picture && av_hwframe_transfer_data(picture, frame, 0) == 0) {
+    av_frame_copy_props(picture, frame);
+    av_frame_free(&frame);
+    return picture;
+  }
+  av_log(nullptr, AV_LOG_ERROR, "hardware frame transfer failed (format=%d)\n",
+         (int)frame->format);
+  av_frame_free(&picture);
+  av_frame_free(&frame);
+  return nullptr;
+}
+
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_soko_ekibun_ffmpeg_AvCodec_sendPacketAndGetFramesNative(
     JNIEnv* env, jobject thiz, jlong pctx, jlong stream, jlong packet) {
@@ -380,7 +470,9 @@ Java_soko_ekibun_ffmpeg_AvCodec_sendPacketAndGetFramesNative(
       if (!frame) break;
       int r = avcodec_receive_frame(ctx, frame);
       if (r == 0) {
-        out.push_back(frame);
+        // 转内存失败的帧已经没了，继续收后面的。
+        frame = frameToMemory(frame);
+        if (frame) out.push_back(frame);
         continue;
       }
       av_frame_free(&frame);

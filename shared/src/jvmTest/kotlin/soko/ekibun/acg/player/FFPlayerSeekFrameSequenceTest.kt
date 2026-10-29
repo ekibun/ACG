@@ -49,6 +49,10 @@ class FFPlayerSeekFrameSequenceTest {
   /** 从 `frames` 里截出**本次动作新增**的那些非 null 时间戳。 */
   private fun List<Long?>.since(mark: Int): List<Long> = drop(mark).filterNotNull()
 
+  /**
+   * 开播放器。解码路径显式钉在 FFPlayer 的默认值上：像素正本必须与播放同源，
+   * 见 [referencePixels]。
+   */
   private fun openPlayer(
     surface: TestSurface,
     frames: MutableList<Long?>,
@@ -57,6 +61,7 @@ class FFPlayerSeekFrameSequenceTest {
       TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART).toString(),
       IOHandler(),
       surface,
+      hardware = true,
     ) { if (it is FFPlayer.Event.Frame) frames.add(it.pts) }
 
   /**
@@ -74,7 +79,13 @@ class FFPlayerSeekFrameSequenceTest {
     playJob.join()
   }
 
-  /** 顺序解完整条视频流，返回「帧时间戳 → 整帧哈希」的正本。 */
+  /**
+   * 顺序解完整条视频流，返回「帧时间戳 → 整帧哈希」的正本。
+   *
+   * 必须与播放走**同一条解码路径**：硬解出来是 NV12、软解是 YUV420P，经 sws 到 RGBA 有
+   * 1~3 LSB 的舍入差（见 `AGENTS.md` §2.5 的 asm 判据），跨路径的整帧哈希不可能相等。
+   * 判据「这一帧的像素属于它自己的时间戳」不受影响——错帧的差远大于 3 LSB。
+   */
   private fun referencePixels(): Map<Long, Int> =
     runBlocking {
       val (sink, hashes) = newSink()
@@ -85,7 +96,7 @@ class FFPlayerSeekFrameSequenceTest {
         )
       try {
         val video = format.getStreams().first { it.codecType == AVMediaType.VIDEO }
-        val codec = AvCodec(video)
+        val codec = AvCodec(video, hardware = true)
         try {
           val pixels = HashMap<Long, Int>()
 

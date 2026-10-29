@@ -224,6 +224,28 @@ native 侧每个 `AVIOContext` 分配一次读数组并反复用，`AvIO.read(bu
 ⇒ 轮次在「已取到帧、还没显示」时停住是常态（单帧步进的每一轮都是），这种帧**不能出队**；
 判据只能用「队列里是否还含这一帧」，不能拿 `remove()` 的返回值当判据。
 
+### 2.6 硬解帧进了 native 就得先转回内存
+
+硬解出的帧**不是像素，是句柄**：桌面是显存里的 `ID3D11Texture2D`，Android 带 surface 时连
+`data` 都是空的。`sws_scale` 对它们只会读到空平面 —— 不是「转得慢」，是「没有可读的数据」，
+画面全黑而解码器一声不吭。
+
+⇒ 转换必须在 **收帧处**（`receiveAll` 里的 `frameToMemory`），不能留给 `postFrameVideo`：
+`av_hwframe_transfer_data` 只搬像素、不搬属性（`hwcontext.c:398`），落后者拿到的
+`best_effort_timestamp` 是空的 ⇒ `AvFrame.timeStamp` 全成 0；sws 的缓存键也会退化成恒为
+`AV_PIX_FMT_D3D11` 的常量（10bit 片源实际转出来是 P010）。
+
+⇒ 桌面设备只能由 FFmpeg 自建（`av_hwdevice_ctx_create`）：多线程保护只在它的 create 里设，
+传外部 device 就没有，而解码与 `postFrame` 分处两个线程。
+
+⇒ 走不通一律回落软解，**不是错误**：设备不存在、codec 没有加速版本、加速器不吃这个 profile，
+三条都在 `AvCodec_initNative` 里落到同一个软解出口，只打一条 warning。
+
+⇒ Android 选 MediaCodec 时必须给 `pkt_timebase`：它报的是微秒，拷出画面时按该时基换算
+（`mediacodecdec_common.c:471`），不给的话 pts 被当成刻度值、时间轴整体错位。
+
+依据与两端改动面见 [hardware-decoding.md](./hardware-decoding.md)。
+
 ---
 
 ## 三、桌面输出：视频上传与音频写入
