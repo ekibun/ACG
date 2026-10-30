@@ -69,10 +69,14 @@ class HwDecodeTest {
           }
         while (true) {
           val packet = format.getPacket(listOf(video)) ?: break
-          collect(codec.sendPacketAndGetFrames(packet))
+          collect(codec.sendPacketAndGetFrames(packet) ?: emptyList())
         }
-        // 重排缓冲里的尾帧只有 drain 拿得到
-        collect(codec.drain())
+        // 重排缓冲里的尾帧要冲刷才拿得到：送个空包，一直收到吐干净
+        while (true) {
+          val tail = codec.sendPacketAndGetFrames() ?: break
+          if (tail.isEmpty()) break
+          collect(tail)
+        }
       } finally {
         codec.closeDeferred().join()
       }

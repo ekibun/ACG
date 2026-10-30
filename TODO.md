@@ -91,31 +91,26 @@
 - **测试材料**：在线 AES-128 流与本地生成法见 skill `build-and-test` 的「在线测试流」一节。
 - **完成判据**：AES-128 测试流可播（open / 读 / seek 不再在分片打开处失败）。
 
-### B26. 视频上传：桌面每帧仍 2 次拷贝 + 每帧 alloc，Android 已压到 1 次
+### B26. 视频上传：两端都零拷贝（模拟器回落逐帧拷贝）
 
-- **现状（2026-10 核对，含提交 `15f0da8` 的重构）**：`flushAudioBuffer`/`flushVideoBuffer`
-  已合并为统一的 `flushFrameImpl(codecType, frame, getBuffer)`，但两平台的视频上传路径**不一样**：
-  - **Android 已压到 1 次 CPU 拷贝**：视频分支直接调 `copyBufferToSurface(ptr, surface)`，
-    由 native（`ffmpeg.cpp`）从 `ctx->videoBuffer` 经 `ANativeWindow_setBuffersGeometry` +
-    **按 stride 逐行 memcpy** 直写 Surface 缓冲；`getBuffer`（`SetByteArrayRegion` 进 JVM `buf`）
-    在视频分支**根本不被调用** ⇒ 连平台共享的那次 JVM 数组拷贝都省了。旧的
-    `bitmap.copyPixelsFromBuffer` + `lockCanvas`/`drawBitmap` 路径已在 `15f0da8` 作为死代码删除。
-  - **桌面仍是 2 次 CPU 拷贝 + 每帧 alloc**：`flushFrameImpl` 里 `Image.makeRaster(buf)`
-    （native `videoBuffer` → 复用 JVM `buf` 经 `SetByteArrayRegion`，再 → Skia 自管 Image，memcpy #1）
-    + `VideoSurface.jvm.kt` 绘制时 `drawImageRect`（Skia Image → GPU 上传，memcpy #2）；
-    且每帧 `close()` 旧 Image、`makeRaster` 新 Image —— **每帧都 alloc 一块 Skia Image**。
-  - **约束不变**：`buf` 下一帧被 native 就地覆写，所以绘制源必须复制或加锁（Android 的
-    `copyBufferToSurface` 在 `flushFrameImpl` 调用内**同步** lock→memcpy→unlockAndPost 就安全；
-    桌面的 `makeRaster` 复制同理）；不能 alias `buf`，否则出撕裂。
-- **方向（剩下主要是桌面）**：
-  - 桌面：把当前帧留在**一份持久的 GPU 纹理**里，`flushFrameImpl` 每帧只 `updateTexture`
-    （或等价 `writePixels`）就地刷新像素，纹理对象不重建 ⇒ 省掉每帧 alloc/free 抖动。
-    但**上传动作仍每帧发生**（像素在变，无法只传一次）。
-  - **真正零每帧传输**需要 native 直接产出 GPU 纹理（ffmpeg → GPU，像 mediamp/mpv 那样走
-    IOSurface / ID3D12 / GL interop），跳过「native→CPU buf→Skia Image→GPU」整条——
-    那是 native/C++ 侧改造，不在本端 Kotlin 范围。
-- **完成判据**：桌面播放 RSS 与 Skia 纹理分配次数稳定（无每帧 `makeRaster` alloc 抖动），
-  且像素与现版本逐帧一致；Android 侧的 1 次拷贝已达成、无需再动。
+- **现状（2026-10-29）**：`flushAudioBuffer`/`flushVideoBuffer` 已合并为统一的
+  `flushFrameImpl(codecType, frame, getBuffer)`；两端的视频路径都不再逐帧走 JVM 数组：
+  - **桌面走零拷贝**：`cxx/ffmpeg/video_output.windows.cpp` 在 Skiko 的 adapter 上建 D3D11 设备，
+    `ID3D11VideoProcessor` 把硬解纹理转成 RGBA 写进 NT 共享纹理环，Skia 的 D3D12 设备
+    `OpenSharedHandle` 打开同一块显存，`BackendRenderTarget` → blit → 快照 → `drawImageRect`。
+    像素全程不落 CPU，也没有每帧的 `Image.makeRaster` 分配。判据与四个坑见
+    `docs/development/hardware-decoding.md` §五，用例 `DesktopZeroCopyTest`。
+  - **回退仍在**：Skiko 不是 Direct3D 后端、设备不可共享、或没有硬解时，
+    `DesktopSurfaceContext.isHardwareVideo = false`，退回原来的 `makeRaster` 逐帧拷贝
+    （native `videoBuffer` → 复用 JVM `buf` → Skia Image → GPU 上传）。
+  - **Android 也是零拷贝**：`av_mediacodec_default_init` 把 Surface 交给 MediaCodec，帧是
+    `AV_PIX_FMT_MEDIACODEC`，上屏只是 `av_mediacodec_release_buffer(buffer, 1)`，sws 与 memcpy
+    都没有了。拿不到 codec / surface 时退回 `copyBufferToSurface` 的逐帧拷贝。
+    真机（华为 ANG-AN00 / Android 12）验证过。模拟器上直出同样生效，但它的 codec 垫片在暂停态
+    单步不换帧（开宿主 GPU 也一样，同机 mediamp/ExoPlayer 也复现）⇒ 这类交互上真机验，
+    不为模拟器加设备类型分支。判据与对照实验见 `docs/development/hardware-decoding.md` §2.5。
+- **剩下**：macOS / Linux 桌面仍是逐帧拷贝（mediamp 在那边走 Metal / GLX，本仓库没做）；
+  Android 的 10bit/HDR 仍拿不到 P010。
 
 ## C. 事实未实测，文档里暂无据
 
@@ -187,6 +182,32 @@
   → P2：AniList mapper / per-episode 精确进度 / animeko 订阅兼容解释器 / 边播边缓存 / torrent。
 - **完成判据**：按 §5 分条验收，每条落地后回来更新本条状态；全部落地后删条目  
   （设计文档随实现修订，不删）。
+
+### E9. 硬解帧的「窗口」：压住几帧没有上界，池子挤爆会丢帧
+
+- **现状（2026-10-30，桌面零拷贝）**：`AVFrame` 带着解码器的 surface 一路上到送显（收帧不 `unref`），
+  而 d3d11va 的池是**静态**的：`1 + 16 参考帧`（H.264/HEVC）+ 3 张工作帧 + `extra_hw_frames`（现值 12）。
+  「上层压住几帧」没有结构性上界：
+  - 读包闸门 `frames.minOrNull() > 3` 按**最空的流**判，音频吃得快时视频队列可以一直长；
+  - `sendPacketAndGetFrames` 一次把解码器能给的帧全取回来，片尾冲刷时是整个重排缓冲。
+  池子挤爆时 ffmpeg 报 `Static surface pool size exceeded` 并**丢帧**。注意 EAGAIN 只来自输入侧那个
+  单槽（`avci->buffer_pkt`），与池子无关；`send_packet` 内部还会顺带解一帧（`decode.c`），所以只在
+  收帧端拦也挡不住。
+- **文档已对齐（2026-10-30）**：`playback-invariants.md` §2.10 与 `hardware-decoding.md` §5.2 原来写着
+  「背压来自 surface 池、取空后 `send_packet` 给 EAGAIN」（桌面侧是错的）与 `extra_hw_frames = 16`
+  （代码是 12），已按现状改正；剩下的只是下面这个设计缺口。
+- **方案（照 mpv）**：一次只送一个包，收帧逐帧回调 `onFrame`，回调返回 false 就停手（剩下的帧留在
+  解码器里），窗口即上界；池子按「窗口 + 3」开。mpv 的对应实现：`player/video.c` 的 `next_frames[]`
+  + `needs_new_frame()`（窗口 2~9 帧），`video/decode/vd_lavc.c` 的 `hwdec_get_extra_frames()`
+  = `max(6, vo_get_num_frame_refs() + 3)`。
+- **上一版实现**：`git stash list` 的 `帧窗口/逐帧回调重构（未完成，下一轮再说）`（另存了一份
+  `/tmp/wt-window-refactor.patch`）。含 `AvCodec.sendPacket(packet, isAlive, onFrame)`、native 收帧改
+  一帧一取、native 记账（`videoOutputHasRoom` + `FrameSlots`）的引入与删除、闸门改按视频队列、四个
+  用例改新接口。当时可编译、23 个用例类通过、13s 探针 292（音视频）/298（纯视频）帧、无池溢出 ——
+  只是改动面太大，先撤回。
+- **完成判据**：① `FFPlayer` 里没有 `sendingPacket`；② 压住的帧数 == 窗口，片尾冲刷也逐帧吐；
+  ③ 探针跑长片与 4K 各一次都不触发 `Static surface pool size exceeded`；④ 文档里的口径与
+  `extra_hw_frames` 的实值一致。
 
 ---
 

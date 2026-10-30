@@ -256,7 +256,30 @@ WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/de
   （根 [../AGENTS.md](../AGENTS.md) §2.5：commonMain 不许出现 `java.nio.ByteBuffer`）。
 - **音频输出有两块缓冲**（`audioBuffer` 与 `_audioBuffer1` 在 `postFrameAudio` 末尾交换），
   `closeNative` 两块都要 `av_free`，视频缓冲同理。
-- **`send_packet` 的 EAGAIN 重试上限是 16 次**：重试耗尽仍失败时打日志并交给调用方收场，
-  不能静默丢包（丢一包就断参考链，之后整个 GOP 画面成块）。
+- **`send_packet` 撞 EAGAIN 时不许丢包**：直出时一帧占一张 codec 的 surface，上层蓄几帧就可能把
+  解码器的输出缓冲占满，而丢一包就断参考链（之后整个 GOP 画面成块）。现在的做法是 native 尽量
+  收帧、收不动就通过 `status` 数组把「这次没送进去」回传，`FFPlayer` 按轮次重试同一个包
+  （`AvCodec.trySendPacketAndGetFrames`）；轮次换掉才作废并 close。改这段别退回到「重试 N 次
+  然后丢掉」——那正是 `kMaxSendRetry` 删掉的原因。
 - **`getStreamsNative` 把 `stream->time_base` 一并传给 Kotlin**：容器级 seek 把微秒折回刻度时
   会吃掉半格以内的偏移，上层算步长需要这个最小刻度。
+- **桌面零拷贝输出端在 `video_output.windows.cpp`**：从 Skiko 的 `DirectXDevice`（Kotlin 反射读到的指针）
+  取 adapter，自己建 D3D11 设备交给解码器，`VideoProcessorBlt` 把硬解纹理转成 RGBA 写进 NT 共享
+  纹理环，Skia 的 D3D12 设备 `OpenSharedHandle` 打开同一块显存。三条硬约束：
+  - **设备必须与 Skiko 同 adapter**，跨 adapter 的共享句柄打不开；
+  - **present 之后要 `av_frame_unref`** 把 surface 还给解码器池 —— 不还的话 20 张的池会和 DPB
+    参考帧一起被蓄帧耗尽（`Static surface pool size exceeded`，然后整段花屏）；
+  - **只认 `Direct3DRedrawer` / `Direct3DRenderer`**，其它后端返回 null 让上层回落到逐帧拷贝。
+  Skiko 的 `device` / `contextHandler.context` 都是私有 ABI，换 skiko 大版本要复核。
+- **Android 直出（`av_mediacodec_default_init`）的两个硬前提**：
+  - **`get_format` 必须显式返回 `AV_PIX_FMT_MEDIACODEC`**。`avcodec_parameters_to_context` 会把容器
+    的 `pix_fmt`（yuv420p）写进上下文，默认 `get_format` 拿它去匹配 mediacodec 的候选列表（只有
+    MEDIACODEC），匹配不上就退回 ByteBuffer 模式 —— surface 挂上了却从没用过，症状是画面全白、
+    时间轴照走。判据是 ffmpeg 自己打的 `Using surface 0x...`。
+  - **直出用的 `AVMediaCodecContext` 挂在 `ctx->opaque` 上**（`opaque` 是 ffmpeg 留给调用方的字段，
+    它自己不用），`closeNative` 里先 `av_mediacodec_default_free` 再 `av_free`。不要再用「ctx → 状态」
+    的全局表：那既要一把大锁，也把解码器与播放器的生命周期绑死。
+  - **模拟器验不了暂停态**：goldfish / gfxstream 的 codec 垫片在暂停时单步不刷新屏幕（帧交给了
+    Surface、时间轴照走、画面停在原地），开宿主 GPU 也一样，同机的 mediamp/ExoPlayer 同样复现。
+    所以不要为模拟器加设备类型分支 —— `hardwareOutput` 恒为 Surface 的 global ref，这类交互上真机验。
+    判据与对照实验见 [../docs/development/hardware-decoding.md](../docs/development/hardware-decoding.md) §2.5。

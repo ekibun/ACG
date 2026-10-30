@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# format.jni.sh —— 用 clang-format 统一 cxx/ 三个自研顶层 C++ 文件的格式。
+# format.jni.sh —— 用 clang-format 统一 cxx/ 自研 C++ 文件的格式。
 # 经 `cxx/exec.cmd`（MSYS2 MINGW64 login shell）被 Gradle 的 clangFormat 任务调用，
 # 也可手动 `./format.jni.sh [check|fix]` 跑。
 #
@@ -26,11 +26,13 @@ fi
 echo "clang-format: $CF"
 "$CF" --version
 
-# 2. 三个自研顶层文件（与 pre-commit hook 范围一致：cxx/{webview,quickjs,ffmpeg} 顶层 .c/.cc/.cpp/.cxx/.h/.hpp）
+# 2. 自研文件清单（pre-commit hook 走同一份：cxx/{webview,quickjs,ffmpeg} 顶层，外加 ffmpeg 的视频输出端）
 FILES=(
   "$DIR/webview/webview.cpp"
   "$DIR/quickjs/quickjs.cpp"
   "$DIR/ffmpeg/ffmpeg.cpp"
+  "$DIR/ffmpeg/video_output.windows.cpp"
+  "$DIR/ffmpeg/video_output.android.cpp"
 )
 
 rc=0

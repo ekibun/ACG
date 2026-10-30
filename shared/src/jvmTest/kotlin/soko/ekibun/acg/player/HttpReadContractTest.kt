@@ -49,7 +49,7 @@ class HttpReadContractTest {
               val pts = ArrayList<Long>()
               while (true) {
                 val packet = format.getPacket(listOf(video)) ?: break
-                codec.sendPacketAndGetFrames(packet).forEach { frame ->
+                codec.sendPacketAndGetFrames(packet)?.forEach { frame ->
                   pts += frame.timeStamp
                   frame.close()
                 }
@@ -90,7 +90,7 @@ class HttpReadContractTest {
             var decoded = 0
             while (decoded < 25) {
               val packet = format.getPacket(listOf(video)) ?: break
-              codec.sendPacketAndGetFrames(packet).forEach { it.close() }
+              codec.sendPacketAndGetFrames(packet)?.forEach { it.close() }
               decoded++
             }
             assertEquals(25, decoded, "sequential reads should decode all 25 frames (this media has 300)")
@@ -139,7 +139,7 @@ class HttpReadContractTest {
           val pts = ArrayList<Long>()
           while (true) {
             val packet = format.getPacket(listOf(video)) ?: break
-            codec.sendPacketAndGetFrames(packet).forEach { frame ->
+            codec.sendPacketAndGetFrames(packet)?.forEach { frame ->
               pts += frame.timeStamp
               frame.close()
             }

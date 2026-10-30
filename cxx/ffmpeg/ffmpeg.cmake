@@ -87,8 +87,16 @@ ExternalProject_Add_Step(
                 "${CMAKE_CURRENT_LIST_DIR}/patches/hls.sed"
 )
 
+# 视频输出端按平台选一个实现文件，两个文件里都没有 #if。
+if (ANDROID)
+    set(ACG_VIDEO_OUTPUT ${CMAKE_CURRENT_LIST_DIR}/video_output.android.cpp)
+else ()
+    set(ACG_VIDEO_OUTPUT ${CMAKE_CURRENT_LIST_DIR}/video_output.windows.cpp)
+endif ()
+
 add_library(ffmpeg SHARED
-        ${CMAKE_CURRENT_LIST_DIR}/ffmpeg.cpp)
+        ${CMAKE_CURRENT_LIST_DIR}/ffmpeg.cpp
+        ${ACG_VIDEO_OUTPUT})
 
 add_dependencies(ffmpeg ffmpeg_lib)
 

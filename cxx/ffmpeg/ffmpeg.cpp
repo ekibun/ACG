@@ -9,6 +9,7 @@
 extern "C" {
 #include "libavcodec/avcodec.h"
 #include "libavcodec/jni.h"
+#include "libavcodec/mediacodec.h"
 #include "libavformat/avformat.h"
 #include "libavutil/hwcontext.h"
 #include "libavutil/imgutils.h"
@@ -19,6 +20,9 @@ extern "C" {
 // 条）：关掉插播广告的自动跳过。
 int acg_hls_set_skip_ad(AVFormatContext* s, int on);
 }
+
+#include "ffmpeg_internal.h"
+#include "video_output.h"
 
 jobject av_dict_to_map(JNIEnv* env, AVDictionary* d) {
   AVDictionaryEntry* t = nullptr;
@@ -336,8 +340,7 @@ Java_soko_ekibun_ffmpeg_AvFormat_setSkipAdNative(JNIEnv* env, jobject thiz,
 }
 // 按这条流的参数建一个还没 open 的上下文；分配或参数搬运失败都返回 null，
 // 调用方据此回落下一个解码器。
-static AVCodecContext* allocCodecContext(AVStream* stream,
-                                         const AVCodec* decoder) {
+AVCodecContext* allocCodecContext(AVStream* stream, const AVCodec* decoder) {
   if (!decoder) return nullptr;
   AVCodecContext* ctx = avcodec_alloc_context3(decoder);
   if (!ctx) return nullptr;
@@ -348,65 +351,21 @@ static AVCodecContext* allocCodecContext(AVStream* stream,
   return ctx;
 }
 
-#if defined(_WIN32)
-// 建了设备后解码器才把 GPU 格式列进候选，这里挑 D3D11。
-// 没有设备时列表里只有软件格式，取第一个即软解。
-static enum AVPixelFormat selectHwFormat(AVCodecContext* ctx,
-                                         const enum AVPixelFormat* formats) {
-  if (ctx->hw_device_ctx != nullptr)
-    for (const enum AVPixelFormat* p = formats; *p != AV_PIX_FMT_NONE; ++p)
-      if (*p == AV_PIX_FMT_D3D11) return *p;
-  return formats[0];
-}
-#endif
-
 // 视频解码优先走硬件。这只是偏好，不是保证：设备不存在、这个 codec 没有
 // 加速版本、加速器不吃这个 profile，三种情况都落到软解上，都不算错误。
 // 输出形态在 open 时就定了，所以这个选择随上下文走、之后不能改。
 extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvCodec_initNative(
-    JNIEnv* env, jobject thiz, jlong stream, jboolean hardware) {
+    JNIEnv* env, jobject thiz, jlong stream, jboolean hardware,
+    jobject output) {
   auto pstream = (AVStream*)stream;
   const AVCodec* software = avcodec_find_decoder(pstream->codecpar->codec_id);
   if (!software) return 0;
 
   if (hardware && pstream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-#if defined(_WIN32)
-    // 设备必须由 FFmpeg 自建：多线程保护只在 create 里设。
-    // 外部传进来的 device 带不上它，而解码与 postFrame 分处两个线程。
-    AVCodecContext* ctx = allocCodecContext(pstream, software);
-    if (ctx) {
-      AVBufferRef* device = nullptr;
-      if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_D3D11VA, nullptr,
-                                 nullptr, 0) == 0) {
-        // 设备归上下文所有，由 avcodec_free_context 放，这里不重复 unref。
-        ctx->hw_device_ctx = device;
-        ctx->get_format = selectHwFormat;
-        if (avcodec_open2(ctx, software, nullptr) >= 0) {
-          av_log(ctx, AV_LOG_INFO, "video decode: d3d11va\n");
-          return (jlong)ctx;
-        }
-      }
-      avcodec_free_context(&ctx);
+    if (AVCodecContext* hw =
+            videoOpenHardwareDecoder(env, pstream, software, output)) {
+      return (jlong)hw;
     }
-#elif defined(__ANDROID__)
-    // 只能走 MediaCodec 自己的解码器：libavutil 的 mediacodec 设备
-    // 没有 transfer。不配 surface 时它自己把画面按 NV12 拷回内存
-    // （mediacodecdec_common.c:490），上层照旧不用改。
-    char name[64];
-    snprintf(name, sizeof(name), "%s_mediacodec", software->name);
-    const AVCodec* mediaCodec = avcodec_find_decoder_by_name(name);
-    AVCodecContext* ctx = allocCodecContext(pstream, mediaCodec);
-    if (ctx) {
-      // 它报的呈现时间是微秒，把画面拷出输出 buffer 时按这个时基换算
-      // （mediacodecdec_common.c:471）；不给的话 pts 会被当成刻度值。
-      ctx->pkt_timebase = pstream->time_base;
-      if (avcodec_open2(ctx, mediaCodec, nullptr) >= 0) {
-        av_log(ctx, AV_LOG_INFO, "video decode: %s\n", name);
-        return (jlong)ctx;
-      }
-      avcodec_free_context(&ctx);
-    }
-#endif
     av_log(nullptr, AV_LOG_WARNING,
            "no hardware decoder for %s, decoding on the cpu\n", software->name);
   }
@@ -453,59 +412,70 @@ static AVFrame* frameToMemory(AVFrame* frame) {
   return nullptr;
 }
 
+// 送包：0 = 收下，1 = EAGAIN（输入缓冲满，先去收帧），<0 = 失败（已记日志）。
+//
+// packet == 0 表示冲刷：把重排缓冲里的尾帧放出来，之后照常收帧。
+//
+// 送与收是两个入口，各自的 EAGAIN 各自处理，见 playback-invariants.md §2.10
+extern "C" JNIEXPORT jint JNICALL
+Java_soko_ekibun_ffmpeg_AvCodec_sendPacketNative(JNIEnv* env, jobject thiz,
+                                                 jlong pctx, jlong stream,
+                                                 jlong packet) {
+  auto ctx = (AVCodecContext*)pctx;
+  const int ret =
+      avcodec_send_packet(ctx, packet ? (AVPacket*)packet : nullptr);
+  if (ret == 0 || ret == AVERROR_EOF) return 0;
+  if (ret == AVERROR(EAGAIN)) return 1;
+  av_log(ctx, AV_LOG_ERROR,
+         "avcodec_send_packet failed ret=%d (stream=%d), packet dropped\n", ret,
+         ((AVStream*)stream)->index);
+  return ret;
+}
+// 收帧：null = 解码器已经吐干净（冲刷到底），空数组 = 现在没有（EAGAIN）。
+//
+// 片尾只能靠这个区别判断能否收尾，见 playback-invariants.md §2.10
 extern "C" JNIEXPORT jobjectArray JNICALL
-Java_soko_ekibun_ffmpeg_AvCodec_sendPacketAndGetFramesNative(
-    JNIEnv* env, jobject thiz, jlong pctx, jlong stream, jlong packet) {
+Java_soko_ekibun_ffmpeg_AvCodec_receiveFramesNative(JNIEnv* env, jobject thiz,
+                                                    jlong pctx, jlong stream) {
   auto ctx = (AVCodecContext*)pctx;
   auto pstream = (AVStream*)stream;
 
-  auto empty = newAvFrameArray(env, 0);
-  if (!empty) return nullptr;
-
   std::vector<AVFrame*> out;
-  // 取出解码器已解出的全部帧。
-  auto receiveAll = [&]() {
-    while (true) {
-      auto frame = av_frame_alloc();
-      if (!frame) break;
-      int r = avcodec_receive_frame(ctx, frame);
-      if (r == 0) {
-        // 转内存失败的帧已经没了，继续收后面的。
-        frame = frameToMemory(frame);
-        if (frame) out.push_back(frame);
-        continue;
-      }
+  auto* output = videoOutputOfCodec(ctx);
+  bool drained = false;
+  while (true) {
+    auto frame = av_frame_alloc();
+    if (!frame) break;
+    const int r = avcodec_receive_frame(ctx, frame);
+    if (r != 0) {
       av_frame_free(&frame);
-      // EAGAIN 表示需要继续喂包，EOF 表示 drain 完成。
+      // EOF：解码器内部已经空了；EAGAIN：还要接着喂包（或输出端暂时腾不出地方）。
+      drained = r == AVERROR_EOF;
       break;
     }
-  };
-
-  // packet == 0 表示冲刷解码器内部缓存的尾帧。
-  int ret = avcodec_send_packet(ctx, packet ? (AVPacket*)packet : nullptr);
-  // 输入队列满时先收帧再重发，最多重试 kMaxSendRetry 次。
-  const int kMaxSendRetry = 16;
-  for (int i = 0; ret == AVERROR(EAGAIN) && packet != 0 && i < kMaxSendRetry;
-       ++i) {
-    receiveAll();
-    ret = avcodec_send_packet(ctx, (AVPacket*)packet);
-  }
-  if (ret == AVERROR(EAGAIN)) {
-    // 重试后仍收不进去，记录错误日志。
-    av_log(ctx, AV_LOG_ERROR,
-           "avcodec_send_packet EAGAIN x%d, packet dropped: stream=%d size=%d "
-           "(frames until the next keyframe will be wrong)\n",
-           kMaxSendRetry, pstream->index,
-           packet ? ((AVPacket*)packet)->size : 0);
-  } else if (ret < 0 && ret != AVERROR_EOF) {
-    av_log(
-        ctx, AV_LOG_ERROR,
-        "avcodec_send_packet failed ret=%d (stream=%d, %d frame(s) handed out "
-        "anyway)\n",
-        ret, pstream->index, (int)out.size());
+    // 有输出端时硬件帧原样带上去（D3D11 纹理 / MediaCodec buffer）。
+    //
+    // surface 留在解码器池上，上层不还。
+    //
+    // 池子取空后 send_packet 给 EAGAIN —— 背压来自 ffmpeg 自己的池。
+    //
+    // 没有输出端（只解不显示、软解回落）仍转成内存，否则那类调用方会把池子囤死。
+    const AVPixFmtDescriptor* desc =
+        av_pix_fmt_desc_get((AVPixelFormat)frame->format);
+    const bool hwFrame =
+        desc != nullptr && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL);
+    if (hwFrame &&
+        (frame->format == AV_PIX_FMT_MEDIACODEC || output != nullptr)) {
+      out.push_back(frame);
+      continue;
+    }
+    // 软解帧在这里转成内存形态；转失败的帧已经没了，继续收后面的。
+    frame = frameToMemory(frame);
+    if (frame) out.push_back(frame);
   }
 
-  receiveAll();
+  // 到底了、这一轮又没吐出帧：告诉上层「收完了」。有帧时照常给帧，下一轮再报。
+  if (drained && out.empty()) return nullptr;
 
   auto arr = newAvFrameArray(env, (jint)out.size());
   if (!arr) {
@@ -527,6 +497,7 @@ extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_ffmpeg_AvCodec_flushNative(
 extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_ffmpeg_AvCodec_closeNative(
     JNIEnv* env, jobject thiz, jlong pctx) {
   auto ctx = (AVCodecContext*)pctx;
+  videoReleaseCodecOutput(ctx);
   avcodec_free_context(&ctx);
 }
 
@@ -537,6 +508,8 @@ extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_ffmpeg_AvFrame_closeNative(
 
 struct SWContext {
   double speedRatio = 1;
+  /** 零拷贝输出端；非空时视频帧的像素已经在它的共享纹理里，不经过 sws。 */
+  VideoOutput* output = nullptr;
   // 音频
   int64_t sampleRate = 0;
   int64_t channels = 0;
@@ -645,25 +618,55 @@ extern "C" JNIEXPORT jlong JNICALL
 Java_soko_ekibun_ffmpeg_AvSurfaceContext_initNative(JNIEnv* env, jobject thiz,
                                                     jint sample_rate,
                                                     jint channels,
-                                                    jint audio_format) {
+                                                    jint audio_format,
+                                                    jobject output) {
   auto ret = new SWContext();
   ret->speedRatio = 1;
   ret->sampleRate = sample_rate;
   ret->channels = channels;
   ret->audioFormat = audio_format;
+  // 只有桌面有共享纹理输出端；Android 传的是 Surface，postFrame 照旧转 RGBA。
+  ret->output = videoOutputFrom(env, output);
   return (jlong)ret;
 }
 extern "C" JNIEXPORT jint JNICALL
 Java_soko_ekibun_ffmpeg_AvSurfaceContext_postFrameNative(
     JNIEnv* env, jobject thiz, jlong ctx, jint codec_type, jlong frame) {
+  auto self = (SWContext*)ctx;
   switch (codec_type) {
     case AVMEDIA_TYPE_AUDIO:
-      return postFrameAudio((SWContext*)ctx, (AVFrame*)frame);
-    case AVMEDIA_TYPE_VIDEO:
-      return postFrameVideo((SWContext*)ctx, (AVFrame*)frame);
+      return postFrameAudio(self, (AVFrame*)frame);
+    case AVMEDIA_TYPE_VIDEO: {
+      auto* picture = (AVFrame*)frame;
+      // 硬件帧没有内存形态：Android 直出是 MEDIACODEC，桌面零拷贝是 D3D11
+      // 纹理。
+      //
+      // 判据看帧自己，不看有没有输出端：软解回落的帧有像素、没纹理，得照常转
+      // RGBA。
+      const AVPixFmtDescriptor* desc =
+          av_pix_fmt_desc_get((AVPixelFormat)picture->format);
+      if (desc != nullptr && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) return 0;
+      return postFrameVideo(self, picture);
+    }
     default:
       return -1;
   }
+}
+// 把这一帧送进输出端，视频的「上屏」在这里发生：postFrame 只转格式，之后还要过
+// 丢帧判定，只有在 flushFrame 里这一帧才算真的被显示。
+//
+// 桌面零拷贝在这一步 blit 进共享纹理环并定为当前帧；Android 直出把 buffer 还给
+// codec 即渲染。
+//
+// 返回 false 表示这帧没有可送的输出端（走内存形态的路径）。
+extern "C" JNIEXPORT jboolean JNICALL
+Java_soko_ekibun_ffmpeg_AvSurfaceContext_renderSurfaceFrameNative(
+    JNIEnv* env, jobject thiz, jlong ctx, jint codec_type, jlong frame) {
+  auto self = (SWContext*)ctx;
+  if (codec_type != AVMEDIA_TYPE_VIDEO) return JNI_FALSE;
+  if (self->output == nullptr) return JNI_FALSE;
+  return videoOutputShowFrame(self->output, (AVFrame*)frame) ? JNI_TRUE
+                                                             : JNI_FALSE;
 }
 // 把 native 缓冲拷进 Kotlin 的 byte[]：长度一致时覆写传入的数组，不一致时新建。
 //
@@ -747,10 +750,9 @@ Java_soko_ekibun_ffmpeg_AvSurfaceContext_speedRatioNative(JNIEnv* env,
 
 #ifdef ANDROID
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_soko_ekibun_ffmpeg_AndroidSurfaceContext_copyBufferToSurface(
-    JNIEnv* env, jclass clazz, jlong pctx, jobject surface) {
-  auto ctx = (SWContext*)pctx;
+// 把 RGBA 缓冲逐行贴到 Java Surface 上（非直出路径）。
+static bool copyVideoBufferToSurface(JNIEnv* env, SWContext* ctx,
+                                     jobject surface) {
   if (ctx->videoBufferSize <= 0 || ctx->width <= 0 || ctx->height <= 0)
     return false;
 
@@ -788,6 +790,23 @@ Java_soko_ekibun_ffmpeg_AndroidSurfaceContext_copyBufferToSurface(
   ANativeWindow_unlockAndPost(nativeWindow);
   ANativeWindow_release(nativeWindow);
   return true;
+}
+
+// 视频帧上屏。判据是帧自己的格式：拿不到 Surface 时，解码器根本产不出
+// MEDIACODEC 帧。
+//
+// 所以上层不需要再记「有没有走直出」的标志。
+extern "C" JNIEXPORT jboolean JNICALL
+Java_soko_ekibun_ffmpeg_AndroidSurfaceContext_presentVideoFrame(
+    JNIEnv* env, jclass clazz, jlong pctx, jlong frame, jobject surface) {
+  auto* picture = (AVFrame*)frame;
+  if (picture->format == AV_PIX_FMT_MEDIACODEC) {
+    auto* buffer = (AVMediaCodecBuffer*)picture->data[3];
+    if (buffer == nullptr) return false;
+    // 把 buffer 还给 codec 就是渲染上屏，像素全程不进内存。
+    return av_mediacodec_release_buffer(buffer, 1) == 0;
+  }
+  return copyVideoBufferToSurface(env, (SWContext*)pctx, surface);
 }
 
 #endif

@@ -6,6 +6,8 @@ import org.jetbrains.skia.ColorAlphaType
 import org.jetbrains.skia.ColorType
 import org.jetbrains.skia.Image
 import org.jetbrains.skia.ImageInfo
+import org.jetbrains.skia.Rect
+import java.awt.Window
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import javax.sound.sampled.AudioFormat
@@ -15,12 +17,16 @@ import javax.sound.sampled.SourceDataLine
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
- * 桌面端播放实现：音频走 javax.sound.sampled；视频把 native 拷进复用 `ByteArray` 的整帧经
- * `Image.makeRaster` 复制成 Skia 自管的 [currentFrame]，由 `VideoSurface.jvm.kt` 取 skiaCanvas 画。
+ * 桌面端播放实现：音频走 javax.sound.sampled。
  *
- * [frame] 是每帧自增的计数器，Compose 订阅它触发重绘（CPU 上传路径，每帧两次拷贝）。
- * `buf` 下一帧会被 native 就地覆写，所以 makeRaster 必须**复制**而非 alias；换帧时旧 [Image] 被
- * [close]。绘制方经 [getImage] 在锁内取当前帧、画完即弃，不得把引用留到绘制之外。
+ * 视频有两条路，优先零拷贝：[attachWindow] 在窗口的 Skia 画布上建好共享纹理输出端
+ * （[HwVideoSink]），native 硬解出的帧在解码线程里就直接成了 Skia 的 GPU 图像，本类只把
+ * 它画出来；建不起来时退回 `Image.makeRaster` 逐帧拷贝 —— native 把整帧经复用 `ByteArray`
+ * 交给这里，`makeRaster` 复制成 Skia 自管的 [currentFrame]，由 `VideoSurface.jvm.kt` 画。
+ *
+ * [frame] 是每帧自增的计数器，Compose 订阅它触发重绘。`buf` 下一帧会被 native 就地覆写，
+ * 所以 makeRaster 必须**复制**而非 alias；换帧时旧 [Image] 被 [close]。绘制方经 [drawFrame]
+ * 取当前帧、画完即弃，不得把引用留到绘制之外。
  *
  * native 侧按构造时传入的 audioFormat 用 swr_convert 转码，所以这里拿到的
  * `AV_SAMPLE_FMT_FLT` 是 float32；桌面声卡用 16bit PCM，在本类里转换。
@@ -29,6 +35,58 @@ class DesktopSurfaceContext : SurfaceContext() {
   override val sampleRate: Int = 48000
   override val channels: Int = 2
   override val audioFormat: Int = AvFormat.AV_SAMPLE_FMT_FLT
+
+  /** 零拷贝输出端；null = 还没建起来，视频走 CPU 拷贝。 */
+  private var sink: HwVideoSink? = null
+  private var hardwareRenderer: HwFrameRenderer? = null
+
+  override val hardwareOutput: Any? get() = sink?.nativeHandle
+
+  /** 视频是否走零拷贝（共享纹理）路径；面板不支持的机器上为 false，退回落帧拷贝。 */
+  val isHardwareVideo: Boolean get() = sink != null
+
+  /** 共享纹理是否已经成功画到画布上过（零拷贝路径真的通了，而不只是建起来了）。 */
+  @Volatile
+  var isHardwareVideoDrawn: Boolean = false
+    private set
+
+  /**
+   * 在当前窗口的 Skia 画布上建零拷贝输出端。窗口还没画出第一帧时 Skiko 的渲染设备
+   * 还不存在，所以轮询到 [timeoutMs]；建不起来就一直是 CPU 路径。
+   *
+   * 必须在播放器建立之前完成：解码器的输出形态在 open 时定死。
+   */
+  suspend fun attachWindow(
+    window: Window,
+    timeoutMs: Long = 3000,
+  ) {
+    if (sink != null) return
+    var waited = 0L
+    while (waited <= timeoutMs) {
+      if (tryAttach(window)) return
+      delay(16.milliseconds)
+      waited += 16
+    }
+  }
+
+  private fun tryAttach(window: Window): Boolean {
+    if (sink != null) return true
+    val layer = window.findSkiaLayer() ?: return false
+    val renderer = HwFrameRenderer(layer)
+    val devicePtr = renderer.devicePtr()
+    if (devicePtr == 0L) {
+      renderer.close()
+      return false
+    }
+    val created = HwVideoSink.create(devicePtr)
+    if (created == null) {
+      renderer.close()
+      return false
+    }
+    sink = created
+    hardwareRenderer = renderer
+    return true
+  }
 
   override suspend fun flushFrameImpl(
     codecType: Int,
@@ -43,17 +101,21 @@ class DesktopSurfaceContext : SurfaceContext() {
       AVMediaType.VIDEO -> {
         if (frame.width <= 0 || frame.height <= 0) return -1
         updateAspectRatio(frame.width, frame.height)
-        val buf = getBuffer() ?: return -1
-        val image =
-          Image.makeRaster(
-            ImageInfo(frame.width, frame.height, ColorType.RGBA_8888, ColorAlphaType.OPAQUE),
-            buf,
-            frame.width * 4,
-          )
-        synchronized(lock) {
-          val oldImage = currentFrame
-          currentFrame = image
-          oldImage?.close()
+        // 有缓冲就是内存形态的帧（软解回落、或没有输出端），转成 Skia 图像；
+        // 零拷贝帧在 renderSurfaceFrameNative 里已经画进共享纹理，这里只触发重绘。
+        val buf = getBuffer()
+        if (buf != null) {
+          val image =
+            Image.makeRaster(
+              ImageInfo(frame.width, frame.height, ColorType.RGBA_8888, ColorAlphaType.OPAQUE),
+              buf,
+              frame.width * 4,
+            )
+          synchronized(lock) {
+            val oldImage = currentFrame
+            currentFrame = image
+            oldImage?.close()
+          }
         }
         frameState.value++
       }
@@ -164,6 +226,28 @@ class DesktopSurfaceContext : SurfaceContext() {
     }
   }
 
+  /**
+   * 把当前帧画到画布上。零拷贝路径交给 [HwFrameRenderer]（GPU 图像，不复制）；退路画
+   * [currentFrame]。只能在 Compose 的绘制调用里用 —— 共享纹理的包装依赖画布当前的 Skia 上下文。
+   */
+  fun drawFrame(
+    canvas: org.jetbrains.skia.Canvas,
+    width: Float,
+    height: Float,
+  ) {
+    val hardwareSink = sink
+    val renderer = hardwareRenderer
+    if (hardwareSink != null && renderer != null) {
+      val image = renderer.image(hardwareSink)
+      if (image != null) {
+        isHardwareVideoDrawn = true
+        canvas.drawImageRect(image, Rect(0f, 0f, width, height))
+        return
+      }
+    }
+    getImage { image -> canvas.drawImageRect(image, Rect(0f, 0f, width, height)) }
+  }
+
   override suspend fun resume() {
     wantPlaying = true
     line.start()
@@ -187,6 +271,11 @@ class DesktopSurfaceContext : SurfaceContext() {
     wantPlaying = false
     super.close()
     frameState.value = 0
+    // 画布侧的对象先放，再放 native 的共享纹理环。
+    hardwareRenderer?.close()
+    hardwareRenderer = null
+    sink?.close()
+    sink = null
     lineRef?.let {
       it.stop()
       it.flush()

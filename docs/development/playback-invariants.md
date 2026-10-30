@@ -126,18 +126,23 @@ native 侧每个 `AVIOContext` 分配一次读数组并反复用，`AvIO.read(bu
 ⇒ 平移之后广告与正片在播放侧**无法区分**（进度条连续正是症状消失的证据）。识别广告要靠平移前那一刻的
 `drift`，判据与落点见 [design/hls-ad-skip.md](../design/hls-ad-skip.md)。
 
-### 1.8 片尾的尾帧只能靠 drain 取出，drain 得排在「等队列空」之前
+### 1.8 片尾的尾帧要冲刷才拿得到，冲刷得排在「等在飞作业收尾」之后
 
-解码器有重排缓冲（`has_b_frames`），读到 EOF 时最后 1~2 帧还在里头，不 drain 一个都拿不到。
-`resumeImpl` 原来把 drain 排在读循环之后，而循环的退出条件是「队列空」：
+解码器有重排缓冲（`has_b_frames`），读到 EOF 时最后几帧还在里头，不冲刷一个都拿不到。冲刷没有单独的
+入口：`sendPacketAndGetFrames(null)` —— 传 null 就是**送一个空包**，然后在同一次加锁里收一轮。三条规矩：
 
-- 正常播放：没有帧被扣住 ⇒ 队列会空 ⇒ break ⇒ drain ⇒ 尾帧补进队列 ⇒ 播放协程消费掉；
-- 退帧轮：门控扣着一帧等「后面还有没有帧」⇒ 队列永远不空 ⇒ 永远走不到 drain ⇒ 尾帧永远缺席。
-  于是门控等满 1000 次 `delay(1 ms)` 才超时（Windows 的定时器粒度是 15.6 ms，实测合计十几秒），
-  然后把**倒数第三帧**当成「前一帧」——症状就是「片尾按 -1f 卡一下、退两帧」。
+⇒ **冲刷必须在所有包都送完之后**。EOF 时可能还有解码作业在飞，它们手里的包晚一步送就会被冲刷后的
+解码器拒掉（参考链断在那儿）。所以先等 `sendingPacket == 0`。
 
-⇒ drain 只留一处，且必须在读到 EOF 的当场做（只做一次），之后才轮到「等队列空」。
-`FFPlayerStepTest.stepBackAtEndOfStreamShowsTheFrameBeforeLast` 盯着这条。
+⇒ **收没收完只看这次调用的返回值**（`sendPacketAndGetFrames` 返回 `null` = 解码器吐干净了），不能看
+「这一轮拿到几帧」。输出端腾不出地方时收帧会空手而归，而这时队列里的帧可能刚被显示协程吃完 —— 拿「本轮
+没有帧」当判据会误判成播完，尾部几帧就再也出不来。
+
+⇒ **收尾还要等队列播空**（`atEnd && 队列为空` 才 break）。解码器吐干净只说明没有新帧了，尾部那几帧
+还在队列里排队显示；提前 break 会走到 `pts.playing = false`，它们再也没机会上屏。
+
+⇒ **每个 codec 各自解完就立刻把尾帧入队**，不要攒齐再入队：各 codec 的冲刷是并行跑的，攒齐就变成
+「音频的尾帧要等视频冲刷完」，收尾那一小段声音会被拖住。轮次已作废的那批就地 `close`。
 
 ---
 
@@ -241,8 +246,24 @@ native 侧每个 `AVIOContext` 分配一次读数组并反复用，`AvIO.read(bu
 ⇒ 走不通一律回落软解，**不是错误**：设备不存在、codec 没有加速版本、加速器不吃这个 profile，
 三条都在 `AvCodec_initNative` 里落到同一个软解出口，只打一条 warning。
 
+⇒ Android 直出 Surface（帧是 `AV_PIX_FMT_MEDIACODEC`、`data[3]` 待渲染 buffer、
+送显要 `av_mediacodec_release_buffer(buffer, 1)`）：判据只能是「暂停后连按单帧步进，每一次都换帧」——
+播放正常是最会骗人的观测，模拟器更是与 GPU 加速无关地不刷新。经过与判据见
+`hardware-decoding.md` §2.5。
+
 ⇒ Android 选 MediaCodec 时必须给 `pkt_timebase`：它报的是微秒，拷出画面时按该时基换算
 （`mediacodecdec_common.c:471`），不给的话 pts 被当成刻度值、时间轴整体错位。
+
+⇒ **上屏只能发生在 `flushFrame`，不能提前到 `postFrame`**。`postFrame` 之后还有丢帧判定
+（收敛、过期帧），在那里把帧送进输出端等于把要丢的帧也画出去。播放时被下一帧盖掉、看不出来；
+步进 / 退帧时立刻现形：时间轴一帧一帧走，画面停在被判掉的那一帧上不动，或者跳到预读帧上。
+桌面零拷贝同理 —— 收帧时只把**带 surface 的 AVFrame** 交上去（不 blit、不 unref），
+轮到显示才在 `flushFrame` 里 blit 进共享纹理环并定为当前帧。这样既没有「预读帧占着环」的问题，
+丢帧判定也发生在 blit 之前：判掉的帧根本不会碰 GPU。
+
+⇒ **送显取队头**，前提是队列恒按 pts 升序：送包已串行（§2.9），入队紧跟解锁、不跨挂起点，
+收尾的冲刷排在所有在飞包之后。队头那帧正被上一轮送显作业占着（`processing`）时跳过它拿
+下一帧 —— 那个作业会先 `join` 前一拍，显示顺序不受影响。判据：日志里送显的 pts 序列单调不减。
 
 依据与两端改动面见 [hardware-decoding.md](./hardware-decoding.md)。
 
@@ -261,22 +282,103 @@ native 侧每个 `AVIOContext` 分配一次读数组并反复用，`AvIO.read(bu
 ⇒ 两端都成立：桌面画布重绘由 `AvSurfaceContext.frame` 计数驱动、Android 的 `TextureView`
 自己刷新，都不依赖 `Event.Frame`，压制视频上报不会冻住画面。
 
----
+### 2.8 上屏目标只有一个，形态按平台定死
+
+`AvSurfaceContext.hardwareOutput`（`Any?`）是「把画面送去哪里」的唯一入口，null = 没有：
+桌面是装着 `HwVideoSink*` 的 `Long`，Android 是 `Surface` 对象。
+
+⇒ 只在 **open 期用一次**，native 按平台拆：桌面从 `Long` 里取出指针，Android 直接把
+`Surface` 交给 `av_mediacodec_default_init`。拆不出来（桌面收到非 `Long`）打一条 warning 并
+退化成「没有输出端」，不静默当成 0 —— 那会表现为硬解白干、画面走逐帧拷贝。
+
+⇒ **Android 的引用不归我们管**：`av_mediacodec_default_init` 自己 `NewGlobalRef`
+（`mediacodec.c:54`），`av_mediacodec_default_free` 自己 `DeleteGlobalRef`（`:80-83`）。
+上层如果也留一份，就是两份引用、两个释放点，只删得掉其中一份。
+
+⇒ **桌面把输出端记在 codec 上**（`AVCodecContext.opaque`），收发帧不再传：句柄在 open 时就
+决定了 `get_format` 与帧的形态，每包再传一遍是多余的。Android 的 `opaque` 存着
+`AVMediaCodecContext`，那边不记。
+
+⇒ **只有真走了硬件那条路才记**。软解回落的 codec 上记着 sink 也无妨：上屏那一步只认帧自己的
+格式（`AV_PIX_FMT_D3D11`），软解帧没有纹理、走的是内存转换那一支 —— 判据看帧，不看有没有输出端。
+
+⇒ 另一处消费点是 `AvSurfaceContext_initNative`（`SWContext.sink`，给 `postFrame` /
+`flushFrame` 用），**只有桌面**能把它当 sink：Android 若把 Surface 当 sink，`postFrame` 会以为
+「像素已经在共享纹理里」直接返回 0，帧同样永远不上屏。
+
+### 2.9 送包顺序必须串行在 codec 上
+
+`send_packet` 被 EAGAIN 拒掉（直出时输出 surface 全被上层占着）时，包要原地重试、不能丢；
+重试期间**不能让后面任何一个包先被接受** —— 解码器按包序解参考帧，后一个包先到就断参考链，
+花屏到下一个 IDR 为止，而且不报错（只表现为画面坏了）。
+
+⇒ 「送到被收下」整段串行在 codec 上（`AvCodec.sendPacketAndGetFrames` 的 `sendLock`）；
+送空包（冲刷）也走同一把锁，否则它会插进重试中间。串行化只是把「并行等」变成「排队等」，
+并发上限（`sendingPacket > 3`）不变。
+
+⇒ 由此队列**恒按 pts 升序**（入队顺序 = 包序；片尾冲刷的批次排在所有在飞包之后），所以取帧
+直接取队头。以前要挑「pts 最小的那帧」，是因为送包会乱序；那条兜底现在不需要了。
+
+### 2.10 送包与收帧是两个入口，各自的 EAGAIN 各自处理
+
+解码器这一侧只有两件事，各有一个 EAGAIN，含义完全不同：
+
+| 入口 | 返回 | EAGAIN 的意思 | 补救 |
+|---|---|---|---|
+| `sendPacketNative` | 0 收下 / 1 EAGAIN / <0 失败 | 输入满了：解码器的输出没人取 | 先收帧腾地方，再送同一个包 |
+| `receiveFramesNative` | 帧数组（可为空） | 暂时没有帧：还要喂包，或已冲刷完 | 等下一拍 |
+
+⇒ **不要合成一个调用**。合并时只能用「`status` 数组 + `consumed` 布尔」把两件事挤进一个返回值，
+上层要复刻 native 的内部状态才读得懂是「送进去了没有」还是「有帧没有」—— 那种跨语言的表迟早
+会对不上。拆开之后每一侧只表达自己的事，Kotlin 侧也不传「最多收几帧」：收多少由 native 按自己的
+资源决定。
+
+⇒ **桌面硬解池是静态的**：装不下时 ffmpeg 报 `Static surface pool size exceeded` 并丢帧，**不是
+EAGAIN**（EAGAIN 只来自输入侧那个单槽 `buffer_pkt`）。`send_packet` 内部还会顺带解一帧，所以只在
+收帧端拦也挡不住它去分配 surface。`extra_hw_frames` 按「参考帧 + 上层压住的帧」给足，见
+`hardware-decoding.md` §5.2。
+
+⇒ ⚠️ 桌面侧「压住几帧」目前**没有结构性上界**：读包闸门按最空的流判，收帧又一次性取完，池子挤爆
+就是丢帧。窗口化改造（一次一包 + 逐帧回调）见 `TODO.md` E9。
+
+⇒ 片尾没有单独的 `drain`：冲刷就是 `sendPacketAndGetFrames(null)`（送空包 + 收一轮，同一次加锁），
+返回 `null` 就是吐干净了，见 §1.8。
+
+⇒ 没有输出端时（只解不显示、软解回落）仍然转成内存再交上去：那类调用方会把帧攒着，原样带
+surface 上去会把池子囤死（`HwDecodeTest` 就是这么挂的）。
 
 ## 三、桌面输出：视频上传与音频写入
+## 三、桌面输出：视频上传与音频写入
 
-桌面端每帧 `Image.makeRaster(...)` 新建一块 Skia 自管对象、`drawImageRect` 时再上传一次 GPU，
-一帧两次 CPU 拷贝 + 一次分配。这些 native 对象靠 `Cleaner` 回收，而 Cleaner 等 GC 触发——
-Java 堆实际占用远低于上限时 GC 可能十秒才来一次，于是 RSS 涨到 GB 量级再成批释放（锯齿），
-且释放后不还给 OS。
+桌面视频有两条路。默认走**零拷贝**：
+
+- `cxx/ffmpeg/video_output.windows.cpp`在 Skiko 的 adapter 上建 D3D11 设备，`ID3D11VideoProcessor`
+  把硬解纹理转成 RGBA 写进 `SHARED_NTHANDLE` 纹理环；Skia 的 D3D12 设备 `OpenSharedHandle`
+  打开同一块显存，`BackendRenderTarget.makeDirect3D` 包成渲染目标，blit 到 GPU surface 再快照
+  成 Image 画。像素全程不落 CPU，视频就是一次普通 draw call。
+- 建不起来（Skiko 不是 Direct3D 后端、设备不可共享、没有硬解）就退回下面那条逐帧拷贝的路。
+
+四条前提，缺一条就是「不报错只失效」：
+
+- **Skiko 的渲染器与上下文靠反射读**：`getRedrawer$skiko` → `contextHandler.context`（Skia
+  `DirectContext`）与 `device`（原生 `DirectXDevice`，其前缀是 adapter + `ID3D12Device`）。
+  这是私有 ABI，换 skiko 大版本要复核字段名与指针布局；后端不是 Direct3D 时直接放弃。
+- **D3D11 设备必须建在 Skiko 设备所在的 adapter 上**：跨 adapter 的 NT 共享句柄打不开。
+- **`DirectContext` 每次绘制现读**：Skiko 会重建 redrawer（后端回退、显示切换），旧上下文画出的
+  图像不能再用；换上下文时包装与快照都要丢掉重来。
+- **`Source.notifyContentWillChange(DISCARD)` 不能省**：内容由 D3D11 一侧写入，Skia 否则会复用
+  上一张快照，画面停在第一帧。另外**不要**用 `toComposeImageBitmap()` 转这张图 —— 那是每帧
+  一次 GPU→CPU 回读。
+
+回退路径就是逐帧拷贝：桌面端每帧 `Image.makeRaster(...)` 新建一块 Skia 自管对象、`drawImageRect`
+时再上传一次 GPU，一帧两次 CPU 拷贝 + 一次分配。这些 native 对象靠 `Cleaner` 回收，而 Cleaner
+等 GC 触发——Java 堆实际占用远低于上限时 GC 可能十秒才来一次，于是 RSS 涨到 GB 量级再成批释放
+（锯齿），且释放后不还给 OS。
 
 ⇒ 观测方法：`jcmd GC.heap_info` 看 Java 堆（只有几十 MB，与 RSS 对不上是正常的——
 差值就是 native 侧）；`jcmd GC.class_histogram` 数 `CleanableImpl` / `Managed$CleanerThunk`
 的个数，那是在数「已失去 wrapper、等 Cleaner 回收的 skiko 对象」；RSS 要**采样成序列**看形状，
 锯齿 = 靠 GC 回收的堆积，单调涨 = 真泄漏。
-
-⇒ 收敛方向与现状见 `TODO.md` B26（持久 GPU 纹理 + 每帧 `updateTexture`）。
-**真正零每帧传输**要 native 直接产出 GPU 纹理，那是 C++ 侧改造。
 
 ⇒ Android 端没有这个问题：视频分支直写 Surface，根本不经过 JVM 数组。
 

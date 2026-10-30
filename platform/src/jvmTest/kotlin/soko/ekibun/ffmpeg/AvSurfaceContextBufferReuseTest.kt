@@ -90,16 +90,21 @@ class AvSurfaceContextBufferReuseTest {
           while (true) {
             val packet = format.getPacket(emptyList()) ?: break
             // packet 由 sendPacketAndGetFrames 收掉，调用方只管帧
-            for (frame in codec.sendPacketAndGetFrames(packet)) {
+            for (frame in codec.sendPacketAndGetFrames(packet) ?: emptyList()) {
               sink.postFrame(AVMediaType.VIDEO, frame)
               sink.flushFrame(AVMediaType.VIDEO, frame)
               frame.close()
             }
           }
-          for (frame in codec.drain()) {
-            sink.postFrame(AVMediaType.VIDEO, frame)
-            sink.flushFrame(AVMediaType.VIDEO, frame)
-            frame.close()
+          // 冲刷 = 送一个空包，收帧直到解码器吐干净（null）
+          while (true) {
+            val tail = codec.sendPacketAndGetFrames() ?: break
+            if (tail.isEmpty()) break
+            for (frame in tail) {
+              sink.postFrame(AVMediaType.VIDEO, frame)
+              sink.flushFrame(AVMediaType.VIDEO, frame)
+              frame.close()
+            }
           }
         }
       }
@@ -131,7 +136,7 @@ class AvSurfaceContextBufferReuseTest {
         AvCodec(audio).use { codec ->
           while (true) {
             val packet = format.getPacket(emptyList()) ?: break
-            for (frame in codec.sendPacketAndGetFrames(packet)) {
+            for (frame in codec.sendPacketAndGetFrames(packet) ?: emptyList()) {
               sink.postFrame(AVMediaType.AUDIO, frame)
               val shown = sink.flushFrame(AVMediaType.AUDIO, frame)
               // 上屏时间戳等于帧自身 pts
@@ -139,10 +144,15 @@ class AvSurfaceContextBufferReuseTest {
               frame.close()
             }
           }
-          for (frame in codec.drain()) {
-            sink.postFrame(AVMediaType.AUDIO, frame)
-            sink.flushFrame(AVMediaType.AUDIO, frame)
-            frame.close()
+          // 冲刷 = 送一个空包，收帧直到解码器吐干净（null）
+          while (true) {
+            val tail = codec.sendPacketAndGetFrames() ?: break
+            if (tail.isEmpty()) break
+            for (frame in tail) {
+              sink.postFrame(AVMediaType.AUDIO, frame)
+              sink.flushFrame(AVMediaType.AUDIO, frame)
+              frame.close()
+            }
           }
         }
       }

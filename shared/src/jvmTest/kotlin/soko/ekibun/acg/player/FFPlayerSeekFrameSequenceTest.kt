@@ -109,10 +109,14 @@ class FFPlayerSeekFrameSequenceTest {
             }
           while (true) {
             val packet = format.getPacket(listOf(video)) ?: break
-            collect(codec.sendPacketAndGetFrames(packet))
+            collect(codec.sendPacketAndGetFrames(packet) ?: emptyList())
           }
-          // 解码器重排缓冲里还压着尾帧，不 drain 参考里就没有它们
-          collect(codec.drain())
+          // 解码器重排缓冲里还压着尾帧：送个空包冲刷，一直收到吐干净
+          while (true) {
+            val tail = codec.sendPacketAndGetFrames() ?: break
+            if (tail.isEmpty()) break
+            collect(tail)
+          }
           pixels
         } finally {
           codec.closeDeferred().join()

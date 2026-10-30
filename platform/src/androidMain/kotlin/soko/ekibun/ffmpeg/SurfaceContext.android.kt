@@ -24,9 +24,11 @@ class AndroidSurfaceContext(
      */
     const val DEFAULT_FORMAT = AudioFormat.ENCODING_PCM_8BIT
 
+    /** 视频上屏：直出帧只还 buffer，其余走逐帧拷贝。判据在 native 侧按帧格式决定。 */
     @JvmStatic
-    private external fun copyBufferToSurface(
+    private external fun presentVideoFrame(
       ctx: Long,
+      frame: Long,
       surface: Surface,
     ): Boolean
   }
@@ -47,6 +49,12 @@ class AndroidSurfaceContext(
     }
   }
 
+  /**
+   * 直接把 `Surface` 交出去：ffmpeg 在 `av_mediacodec_default_init` 里会 `NewGlobalRef`
+   * （`mediacodec.c:54`），并由 `av_mediacodec_default_free` 释放 —— 引用管理不归我们。
+   */
+  override val hardwareOutput: Any? get() = surface
+
   override suspend fun flushFrameImpl(
     codecType: Int,
     frame: AvFrame,
@@ -60,7 +68,7 @@ class AndroidSurfaceContext(
       AVMediaType.VIDEO -> {
         if (frame.width <= 0 || frame.height <= 0) return -1
         updateAspectRatio(frame.width, frame.height)
-        copyBufferToSurface(ptr, surface)
+        presentVideoFrame(ptr, frame.ptr, surface)
       }
     }
     return -1

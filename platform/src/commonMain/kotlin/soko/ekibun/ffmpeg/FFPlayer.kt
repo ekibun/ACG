@@ -254,10 +254,10 @@ class FFPlayer(
           var lastUpdateJob: Job? = null
           while (isPlaying()) {
             val frame =
-              // 只看有没有人在用，不比对是谁：上一轮的 updateJob 可能还没收尾
-              frames[stream.index]?.firstOrNull { frame ->
-                frame.processing == null
-              }
+              // 只看有没有人在用，不比对是谁：上一轮的 updateJob 可能还没收尾。
+              // 取队头：队列恒按 pts 升序 —— 送包串行（AvCodec.sendLock）、入队紧跟解锁
+              // 不跨挂起点，收尾 drain 又排在所有在飞包之后。判据见 playback-invariants §2.9
+              frames[stream.index]?.firstOrNull { it.processing == null }
             if (frame == null) {
               delay(1.milliseconds)
               continue
@@ -392,10 +392,9 @@ class FFPlayer(
       if (!stepMode) surfaceContext?.resume()
       var sendingPacket = 0
       var isReadTimeout = false
-      // 尾帧还在解码器的重排缓冲里，只有 drain 能取出来。读到 EOF 就地 drain 一次：
-      // 退帧轮里队列不会空（有一帧正等着判「是不是前一帧」），而原来的 drain 排在循环之后、
-      // 又以「队列空」为出循环条件 ⇒ 尾部两帧永远不出队，门控等满超时后把倒数第三帧当成了前一帧。
-      var drainedTail = false
+      // 尾帧还在解码器的重排缓冲里，只有冲刷才取得到。冲刷放在读包循环内（读到 EOF 就地做，
+      // 见下面的尾循环）：退帧轮里队列不会空（有一帧正等着判「是不是前一帧」），收尾若排在
+      // 循环之后就永远等不到「队列空」。判据见 playback-invariants §1.8
       while (isPlaying()) {
         if (sendingPacket > 3 || (frames.map { it.value.size }.minOrNull() ?: 0) > 3) {
           delay(1.milliseconds)
@@ -414,27 +413,34 @@ class FFPlayer(
         isReadTimeout = false
 
         if (packet == null) {
-          if (!drainedTail) {
-            drainedTail = true
-            val drained =
+          // 读到 EOF：后面不会再有包，不必再读包。先把重排缓冲里的尾帧冲刷出来，
+          // 直到每个解码器都吐干净。
+          var atEnd = false
+          while (!atEnd && isPlaying()) {
+            atEnd =
               codecs
                 .map { (index, codec) ->
-                  async(playerDispatcher) { index to codec.drain() }
+                  async(playerDispatcher) {
+                    // 冲刷 + 收一轮是同一次加锁；null 就是「解码器吐干净了」。
+                    // 轮次换了就撒手：codec 是各轮共用的，占着 sendLock 会挡住新一轮送包
+                    val list =
+                      codec.sendPacketAndGetFrames { this@FFPlayer.pts == pts } ?: return@async true
+                    if (pts != this@FFPlayer.pts) {
+                      list.forEach { it.close() }
+                      return@async true
+                    }
+                    if (list.isNotEmpty()) frames.getOrPut(index) { arrayListOf() }.addAll(list)
+                    false
+                  }
                 }.awaitAll()
-            if (pts == this@FFPlayer.pts) {
-              drained.forEach { (index, list) ->
-                if (list.isNotEmpty()) frames.getOrPut(index) { arrayListOf() }.addAll(list)
-              }
-            } else {
-              drained.forEach { (_, list) -> list.forEach { it.close() } }
-            }
-            continue
+                .all { it }
+            if (!atEnd) delay(1.milliseconds)
           }
-          if (frames.map { it.value.size }.sum() == 0) {
-            break
+          // 再等队列播空：尾帧还在队列里排队显示，这一轮结束时它们就再没机会上屏
+          while (frames.values.sumOf { it.size } > 0 && isPlaying()) {
+            delay(1.milliseconds)
           }
-          delay(100.milliseconds)
-          continue
+          break
         }
         if (this@FFPlayer.pts != pts) {
           // 轮次换了：包属于旧位置，就地归还
@@ -459,19 +465,19 @@ class FFPlayer(
           }
         }
         val codec =
-          codecs.getOrPut(stream.index) {
-            AvCodec(stream, hardware)
-          }
+          codecs[stream.index]
+            ?: AvCodec(
+              stream,
+              hardware,
+              surfaceContext?.hardwareOutput,
+            ).also { codecs[stream.index] = it }
         @Suppress("DeferredResultUnused")
         async(playerDispatcher) {
-          // 一个 packet 可能产出 0 帧（B 帧重排）或多帧，整批都要收
-          val decoded =
-            if (this@FFPlayer.pts == pts) {
-              codec.sendPacketAndGetFrames(packet)
-            } else {
-              packet.close()
-              emptyList()
-            }
+          // 一个 packet 可能产出 0 帧（B 帧重排）或多帧，整批都要收。
+          // 送不进去时原地重试，这段等待串行在 codec 上：包不能丢，也不能让后面的包抢先 ——
+          // 后一个包先进解码器就断参考链，花屏到下一个 IDR。轮次换掉就作废这个包。
+          // 正常播放不会走到「吐干净」（那只在片尾冲刷时发生），null 当空处理即可
+          val decoded = codec.sendPacketAndGetFrames(packet) { this@FFPlayer.pts == pts } ?: emptyList()
           sendingPacket--
           if (this@FFPlayer.pts != pts) {
             decoded.forEach { it.close() }

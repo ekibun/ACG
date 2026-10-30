@@ -110,6 +110,64 @@ stride / slice-height / crop 拷贝 → `releaseOutputBuffer(index, 0)` **当场
   `Output color format ... is not supported`（`:238-241`），init 直接失败。
 - **只有 8bit**。表里全是 8bit YUV420 族，10bit / HDR 片源在这条路上拿不到 P010。
 
+### 2.5 已落地：直出 Surface（真机通过）
+
+`AvCodec_initNative` 多一个 `surface` 参数。给了就在 `avcodec_open2` 之前
+`av_mediacodec_default_init`，于是帧是 `AV_PIX_FMT_MEDIACODEC`：
+
+- 收帧处**不 transfer**：这条帧没有内存可转，`data[3]` 才是待渲染的 buffer；
+- 上屏在 `flushFrame` 里做（Android 走 `presentVideoFrame`，桌面走 `renderSurfaceFrameNative`）：
+  `av_mediacodec_release_buffer(buffer, 1)` 把 buffer 还给 codec 就是渲染，像素全程不进内存，
+  sws 与那次 memcpy 都省了。要不要直出由**帧自己的格式**决定（`AV_PIX_FMT_MEDIACODEC`），
+  上层不再记「有没有走直出」这个标志 —— 拿不到 Surface 时解码器根本产不出这种帧；
+- `av_frame_free` 触发的是 `release(index, 0)`（丢弃），而 release 幂等（§1.3），
+  所以上屏之后再 close 不会二次释放。
+
+⚠️ **判据只能是「暂停后连按单帧步进，每一次都换帧」**，光看播放正常会骗人：下面两次翻车
+都是播放正常、步进坏掉。
+
+⚠️ **模拟器的 codec 直出在暂停态不刷新屏幕，且与 GPU 加速无关。** 同一份代码在 Pixel 模拟器
+（Android 14，`c2.goldfish.h264.decoder`）上：`Using surface` 有、`release_buffer(1)` 每步都调、
+`SurfaceTexture.getTimestamp()` 每步推进，时间轴也照走，但屏幕像素不变。换 SurfaceView
+（Animeko 的做法）只是变成时好时坏。同一份代码换到真机（华为 ANG-AN00，Android 12，arm64）
+就完全正常。⇒ 这条路的验证必须在真机上做。
+
+判据与对照实验（同一台设备、同一份片源、同一串点击，各 6 次 +1f）：
+
+| 条件 | 结果 |
+| --- | --- |
+| 模拟器 `-gpu swiftshader_indirect`（软件渲染） | 时间轴 3.68s → 3.92s，画面停在 `#068` |
+| 模拟器 `-gpu host`（宿主 NVIDIA，GLES 3.1，SurfaceFlinger 认到这块卡） | 同上，仍然停在 `#068` |
+| 同一台 GPU 模拟器，`hardwareOutput = 0`（逐帧拷贝） | 6 次步进 6 个不同帧号，退帧原路返回 |
+
+所以**不是合成 / GPU 的问题**：像素在 codec 交出去以后就没再上屏，而同一台机器上
+「解码 → NV12 → sws → `copyBufferToSurface`」这条路完全正常。模拟器把这个面交给我们验不了。
+
+⇒ **不为此加设备类型分支**：`hardwareOutput` 恒为 Surface 的 global ref，模拟器与真机走同一条路。
+模拟器上「暂停后步进不换帧」是它的 codec 垫片问题（同机的 mediamp/ExoPlayer 也一样），
+自测这类交互请上真机，别在模拟器上判死。
+
+真机实测：暂停在 `00:00.680`，`Using surface` + `video decode: h264_mediacodec (surface)`；
+步进 6 次帧号逐次变化、退帧 6 次原路返回并回到 `00:00.680`；播放跟着走，
+全程没有 `EAGAIN` / `reference picture missing`。
+
+两个前提，缺一个画面就是白的（时间轴照走）：
+
+- **`get_format` 必须显式返回 `AV_PIX_FMT_MEDIACODEC`**。`avcodec_parameters_to_context` 把容器的
+  `pix_fmt`（yuv420p）写进了上下文，默认的 `get_format` 拿它去匹配 mediacodec 的候选列表
+  （只有 MEDIACODEC），匹配不上就退回 ByteBuffer 模式 —— mediacodec 一声不吭地按 NV12 出帧，
+  `av_mediacodec_default_init` 白挂。日志判据：正常时 ffmpeg 会打 `Using surface 0x...`。
+- **SurfaceTexture 的缓冲尺寸要等于视频尺寸**（`setDefaultBufferSize`），在 Surface 交给解码器
+  **之前**设好；少了它画面同样不出来。
+
+⚠️ 这条路的帧占着 codec 的 surface 池（§1.2），而本仓库的调度会在送显前蓄三四帧（§1.4）。
+池子深度小于蓄帧深度时 `send_packet` 会一直 EAGAIN —— 现在的处理是**不丢包**：native 把
+「没送进去」回传给上层，`FFPlayer` 按轮次重试同一个包（见 `cxx/AGENTS.md`）。真机的 12s
+片源没触发，**换机 / 换片源时仍要盯这条**。
+
+⚠️ seek 之后旧 serial 的 buffer 释放变成 no-op（§1.3），槽位要等 codec 重建才回 ——
+连续快速 seek 可能表现为「跳转后黑一下再动」。
+
 ---
 
 ## 三、桌面：d3d11va 只换解码器，渲染管线不动
@@ -148,7 +206,7 @@ stride / slice-height / crop 拷贝 → `releaseOutputBuffer(index, 0)` **当场
 | 平台 | 落点 | 内容 |
 | --- | --- | --- |
 | 桌面 | `cxx/ffmpeg/ffmpeg.cpp` + `ffmpeg.cmake` | `--enable-d3d11va` + `d3d11`/`dxgi`、建设备、`get_format`、`frameToMemory` |
-| Android（ByteBuffer 路线） | `AvCodec.kt` + `ffmpeg.cpp` | 按名字换解码器、`pkt_timebase`、失败回落软解 |
+| Android（直出 Surface） | `AvCodec.kt` + `SurfaceContext.android.kt` + `ffmpeg.cpp` | 曾按此实现，**暂停态画面不更新，已回退**（§2.5） |
 | Android（ImageReader 回读路线） | 上述 + `AvSurfaceContext` / `FFPlayer` / `AndroidSurfaceContext` | 自建离屏 Surface、回读、帧/Image 配对（**未实现**） |
 
 Kotlin 侧只多一个 `hardware: Boolean`（`FFPlayer` 默认开、`AvCodec` 默认关），
@@ -165,26 +223,113 @@ Kotlin 侧只多一个 `hardware: Boolean`（`FFPlayer` 默认开、`AvCodec` �
 
 ---
 
-## 五、验证
+## 五、桌面零拷贝：共享纹理
+
+上面两条路都还在「解码 → 显存 → CPU → Skia → GPU」上走一趟。桌面端另有一条不经 CPU 的路，
+形态照 mediamp（Animeko 的 mpv 后端）在 Skiko 上已经跑通的那套：
+
+```
+D3D11 解码纹理 ──VideoProcessorBlt──▶ RGBA 共享纹理(NT 句柄) ──OpenSharedHandle──▶ Skia D3D12
+                                                                     │
+                                                        BackendRenderTarget → Surface
+                                                                     │
+                                                        blit 到 GPU surface → 快照 → drawImageRect
+```
+
+落点：native `cxx/ffmpeg/video_output.windows.cpp`，Kotlin `SkiaHwSurface.kt` / `HwVideoSink.kt`。
+
+### 5.1 三处必须对齐
+
+- **adapter 必须同一个**。`skikoDevicePtr` 是 Skiko 原生 `DirectXDevice` 的指针（64 位下前两个槽
+  是 `IDXGIAdapter1*` 与 `ID3D12Device*`），取出来用 LUID 反查确认是一对，然后在这个 adapter 上
+  `D3D11CreateDevice`。跨 adapter 的 NT 共享句柄打不开。
+- **解码设备由播放器给**，不用 `av_hwdevice_ctx_create` 自建：手动填
+  `AVD3D11VADeviceContext.device` 再 `av_hwdevice_ctx_init`，解码纹理才与共享纹理同一块 GPU。
+- **输出格式固定 `DXGI_FORMAT_R8G8B8A8_UNORM`**：Skia 的 D3D 后端拒绝包装不可渲染的 color type
+  （`RGB_888x` 会返回 null），所以按 RGBA_8888 包。
+
+### 5.2 五个「不报错只失效」
+
+- **帧带着 surface 往上走，池子是静态的**。零拷贝下收帧不 `av_frame_unref`：`AVFrame` 一路带到
+  送显，blit 完才随帧关闭还回池子。池 = `1 + 16 参考帧`（H.264/HEVC）+ 3 张工作帧 +
+  `extra_hw_frames`；装不下时 ffmpeg 报 `Static surface pool size exceeded` 并**丢帧**，不是
+  EAGAIN。现值 `ctx->extra_hw_frames = 12`（实测 8 不够）。压住几帧没有结构性上界这件事，
+  见 `TODO.md` E9。
+- **`DirectContext` 每次绘制现读**：Skiko 会重建 redrawer（后端回退、显示切换），旧上下文画出的
+  图像不能再用，包装与快照都要丢弃重来。
+- **`notifyContentWillChange(DISCARD)` 不能省**：内容由 D3D11 写入，Skia 否则复用上一张快照，
+  画面停在第一帧。也不要 `toComposeImageBitmap()` —— 那是每帧一次 GPU→CPU 回读。
+- **blit 完要等 GPU 写完**。现在写环和画环是同一拍（`flushFrame` 里 blit 完立刻定为当前帧），
+  Skia 的 D3D12 队列紧接着读同一块显存，而 D3D11/D3D12 之间**没有 fence**。所以
+  `VideoProcessorBlt` → `Flush` → `End(eventQuery)` → 自旋到 `GetData` 返回 `S_OK` 再交出去。
+  早先版本是解码线程预写、显示时刻才顶帧，中间隔着好几帧的余量，不等待也不会撞上。
+- **中转纹理只要盖住 Skia 的绘制滞后**：`kBufferCount = 3`。帧本身带着解码器的 surface 上来，
+  这几张只是 Skia 能画的 RGBA 中转；blit（D3D11）和 Skia 的拷贝（D3D12）碰同一块显存、
+  跨 API 没有 fence，所以至少两张轮流用。实测画布最多落后 blit 1 帧（`maxLag=1`，Compose
+  画布、640x360/12s），3 张留两帧余量。早先的 8 格是为「解码线程预写、显示才顶帧」准备的。
+  ```
+  环 3：blits=290 shown=290（纯视频，尾部几帧照旧被丢帧收敛跳过）
+  环 3：blits=300 shown=300（音视频同播）
+  ```
+### 5.3 回退
+
+`HwVideoSink.create` 返回 null（Skiko 不是 Direct3D 后端、设备不可共享、拿不到 device 指针）即
+退回 §四 的逐帧拷贝路径：`DesktopSurfaceContext.isHardwareVideo` 为 false，
+`hardwareOutput` 为 0，解码器按普通硬解建、帧在收帧处 transfer 回内存。
+
+### 5.4 实测（2026-10-29，本机）
+
+测法：同一个 mp4 全片解码到 EOF，`AvCodec` 直接喂包，视频分支走
+`postFrame` + `flushFrame`，三条路径比**进程 CPU 时间 / 帧**（壁钟受 UI 刷新节流影响，不作判据）。
+素材用 `ffmpeg -f lavfi -i testsrc2 ... -c:v libx264 -preset ultrafast` 现场生成，各跑 3 轮取中位数。
+
+| 素材 | 软解 + CPU 上传 | 硬解 + transfer + CPU 上传 | 硬解 + 零拷贝 |
+| --- | --- | --- | --- |
+| 1920×1080 / 300 帧 | 2.76 ms | 5.57 ms | **2.71 ms** |
+| 3840×2160 / 150 帧 | 10.73 ms | 17.92 ms | **3.75 ms** |
+
+读数：
+
+- **零拷贝把硬解的 transfer 成本整个去掉了**，这是硬解能真正赢的原因 —— 相对
+  「硬解 + transfer」，1080p 省 51%、4K 省 79%。
+- **分辨率越高收益越大**：4K 相对软解快 **2.9 倍**（10.73 → 3.75 ms/帧）；
+  1080p 与软解基本持平（2.76 → 2.71）。
+- 1080p 持平不是零拷贝没生效，而是**这台机器软解太快**（1080p 只要 2.76 ms/帧，约 360 fps），
+  硬解每帧的 GPU 提交与 VideoProcessor 通道成本与它相当。弱 CPU 上交点会更低。
+- 数字对零拷贝**偏保守**：软解两路用无窗口的 `TestSurface`（不含每帧 GPU 上传与 Compose 重绘），
+  零拷贝那路跑在真实窗口里，进程 CPU 里含了 UI 线程的 blit + snapshot。
+
+---
+
+## 六、验证
 
 两端都没有 `ffmpeg` CLI 可用（`--disable-programs`），验证只能靠 native 日志。
 
 1. **走的是哪条路**：`AvCodec_initNative` 在选中的分支上打 `video decode: d3d11va` /
-   `video decode: h264_mediacodec`，都不成立时打
+   `video decode: d3d11va (shared device)` / `video decode: h264_mediacodec`，都不成立时打
    `no hardware decoder for <name>, decoding on the cpu`。看到最后一条就是回落，不是失败。
 2. **桌面**：`CONFIG_D3D11VA` 由 `--enable-d3d11va` 保证（configure 缺依赖会直接失败）。
    帧形态看 `frameToMemory` 里 `hardware frame transfer failed` 有没有出现。
-3. **Android**：MediaCodec 的 configure 失败会退到软解，日志里先出现 `video decode:` 的那一行
-   就说明选上了；拿到 NV12 之后 `postFrameVideo` 与软解走同一条 sws。
-4. 两端都要确认 `--disable-encoders` 不影响解码侧硬解（只关编码）；`--disable-avfilter` 与
+3. **桌面零拷贝**：`video_output.windows.cpp` 建好环时打 `hw video: <w>x<h> shared ring ready`；
+   不能共享时打 `hw video: Skiko's Direct3D device is not shareable, staying on the cpu path`。
+   用例 `DesktopZeroCopyTest`（`:shared:jvmTest`）锁两件事：帧真的进了共享纹理
+   （`present` 失败的帧会被丢掉，`DesktopSurfaceContext.frame` 就不走），以及共享纹理真的被画进
+   Compose 画布（`isHardwareVideoDrawn`）。
+4. **Android**：`video decode: h264_mediacodec` 表示硬解选上了，帧按 NV12 拷回内存，
+   `postFrameVideo` 与软解走同一条 sws。直出 Surface 已回退（§2.5），出现 `(surface)` 就是又走回去了。
+5. **步进 / 退帧**：时间轴动、画面不动就是「上屏时机」错了（§2.5、§5.2）。
+   两个方向各按几次，画面必须每按一次换一帧，且帧号与时间轴对得上：
+   桌面看 `frameState().serial`（= 被定为显示帧的次数）每步 +1、`index` 换格；
+   Android 截图对比播放区像素。**注意别在片尾测** —— 那里本来就无帧可解。
+6. 两端都要确认 `--disable-encoders` 不影响解码侧硬解（只关编码）；`--disable-avfilter` 与
    `postFrameVideo` 的 sws 无关（sws 在 libswscale）。
 
 ---
 
-## 六、未决
+## 七、未决
 
 - Android ByteBuffer 模式在目标机型上的实际 `color-format` 未知，需真机探针。
 - `COLOR_FormatYUV420Flexible` 不在映射表 ⇒ 只声明 flexible 输出的机型会 init 失败，
   日志里是 `Output color format 0x7f420888 ... is not supported`，之后回落软解。
-- 10bit / HDR 无方案：两条 Android 路线都拿不到 P010（桌面 transfer 出来是 P010，能走）。
-- 桌面 transfer 的下载成本吃掉大半收益，真正省下来要让帧留在 GPU 上。
+- 10bit / HDR 无方案：两条 Android 路线都拿不到 P010（桌面零拷贝的 VP 输出是 RGBA，能走）。
+- 桌面零拷贝只有 Windows：macOS / Linux 仍是逐帧拷贝（mediamp 在那边走 Metal / GLX，本仓库没做）。
