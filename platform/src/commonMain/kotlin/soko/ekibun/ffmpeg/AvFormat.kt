@@ -106,11 +106,19 @@ open class AvFormat(
   /** 容器总时长（微秒）；容器没给返回 0。须在 [getStreams] 之后调。 */
   suspend fun getDurationUs(): Long = withPtr { ptr -> getDurationNative(ptr) }
 
+  /** 当前的广告跳过开关；步进 / 退帧轮临时关掉后按它恢复。 */
+  var isSkipAd = true
+    private set
+
   /**
    * 关掉 HLS 插播广告的自动跳过（默认开）。只对 HLS 有效，非 HLS 返回非 0。
    * 误判时用：先关掉再 `seekTo` 回广告位置重播，整条流都不再跳过。
    */
-  suspend fun setSkipAd(on: Boolean): Int = withPtr { ptr -> setSkipAdNative(ptr, on) }
+  suspend fun setSkipAd(on: Boolean): Int =
+    withPtr { ptr ->
+      isSkipAd = on
+      setSkipAdNative(ptr, on)
+    }
 
   /** 容器级 seek；`stream` 为 null 时单位是 `AV_TIME_BASE` 微秒，否则用该流的 `time_base`。 */
   open suspend fun seekTo(

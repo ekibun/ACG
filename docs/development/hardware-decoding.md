@@ -251,10 +251,20 @@ D3D11 解码纹理 ──VideoProcessorBlt──▶ RGBA 共享纹理(NT 句柄)
 ### 5.2 五个「不报错只失效」
 
 - **帧带着 surface 往上走，池子是静态的**。零拷贝下收帧不 `av_frame_unref`：`AVFrame` 一路带到
-  送显，blit 完才随帧关闭还回池子。池 = `1 + 16 参考帧`（H.264/HEVC）+ 3 张工作帧 +
-  `extra_hw_frames`；装不下时 ffmpeg 报 `Static surface pool size exceeded` 并**丢帧**，不是
-  EAGAIN。现值 `ctx->extra_hw_frames = 12`（实测 8 不够）。压住几帧没有结构性上界这件事，
-  见 `TODO.md` E9。
+  送显，blit 完才随帧关闭还回池子。池的大小是两个加法，见 `libavcodec/decode.c:1099`（补足 4 张
+  基础工作帧）与 `:1155`（加 `extra_hw_frames`、帧线程数）：
+
+  ```
+  池 = 参考帧 + 1 张输出帧 + 3 张工作帧 + extra_hw_frames      // H.264/HEVC 参考帧 16
+  ```
+
+  `extra_hw_frames` 是**纯增量，只覆盖「上层同时压住的帧数」**，不覆盖参考帧与工作帧；上层即取即
+  `unref` 时可以取 0，照样跑。现值 `ctx->extra_hw_frames = 12` 就等于「上层可压 12 帧」，没有额外
+  余量；早先记的「实测 8 不够」，是当时上层压住的帧数超过了 8。
+  装不下时 `d3d11va_pool_alloc` 打 `Static surface pool size exceeded` 并返回 NULL
+  （`libavutil/hwcontext_d3d11va.c:263`），一路变成 `avcodec_send_packet` 的 **ENOMEM，不是
+  EAGAIN**；判据与「只发不收先撞哪个」的实测见 `playback-invariants.md` §2.10。
+  压住几帧没有结构性上界这件事，见 `TODO.md` E9。
 - **`DirectContext` 每次绘制现读**：Skiko 会重建 redrawer（后端回退、显示切换），旧上下文画出的
   图像不能再用，包装与快照都要丢弃重来。
 - **`notifyContentWillChange(DISCARD)` 不能省**：内容由 D3D11 写入，Skia 否则复用上一张快照，

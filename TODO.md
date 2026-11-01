@@ -186,28 +186,43 @@
 ### E9. 硬解帧的「窗口」：压住几帧没有上界，池子挤爆会丢帧
 
 - **现状（2026-10-30，桌面零拷贝）**：`AVFrame` 带着解码器的 surface 一路上到送显（收帧不 `unref`），
-  而 d3d11va 的池是**静态**的：`1 + 16 参考帧`（H.264/HEVC）+ 3 张工作帧 + `extra_hw_frames`（现值 12）。
+  而 d3d11va 的池是**静态**的：`参考帧 + 1 张输出帧 + 3 张工作帧 + extra_hw_frames`（H.264/HEVC
+  参考帧 16，现值 12；算法见 `libavcodec/decode.c:1099` 与 `:1155`）。`extra_hw_frames` 只覆盖
+  「上层同时压住几帧」，是纯增量、不含余量——它本身就是窗口该取的那个数，不要在它上面再加常数。
   「上层压住几帧」没有结构性上界：
   - 读包闸门 `frames.minOrNull() > 3` 按**最空的流**判，音频吃得快时视频队列可以一直长；
   - `sendPacketAndGetFrames` 一次把解码器能给的帧全取回来，片尾冲刷时是整个重排缓冲。
-  池子挤爆时 ffmpeg 报 `Static surface pool size exceeded` 并**丢帧**。注意 EAGAIN 只来自输入侧那个
-  单槽（`avci->buffer_pkt`），与池子无关；`send_packet` 内部还会顺带解一帧（`decode.c`），所以只在
-  收帧端拦也挡不住。
+  池子挤爆时 `d3d11va_pool_alloc` 打 `Static surface pool size exceeded` 并返回 NULL
+  （`libavutil/hwcontext_d3d11va.c:263`），`avcodec_send_packet` 因此返回 **ENOMEM（-12）**——不是
+  EAGAIN，也不是无声丢帧：上层把它当「收下」，那个包的参考链就断到下一个 IDR。EAGAIN 只来自输入侧
+  那个单槽（`avci->buffer_pkt`）。实测（2026-10-30，d3d11va、640x360 H.264）：只发不收时前 4 个包
+  返回 0、第 5 个起恒 EAGAIN，全程只占 1 张 surface，池子不会满——要撞池子必须「收帧并压住」。
 - **文档已对齐（2026-10-30）**：`playback-invariants.md` §2.10 与 `hardware-decoding.md` §5.2 原来写着
-  「背压来自 surface 池、取空后 `send_packet` 给 EAGAIN」（桌面侧是错的）与 `extra_hw_frames = 16`
-  （代码是 12），已按现状改正；剩下的只是下面这个设计缺口。
-- **方案（照 mpv）**：一次只送一个包，收帧逐帧回调 `onFrame`，回调返回 false 就停手（剩下的帧留在
-  解码器里），窗口即上界；池子按「窗口 + 3」开。mpv 的对应实现：`player/video.c` 的 `next_frames[]`
-  + `needs_new_frame()`（窗口 2~9 帧），`video/decode/vd_lavc.c` 的 `hwdec_get_extra_frames()`
-  = `max(6, vo_get_num_frame_refs() + 3)`。
+  「背压来自 surface 池、取空后 `send_packet` 给 EAGAIN」（错：溢出时 `send_packet` 返 ENOMEM）、
+  `extra_hw_frames = 16`（代码是 12），以及把池写成 `1 + 16 + 3 + extra` 却没讲清 `extra` 只覆盖
+  上层持有、不含余量——已按源码行号改正，并把「只发不收先到 EAGAIN」的实测口径记进 §2.10。
+  `cxx/ffmpeg/ffmpeg.cpp` 收帧处那句「背压来自 ffmpeg 自己的池」同步改掉。剩下的只是下面这个设计缺口。
+- **方案 A（照 mpv，改动大）**：一次只送一个包，收帧逐帧回调 `onFrame`，回调返回 false 就停手（剩下的
+  帧留在解码器里），窗口即上界；池子按「窗口 + 3」开。mpv 的对应实现：`player/video.c` 的
+  `next_frames[]` + `needs_new_frame()`（窗口 2~9 帧），`video/decode/vd_lavc.c` 的
+  `hwdec_get_extra_frames()` = `max(6, vo_get_num_frame_refs() + 3)`。
+- **方案 B（收帧端计数，改动小）**：上限挪进 native。`receiveFramesNative` 记「已交出去还没还回来」
+  的张数，到 `extra_hw_frames` 就返**空数组**（不能返 `null`——`null` 是「解码器吐干净」，片尾冲刷靠
+  它收尾）；`AvFrame_closeNative` 经 `frame->opaque` 回指 codec 把计数减回来。三个必须踩准的点：
+  ① 计数泄漏的症状是「永远没有新帧」，比池子溢出更难查，所以回减只能绑 `AvFrame` 的生命周期，不能
+  绑 Kotlin 的某个分支；② `frameToMemory` 会换一个 `AVFrame`，计数必须跟到新帧，否则软解回落一进去
+  就永久停；③ 满时返空数组会自动接上「输入单槽满 → EAGAIN → 上层 retry」这条链，Kotlin 侧不需要
+  窗口、不需要信号量，`sendingPacket` 直接删。Android 的 MediaCodec 路径与软解没有这个静态池，
+  同一计数在那里是「限压住的帧数」（内存/延迟），注释里别写成防池子溢出。
 - **上一版实现**：`git stash list` 的 `帧窗口/逐帧回调重构（未完成，下一轮再说）`（另存了一份
   `/tmp/wt-window-refactor.patch`）。含 `AvCodec.sendPacket(packet, isAlive, onFrame)`、native 收帧改
   一帧一取、native 记账（`videoOutputHasRoom` + `FrameSlots`）的引入与删除、闸门改按视频队列、四个
   用例改新接口。当时可编译、23 个用例类通过、13s 探针 292（音视频）/298（纯视频）帧、无池溢出 ——
   只是改动面太大，先撤回。
-- **完成判据**：① `FFPlayer` 里没有 `sendingPacket`；② 压住的帧数 == 窗口，片尾冲刷也逐帧吐；
-  ③ 探针跑长片与 4K 各一次都不触发 `Static surface pool size exceeded`；④ 文档里的口径与
-  `extra_hw_frames` 的实值一致。
+- **完成判据**：① `FFPlayer` 里没有 `sendingPacket`；② 压住的帧数 == `extra_hw_frames`（不另引窗口
+  常量），片尾冲刷也逐帧吐；③ 探针跑长片与 4K 各一次都不触发 `Static surface pool size exceeded`；
+  ④ 文档里的口径与 `extra_hw_frames` 的实值一致；⑤ 送包的 `<0` 按轮次失败结束（不重试、不当收下），
+  收帧侧的 `<0` 不再折叠成「没帧」。
 
 ---
 

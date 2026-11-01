@@ -14,11 +14,4 @@ data class AvStream(
   /** 流时长（微秒）；0 = 流上没有。取总时长见 [AvFormat.getDurationUs]。 */
   val duration: Long,
   val metadata: Map<String, String>,
-) {
-  /**
-   * 帧间隔（微秒）：默认按帧率换算，运行时用实测的两帧之差校正。
-   * 0 = 既拿不到帧率、也还没量到。
-   */
-  internal var frameIntervalUs: Long =
-    if (frameRate > 0f) (1_000_000f / frameRate).toLong() else 0
-}
+)

@@ -89,16 +89,17 @@ class AvSurfaceContextBufferReuseTest {
         AvCodec(video).use { codec ->
           while (true) {
             val packet = format.getPacket(emptyList()) ?: break
-            // packet 由 sendPacketAndGetFrames 收掉，调用方只管帧
-            for (frame in codec.sendPacketAndGetFrames(packet) ?: emptyList()) {
+            // packet 由调用方负责关闭
+            for (frame in codec.sendPacketAndGetFrames(packet).second ?: emptyList()) {
               sink.postFrame(AVMediaType.VIDEO, frame)
               sink.flushFrame(AVMediaType.VIDEO, frame)
               frame.close()
             }
+            packet.close()
           }
           // 冲刷 = 送一个空包，收帧直到解码器吐干净（null）
           while (true) {
-            val tail = codec.sendPacketAndGetFrames() ?: break
+            val tail = codec.sendPacketAndGetFrames().second ?: break
             if (tail.isEmpty()) break
             for (frame in tail) {
               sink.postFrame(AVMediaType.VIDEO, frame)
@@ -136,17 +137,18 @@ class AvSurfaceContextBufferReuseTest {
         AvCodec(audio).use { codec ->
           while (true) {
             val packet = format.getPacket(emptyList()) ?: break
-            for (frame in codec.sendPacketAndGetFrames(packet) ?: emptyList()) {
+            for (frame in codec.sendPacketAndGetFrames(packet).second ?: emptyList()) {
               sink.postFrame(AVMediaType.AUDIO, frame)
               val shown = sink.flushFrame(AVMediaType.AUDIO, frame)
               // 上屏时间戳等于帧自身 pts
               assertEquals(frame.timeStamp, shown, "flush timestamp must equal the frame pts when sink returns 0")
               frame.close()
             }
+            packet.close()
           }
           // 冲刷 = 送一个空包，收帧直到解码器吐干净（null）
           while (true) {
-            val tail = codec.sendPacketAndGetFrames() ?: break
+            val tail = codec.sendPacketAndGetFrames().second ?: break
             if (tail.isEmpty()) break
             for (frame in tail) {
               sink.postFrame(AVMediaType.AUDIO, frame)

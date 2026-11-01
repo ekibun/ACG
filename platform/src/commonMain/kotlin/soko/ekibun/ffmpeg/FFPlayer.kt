@@ -1,14 +1,12 @@
 package soko.ekibun.ffmpeg
 
-import kotlinx.coroutines.CancellableContinuation
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.joinAll
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import soko.ekibun.ThreadDispatcher
@@ -76,22 +74,13 @@ class FFPlayer(
     private val playerDispatcher by lazy { ThreadDispatcher("ffplayer") }
 
     /**
-     * 退帧的最小退距（微秒）：落在分片首帧时，退距小于「首帧 pts 与片头 dts 的差」就跨不过
-     * 分片边界，会退回当前帧。取 1 s 覆盖常见 B 帧延迟，代价是多解一小段帧。
-     */
-    private const val STEP_BACK_MARGIN_US = 1_000_000L
-
-    /**
      * 相邻包的声明时间差超过它，就认为解复用器跳过分片了（正常只差一帧）。
      * 判定在 `hls.c` 里，见 `docs/design/hls-ad-skip.md`。
      */
     private const val AD_GAP_US = 1_000_000L
 
-    /** 学习帧间隔的上限：跳过广告后相邻送显帧会差十几秒，学进去会让退帧一次退十几秒。 */
-    private const val MAX_FRAME_INTERVAL_US = 200_000L
-
-    /** 空档末端之前这么多也算「已过空档」：B 帧重排让接上的首帧比它早一两帧（实测 42ms）。 */
-    private const val AD_SKIP_EDGE_US = 500_000L
+    /** 读侧多久没有新包就认为卡住。正常播放相邻两包的空窗只有十几毫秒（实测 ≤ 11 ms）。 */
+    private const val READ_STALL_MS = 300L
   }
 
   /** 开一轮独占播放：作废上一轮并等它收干净；本轮身份由 [PTS] 对象标识。 */
@@ -101,9 +90,8 @@ class FFPlayer(
     return pts === before
   }
 
-  /** 单帧步进用的两个时间戳：画面上那一帧与其前一帧（后者可为空）。 */
+  /** 画面上那一帧的时间戳；还没显示过帧时为 `null`。 */
   private var lastFrameTs: Long? = null
-  private var prevFrameTs: Long? = null
 
   suspend fun play(
     streams: Map<Int, AvStream>,
@@ -122,7 +110,7 @@ class FFPlayer(
       playingJob?.join()
     }
 
-  private var playingJob: Deferred<Unit>? = null
+  private var playingJob: Job? = null
 
   override suspend fun seekTo(
     ts: Long,
@@ -156,6 +144,8 @@ class FFPlayer(
     // 只关得掉不在飞行中的帧；飞行中的由各自的作业收尾时归还
     frames.values.forEach { list -> list.filter { it.processing == null }.forEach { it.close() } }
     frames.clear()
+    // 换了位置，「上一帧」不再是参考：差 2 s 就抬时钟的判据只对连续播放成立
+    lastFrameTs = null
     // flush 丢弃解码器内部的参考帧历史，与 drain（取残余尾帧）是两件事
     codecs.forEach {
       it.value.flush()
@@ -169,326 +159,269 @@ class FFPlayer(
     when {
       // 视频轨在：步进轮靠「下一帧画面」停住，续播轮带 resyncTo 做丢帧收敛
       newPts.streams.containsKey(AVMediaType.VIDEO) ->
-        resume(stopOnNextFrame = !resumeAfter, resyncTo = resyncTo ?: ts, backstep = backstep)
-      // 纯音频没有「下一帧画面」，stopOnNextFrame 会一路解到 EOF
+        resume(stepMode = !resumeAfter, resyncTo = resyncTo ?: ts, backstep = backstep)
+      // 纯音频没有「下一帧画面」，stepMode 会一路解到 EOF
       resumeAfter -> resume(resyncTo = resyncTo ?: ts, backstep = backstep)
     }
   }
 
-  /** 从当前位置起本轮播放作业（不开闸；[resyncTo] 是本轮要收敛到的目标）。 */
+  /** 从当前位置起本轮播放作业；[stepMode] 时送到第一帧就收轮。 */
   suspend fun resume(
-    stopOnNextFrame: Boolean = false,
+    stepMode: Boolean = false,
     resyncTo: Long? = null,
     backstep: Boolean = false,
-  ) = withContext(playerDispatcher) {
-    if (stopOnNextFrame) {
-      val hitFrame =
-        suspendCancellableCoroutine<Boolean> {
-          playingJob = async(playerDispatcher) { resumeImpl(it, resyncTo, backstep) }
+  ): Unit =
+    withContext(playerDispatcher) {
+      if (stepMode) {
+        // 退帧轮不跳插播广告：要找的那一帧本身可能就在广告段里，跳过会把它从帧流里删掉。
+        // 恢复放在这一轮真的结束之后 —— 读循环还在收尾时开回去会漏跳。
+        val skipAdBefore = isSkipAd && backstep
+        if (skipAdBefore) setSkipAd(false)
+        try {
+          val round = async(playerDispatcher) { resumeImpl(stepMode = true, resyncTo, backstep) }
+          playingJob = round
+          round.join()
+        } finally {
+          if (skipAdBefore) setSkipAd(true)
         }
-      if (hitFrame) pause()
-    } else {
-      playingJob = async(playerDispatcher) { resumeImpl(null, resyncTo, backstep) }
+      } else {
+        playingJob = async(playerDispatcher) { resumeImpl(stepMode = false, resyncTo, backstep) }
+      }
     }
-  }
 
-  /** 前进一帧并停住（[resume] 的 `stopOnNextFrame`）；并发调用同样是顶掉而非排队。 */
+  /** 前进一帧并停住（[resume] 的 `stepMode`）；并发调用同样是顶掉而非排队。 */
   suspend fun stepForward() =
     withContext(playerDispatcher) {
       val p = pts ?: return@withContext
       // 纯音频没有「下一帧画面」，放进去会一路解到 EOF
       if (!p.streams.containsKey(AVMediaType.VIDEO)) return@withContext
       if (!takeOverPlayback()) return@withContext
-      resume(stopOnNextFrame = true)
+      resume(stepMode = true)
     }
 
   /**
-   * 后退一帧并停住，目标是 [prevFrameTs]。
+   * 后退一帧并停住：退到 [lastFrameTs] 之前最近的那一帧。
    * @return 是否真的移动了（没显示过帧、已在第一帧、空探学不到前一帧时为 `false`）。
    */
   suspend fun stepBack(): Boolean =
     withContext(playerDispatcher) {
       val current = lastFrameTs ?: return@withContext false
       if (!takeOverPlayback()) return@withContext false
-
-      // mpv 的 backstep：只跳一次，剩下的由送显端补成「前一帧」。
-      // 退距不能只取 3/4 帧：当前帧正好是分片首帧时，容器的落点不会早于片头，
-      // 3/4 帧退回同一片就白跳；退足 [STEP_BACK_MARGIN_US] 才能跨过分片边界
-      val interval = pts?.streams?.get(AVMediaType.VIDEO)?.frameIntervalUs ?: 0
-      val eps = maxOf(interval * 3 / 4, STEP_BACK_MARGIN_US, 1)
-      seekImpl(maxOf(current - eps, 0), resumeAfter = false, resyncTo = current, backstep = true)
-      lastFrameTs != current
+      // 试着跳1ms；没退动（一帧没送显，或退回原帧）再退 1 s 重试
+      seekImpl(maxOf(current - 1000, 0), resumeAfter = false, resyncTo = current, backstep = true)
+      if (lastFrameTs == null || lastFrameTs == current) {
+        // 1ms不够跳分片，重试一次1s
+        seekImpl(maxOf(current - AV_TIME_BASE, 0), resumeAfter = false, resyncTo = current, backstep = true)
+      }
+      lastFrameTs != null && lastFrameTs != current
     }
 
   private val codecs = HashMap<Int, AvCodec>()
   private val frames = HashMap<Int, ArrayList<AvFrame>>()
 
+  /** 跑一轮播放；[stepMode] 时送到第一帧就收轮。 */
   private suspend fun resumeImpl(
-    onNextFrame: CancellableContinuation<Boolean>?,
-    /** 本轮起跑要收敛到的目标时间戳（seek 后才有）。见 [resume]。 */
+    /** 步进 / 退帧轮：送到下一帧就结束该流，不等播放时刻。 */
+    stepMode: Boolean,
     resyncTo: Long?,
-    /** 退帧轮：`resyncTo` 就是要退回去的原 pts。 */
     backstep: Boolean,
   ) = withContext(playerDispatcher) {
     val pts = pts ?: return@withContext
-    // 必须带上「对象没换」：换位置的路径会换 [PTS]，这就是「本轮还作不作数」
-    val isPlaying = { pts == this@FFPlayer.pts && pts.playing }
-    // 判据只能取轮次级：onNextFrame 在帧送显时就翻，而轮次要等 pause() 落地才停
-    val stepMode = onNextFrame != null
-    // seek 后把画面从关键帧快进到目标：落后的视频帧解码后立刻丢（ffplay frame_drops_early）
-    var lastDropped: Long? = null
-    var converging = resyncTo != null
-    var backstepping = backstep && resyncTo != null
-    // 广告跳段留下的声明轴空档：按视频流的相邻包识别，等画面走到空档末端才上报。
-    // 只跟一条流：音视频各自都会出现同一个空档，跟两条会重复上报。
-    val skipTrackIndex = (pts.streams[AVMediaType.VIDEO] ?: pts.streams.values.firstOrNull())?.index
-    // 时钟由音频帧推进（`flushFrame` 只对音频返回时间戳）；纯视频流没有它，跳过广告后要自己抬时钟。
-    val clockDrivenByAudio = pts.streams.containsKey(AVMediaType.AUDIO)
-    var skipLastPts = -1L
-    val pendingSkips = ArrayDeque<Pair<Long, Long>>()
-    // 时间轴的上报源：有音频只报音频，没有才报视频。判据见 playback-invariants §2.7
+    var isActive = true
+    var isReadTimeout = false
+    // 时间轴的上报源：有音频只报音频（音频按时长推进，比视频帧稳），没有才报视频
     val ptsFromAudio = pts.streams.containsKey(AVMediaType.AUDIO)
+    // 播放轮次
+    val isPlaying = { isActive && pts == this@FFPlayer.pts && pts.playing }
+    // 判断AvPacket是否继续传入解码器
+    val isPacketValid = { pts == this@FFPlayer.pts }
+    val decodeJobs = HashMap<Int, Job>()
     val playJobs =
       pts.streams.map { (codecType, stream) ->
-        async(playerDispatcher) {
-          var lastUpdateJob: Job? = null
-          while (isPlaying()) {
+        launch {
+          updateJob@while (isPlaying()) {
+            // 取第一个没处理的帧
+            val frames = frames[stream.index]
             val frame =
-              // 只看有没有人在用，不比对是谁：上一轮的 updateJob 可能还没收尾。
-              // 取队头：队列恒按 pts 升序 —— 送包串行（AvCodec.sendLock）、入队紧跟解锁
-              // 不跨挂起点，收尾 drain 又排在所有在飞包之后。判据见 playback-invariants §2.9
-              frames[stream.index]?.firstOrNull { it.processing == null }
-            if (frame == null) {
-              delay(1.milliseconds)
-              continue
-            }
+              frames?.firstOrNull { it.processing == null } ?: run {
+                delay(1.milliseconds)
+                continue
+              }
             frame.processing = pts
-            val lastUpdate = lastUpdateJob
             // 没消费就说明轮次在它显示之前停了，那种帧必须还回队列
             var consumed = false
-            lastUpdateJob =
-              async(playerDispatcher) updateJob@{
-                if (!isPlaying()) return@updateJob
-                // 步进轮里的音频整轮静音
-                val muted = stepMode && codecType == AVMediaType.AUDIO
-                // 先等上一帧送显完再写这一帧：每种流只有一块输出缓冲，反了就是上一帧显示成本帧的像素
-                lastUpdate?.join()
-                if (!isPlaying()) return@updateJob
-                // 退帧：只显示原 pts 之前的最后一帧。判据看队列里的下一帧 —— 本帧之后还有帧、
-                // 且仍早于原 pts，就说明它不是「前一帧」；判中的那帧要跳过下面的收敛丢弃
-                var backstepFrame = false
-                val from = resyncTo
-                if (backstepping &&
-                  from != null &&
-                  codecType == AVMediaType.VIDEO &&
-                  frame.timeStamp < from
-                ) {
-                  // 下一帧可能还在解码：等它进队列再判，否则会把倒数第二帧误当成前一帧
-                  var waited = 0
-                  while (
-                    isPlaying() &&
-                    waited++ < 1000 &&
-                    frames[stream.index]?.any { f -> f.timeStamp > frame.timeStamp } != true
-                  ) {
+            try {
+              // 丢帧收敛放在 sws 之前：这类帧不必再转一次缓冲
+              if (resyncTo != null && frame.timeStamp < resyncTo) {
+                if (backstep && codecType == AVMediaType.VIDEO) {
+                  // 等下一帧
+                  while (true) {
+                    if (!isPlaying()) break@updateJob
+                    val index = frames.indexOfFirst { it == frame }
+                    if (index < 0) {
+                      // 队列被换位置清掉了，这帧已经没人要
+                      consumed = true
+                      break@updateJob
+                    } else if (index + 1 < frames.size) {
+                      val next = frames[index + 1]
+                      if (next.timeStamp < resyncTo) {
+                        // 下一帧不是就丢掉
+                        consumed = true
+                        continue@updateJob
+                      }
+                      break
+                    }
                     delay(1.milliseconds)
                   }
-                  if (!isPlaying()) return@updateJob
-                  val hasLater =
-                    frames[stream.index]?.any { f ->
-                      f.timeStamp > frame.timeStamp && f.timeStamp < from
-                    } == true
-                  if (hasLater) {
-                    consumed = true
-                    return@updateJob
-                  }
-                  backstepFrame = true
-                  backstepping = false
-                }
-                if (!muted) surfaceContext?.postFrame(codecType, frame)
-                // 丢帧收敛必须排在送显之前，音频也要丢（落点是容器级的）
-                if (!backstepFrame && resyncTo != null && frame.timeStamp < resyncTo) {
-                  if (codecType == AVMediaType.VIDEO) lastDropped = frame.timeStamp
+                } else {
                   consumed = true
-                  return@updateJob
+                  continue@updateJob
                 }
-                if (codecType == AVMediaType.VIDEO && onNextFrame?.isActive != true) {
-                  // 跳过广告后声明轴直接跳过一整段。有音频时它推着时钟走；纯视频流没人推，
-                  // 这一帧会被下面的门限挡住整整一个广告时长，所以这里把时钟抬到空档之后。
-                  val skip = pendingSkips.firstOrNull()
-                  if (!clockDrivenByAudio &&
-                    skip != null &&
-                    frame.timeStamp >= skip.second - AD_SKIP_EDGE_US
-                  ) {
-                    pts.update(frame.timeStamp)
-                  }
-                  // 等到本帧到达播放时刻；中途停播就退出本轮
+              }
+              // seek到了后面的帧，结束流程。这帧不消费、还回队列：1 s 退避的落点就是这里，
+              // 用户接着点播放就是从上屏那帧往下走
+              if (backstep && resyncTo != null && frame.timeStamp > resyncTo) {
+                pts.playing = false
+                break@updateJob
+              }
+              // sws 转到输出缓冲
+              surfaceContext?.postFrame(codecType, frame)
+              // 步进轮里的音频整轮静音：不送显、不报时间戳，这一轮的时间轴只由画面报
+              if (stepMode && codecType == AVMediaType.AUDIO) {
+                consumed = true
+                continue@updateJob
+              }
+              // 视频等播放时刻（步进轮不等）
+              if (codecType == AVMediaType.VIDEO && !stepMode) {
+                // 差超过[AD_GAP_US]就resync
+                val lastTs = lastFrameTs
+                if (lastTs != null && frame.timeStamp - lastTs > AD_GAP_US) {
+                  onEvent(Event.AdSkipped(frame.timeStamp, lastTs))
+                  pts.update(frame.timeStamp)
+                } else {
                   while (frame.timeStamp > pts.now(surfaceContext?.speedRatio ?: 1f)) {
                     delay(1.milliseconds)
-                    if (!isPlaying()) return@updateJob
-                  }
-                  // 队列里已有更晚、且仍落在播放窗口内的帧 ⇒ 本帧已过期
-                  val stale =
-                    frames[stream.index]?.any { f ->
-                      f.timeStamp > frame.timeStamp &&
-                        f.timeStamp < pts.now(surfaceContext?.speedRatio ?: 1f)
-                    } == true
-                  if (stale) {
-                    consumed = true
-                    return@updateJob
-                  }
-                }
-                if (muted) {
-                  consumed = true
-                  return@updateJob
-                }
-                val timeStamp = surfaceContext?.flushFrame(codecType, frame) ?: -1
-                consumed = true
-                if (!isPlaying()) return@updateJob
-                if (timeStamp >= 0) pts.update(timeStamp)
-                if (codecType == AVMediaType.VIDEO) {
-                  // 画面走到空档之后才提示；读包是预读的，读到时发会比画面早好几秒
-                  while (pendingSkips.isNotEmpty() && pendingSkips.first().second <= frame.timeStamp) {
-                    val (skippedFrom, skippedTo) = pendingSkips.removeFirst()
-                    onEvent(Event.AdSkipped(skippedFrom, skippedTo))
-                  }
-                  // 本轮收敛过就用丢帧结果补前一帧，未收敛时沿用上一次的当前帧
-                  prevFrameTs = if (converging) lastDropped else lastFrameTs
-                  converging = false
-                  lastFrameTs = frame.timeStamp
-                  // 只有真看到连续两帧时，差值才是可信的帧间隔；跳过广告那一段差十几秒，不能学
-                  val prev = prevFrameTs
-                  if (prev != null) {
-                    val delta = frame.timeStamp - prev
-                    if (delta in 1..MAX_FRAME_INTERVAL_US) stream.frameIntervalUs = delta
-                  }
-                  if (onNextFrame?.isActive == true) {
-                    pts.update(frame.timeStamp)
-                    onNextFrame.resumeWith(Result.success(true))
-                  }
-                }
-                // 步进轮音频整轮静音，不报时间戳，这一轮只能由画面报
-                if (ptsFromAudio && codecType != AVMediaType.AUDIO && !stepMode) return@updateJob
-                onEvent(Event.Frame(frame.timeStamp))
-              }.also { job ->
-                job.invokeOnCompletion {
-                  // 轮次在「已取到帧、还没显示」时停住是常态：这种帧不能出队。
-                  // 判据只能用 contains，别拿 remove() 的返回值当判据。
-                  val queue = frames[stream.index]
-                  if (consumed || queue?.contains(frame) != true) {
-                    queue?.remove(frame)
-                    frame.close()
-                  } else {
-                    frame.processing = null
+                    if (!isPlaying()) break@updateJob
                   }
                 }
               }
-            lastUpdate?.join()
+              val timeStamp = surfaceContext?.flushFrame(codecType, frame) ?: -1
+              consumed = true
+              if (!isPlaying()) break@updateJob
+              if (timeStamp >= 0) pts.update(timeStamp)
+              if (codecType == AVMediaType.VIDEO) {
+                lastFrameTs = frame.timeStamp
+                if (stepMode) {
+                  pts.update(frame.timeStamp)
+                  pts.playing = false
+                  onEvent(Event.Frame(frame.timeStamp))
+                  break@updateJob
+                }
+              }
+              // 有音频时视频帧不报时间戳（时间轴由音频推），纯视频才由画面报
+              if (!ptsFromAudio || codecType == AVMediaType.AUDIO) onEvent(Event.Frame(frame.timeStamp))
+            } finally {
+              if (consumed) {
+                frames.remove(frame)
+                frame.close()
+              } else {
+                frame.processing = null
+              }
+            }
           }
         }
       }
     try {
       pts.playing = true
+      // 暂停期间时钟照走（视频帧不回写时钟），恢复时把锚点拉回上一帧，否则整段当"落后"快放
+      lastFrameTs?.let { pts.update(it) }
       // 步进轮不碰音频设备：pause() 的 stop() 不丢弃已排队的 PCM
       if (!stepMode) surfaceContext?.resume()
       var sendingPacket = 0
-      var isReadTimeout = false
-      // 尾帧还在解码器的重排缓冲里，只有冲刷才取得到。冲刷放在读包循环内（读到 EOF 就地做，
-      // 见下面的尾循环）：退帧轮里队列不会空（有一帧正等着判「是不是前一帧」），收尾若排在
-      // 循环之后就永远等不到「队列空」。判据见 playback-invariants §1.8
       while (isPlaying()) {
+        // 节流
         if (sendingPacket > 3 || (frames.map { it.value.size }.minOrNull() ?: 0) > 3) {
           delay(1.milliseconds)
           continue
         }
         val packet =
           try {
-            withTimeout(100.milliseconds) { getPacket(pts.streams.values) }
+            withTimeout(READ_STALL_MS.milliseconds) { getPacket(pts.streams.values) }
           } catch (e: TimeoutCancellationException) {
-            if (!isReadTimeout) onEvent(Event.ReadTimeout)
-            isReadTimeout = true
-            // 不额外退避：withTimeout 本身就是节拍，超时不重进 native
+            // [READ_STALL_MS] 没有读到包：卡住。continue 让循环回到 isPlaying()，pause 靠它退出
+            if (!isReadTimeout) {
+              isReadTimeout = true
+              onEvent(Event.ReadTimeout)
+            }
             continue
           }
-        if (isReadTimeout) onEvent(Event.ReadTimeoutResume)
-        isReadTimeout = false
-
-        if (packet == null) {
-          // 读到 EOF：后面不会再有包，不必再读包。先把重排缓冲里的尾帧冲刷出来，
-          // 直到每个解码器都吐干净。
-          var atEnd = false
-          while (!atEnd && isPlaying()) {
-            atEnd =
-              codecs
-                .map { (index, codec) ->
-                  async(playerDispatcher) {
-                    // 冲刷 + 收一轮是同一次加锁；null 就是「解码器吐干净了」。
-                    // 轮次换了就撒手：codec 是各轮共用的，占着 sendLock 会挡住新一轮送包
-                    val list =
-                      codec.sendPacketAndGetFrames { this@FFPlayer.pts == pts } ?: return@async true
-                    if (pts != this@FFPlayer.pts) {
-                      list.forEach { it.close() }
-                      return@async true
-                    }
-                    if (list.isNotEmpty()) frames.getOrPut(index) { arrayListOf() }.addAll(list)
-                    false
-                  }
-                }.awaitAll()
-                .all { it }
-            if (!atEnd) delay(1.milliseconds)
-          }
-          // 再等队列播空：尾帧还在队列里排队显示，这一轮结束时它们就再没机会上屏
-          while (frames.values.sumOf { it.size } > 0 && isPlaying()) {
-            delay(1.milliseconds)
-          }
+        // 如果换pts了就丢掉当前packet
+        if (!isPacketValid()) {
+          packet?.close()
           break
         }
-        if (this@FFPlayer.pts != pts) {
-          // 轮次换了：包属于旧位置，就地归还
-          packet.close()
-          break
-        }
-        // 只是暂停（对象没换）：照常送进解码器，这就是暂停期间的预读缓存
+        // 下载，跳过解码
         if (pts.streams.isEmpty()) {
-          packet.close()
-          continue
+          packet?.close()
+          if (packet == null) break else continue
         }
-        // 记投出去还没回来的解码作业数
-        sendingPacket++
-        val stream = pts.streams.values.first { it.index == packet.streamIndex }
-        if (stream.index == skipTrackIndex) {
-          val declared = packet.ptsUs
-          if (declared >= 0) {
-            if (skipLastPts >= 0 && declared - skipLastPts > AD_GAP_US) {
-              pendingSkips.addLast(skipLastPts to declared)
+        if (packet != null) {
+          sendingPacket++
+          // 卡住之后读到第一个包就是恢复
+          if (isReadTimeout) {
+            isReadTimeout = false
+            onEvent(Event.ReadTimeoutResume)
+          }
+        }
+        // 读到 EOF 时把所有 codec 冲刷一遍，否则只送当前包对应的那个
+        val flushCodecs =
+          if (packet == null) {
+            codecs.values
+          } else {
+            listOf(
+              codecs[packet.streamIndex]
+                ?: AvCodec(
+                  pts.streams.values.first { it.index == packet.streamIndex },
+                  hardware,
+                  surfaceContext?.hardwareOutput,
+                ).also { codecs[packet.streamIndex] = it },
+            )
+          }
+        flushCodecs.forEach { codec ->
+          val lastJob = decodeJobs[codec.streamIndex]
+          decodeJobs[codec.streamIndex] =
+            launch {
+              packet.use { packet ->
+                // 先等codec把上一个作业提交完
+                lastJob?.join()
+                // 循环直到投递成功
+                while (isPacketValid()) {
+                  val (accepted, decoded) = codec.sendPacketAndGetFrames(packet)
+                  if (!isPacketValid() || decoded == null) {
+                    decoded?.forEach { it.close() }
+                    break
+                  }
+                  frames.getOrPut(codec.streamIndex) { arrayListOf() }.addAll(decoded)
+                  if (accepted && packet != null) {
+                    sendingPacket--
+                    break
+                  }
+                  delay(1.milliseconds)
+                }
+              }
             }
-            skipLastPts = declared
-          }
         }
-        val codec =
-          codecs[stream.index]
-            ?: AvCodec(
-              stream,
-              hardware,
-              surfaceContext?.hardwareOutput,
-            ).also { codecs[stream.index] = it }
-        @Suppress("DeferredResultUnused")
-        async(playerDispatcher) {
-          // 一个 packet 可能产出 0 帧（B 帧重排）或多帧，整批都要收。
-          // 送不进去时原地重试，这段等待串行在 codec 上：包不能丢，也不能让后面的包抢先 ——
-          // 后一个包先进解码器就断参考链，花屏到下一个 IDR。轮次换掉就作废这个包。
-          // 正常播放不会走到「吐干净」（那只在片尾冲刷时发生），null 当空处理即可
-          val decoded = codec.sendPacketAndGetFrames(packet) { this@FFPlayer.pts == pts } ?: emptyList()
-          sendingPacket--
-          if (this@FFPlayer.pts != pts) {
-            decoded.forEach { it.close() }
-            return@async
-          }
-          if (decoded.isEmpty()) return@async
-          frames.getOrPut(stream.index) { arrayListOf() }.addAll(decoded)
-        }
+        // EOF跳出循环
+        if (packet == null) break
+      }
+      // 等解码结束
+      decodeJobs.values.joinAll()
+      // 等frame消费完
+      while (frames.values.sumOf { it.size } > 0 && isPlaying()) {
+        delay(1.milliseconds)
       }
     } finally {
-      if (onNextFrame?.isActive == true) onNextFrame.resumeWith(Result.success(false))
+      isActive = false
       pts.playing = false
       if (pts == this@FFPlayer.pts) onEvent(Event.Frame(null))
     }
