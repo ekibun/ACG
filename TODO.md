@@ -183,11 +183,11 @@
 - **完成判据**：按 §5 分条验收，每条落地后回来更新本条状态；全部落地后删条目  
   （设计文档随实现修订，不删）。
 
-### E9. 硬解帧的「窗口」：压住几帧没有上界，池子挤爆会丢帧
+### E9. 硬解帧的「窗口」：收帧端按 extra_hw_frames 记账（已落地，剩收尾）
 
 - **现状（2026-10-30，桌面零拷贝）**：`AVFrame` 带着解码器的 surface 一路上到送显（收帧不 `unref`），
   而 d3d11va 的池是**静态**的：`参考帧 + 1 张输出帧 + 3 张工作帧 + extra_hw_frames`（H.264/HEVC
-  参考帧 16，现值 12；算法见 `libavcodec/decode.c:1099` 与 `:1155`）。`extra_hw_frames` 只覆盖
+  参考帧 16，现值 3；算法见 `libavcodec/decode.c:1099` 与 `:1155`）。`extra_hw_frames` 只覆盖
   「上层同时压住几帧」，是纯增量、不含余量——它本身就是窗口该取的那个数，不要在它上面再加常数。
   「上层压住几帧」没有结构性上界：
   - 读包闸门 `frames.minOrNull() > 3` 按**最空的流**判，音频吃得快时视频队列可以一直长；
@@ -202,18 +202,19 @@
   `extra_hw_frames = 16`（代码是 12），以及把池写成 `1 + 16 + 3 + extra` 却没讲清 `extra` 只覆盖
   上层持有、不含余量——已按源码行号改正，并把「只发不收先到 EAGAIN」的实测口径记进 §2.10。
   `cxx/ffmpeg/ffmpeg.cpp` 收帧处那句「背压来自 ffmpeg 自己的池」同步改掉。剩下的只是下面这个设计缺口。
-- **方案 A（照 mpv，改动大）**：一次只送一个包，收帧逐帧回调 `onFrame`，回调返回 false 就停手（剩下的
-  帧留在解码器里），窗口即上界；池子按「窗口 + 3」开。mpv 的对应实现：`player/video.c` 的
-  `next_frames[]` + `needs_new_frame()`（窗口 2~9 帧），`video/decode/vd_lavc.c` 的
-  `hwdec_get_extra_frames()` = `max(6, vo_get_num_frame_refs() + 3)`。
-- **方案 B（收帧端计数，改动小）**：上限挪进 native。`receiveFramesNative` 记「已交出去还没还回来」
-  的张数，到 `extra_hw_frames` 就返**空数组**（不能返 `null`——`null` 是「解码器吐干净」，片尾冲刷靠
-  它收尾）；`AvFrame_closeNative` 经 `frame->opaque` 回指 codec 把计数减回来。三个必须踩准的点：
-  ① 计数泄漏的症状是「永远没有新帧」，比池子溢出更难查，所以回减只能绑 `AvFrame` 的生命周期，不能
-  绑 Kotlin 的某个分支；② `frameToMemory` 会换一个 `AVFrame`，计数必须跟到新帧，否则软解回落一进去
-  就永久停；③ 满时返空数组会自动接上「输入单槽满 → EAGAIN → 上层 retry」这条链，Kotlin 侧不需要
-  窗口、不需要信号量，`sendingPacket` 直接删。Android 的 MediaCodec 路径与软解没有这个静态池，
-  同一计数在那里是「限压住的帧数」（内存/延迟），注释里别写成防池子溢出。
+- **已落地（2026-11-02，只动 native）**：收帧端按 `extra_hw_frames` 守在途硬解帧数。三个函数在
+  `video_output.h`（`videoOutputFrameRoom` / `videoOutputHoldFrame` / `videoOutputReleaseFrame`）：
+  windows 把计数记在 `ctx->opaque` 指向的输出端上（`sink->lock` + atomic），Android 是
+  `INT_MAX` / 空转；`frame->opaque` 存解码器本体，`AvFrame_closeNative` 靠它减回来。到上限就不再
+  收，帧留在解码器里 ⇒ `buffer_frame` 非空 ⇒ 下一次 `send_packet` 只塞输入单槽 ⇒ EAGAIN ⇒ 读包
+  停下。池里给解码器那一份因此一分没动，**送包端不需要闸门**。取 3（原 12）实测：整片 300 帧
+  一帧不丢、12.08 s 实时、无读超时无池溢出（音视频同播 11.79 s）。
+- **剩余（都不在池子溢出这条线上）**：
+  - `FFPlayer` 的 `sendingPacket` 与 `frames.min() > 3` 闸门还在，现在是纯冗余（判据 ①）。
+  - 窗口满 + 解码器输出槽压着一帧时，`send` 恒 EAGAIN、`receive` 恒空数组，两个入口都不会自己
+    前进；播放轮靠 playJobs 当场消费帧自己解开，步进轮会空转到轮次结束。**不能靠「轮次结束就
+    丢包」来解**——`stepForward` 不 seek，丢一个包下一次步进就跳帧
+    （`FFPlayerSeekFrameSequenceTest` 会红）。
 - **上一版实现**：`git stash list` 的 `帧窗口/逐帧回调重构（未完成，下一轮再说）`（另存了一份
   `/tmp/wt-window-refactor.patch`）。含 `AvCodec.sendPacket(packet, isAlive, onFrame)`、native 收帧改
   一帧一取、native 记账（`videoOutputHasRoom` + `FrameSlots`）的引入与删除、闸门改按视频队列、四个

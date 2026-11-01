@@ -444,6 +444,10 @@ Java_soko_ekibun_ffmpeg_AvCodec_receiveFramesNative(JNIEnv* env, jobject thiz,
   auto* output = videoOutputOfCodec(ctx);
   bool drained = false;
   while (true) {
+    // 窗口满就停手：剩下的帧留在解码器里，等 Java 把帧还回来再收。
+    //
+    // 这是整条链上唯一把压力递回解码器的地方，见 playback-invariants.md §2.10
+    if (videoOutputFrameRoom(ctx) <= 0) break;
     auto frame = av_frame_alloc();
     if (!frame) break;
     const int r = avcodec_receive_frame(ctx, frame);
@@ -453,11 +457,8 @@ Java_soko_ekibun_ffmpeg_AvCodec_receiveFramesNative(JNIEnv* env, jobject thiz,
       drained = r == AVERROR_EOF;
       break;
     }
-    // 有输出端时硬件帧原样带上去（D3D11 纹理 / MediaCodec buffer）。
-    //
-    // surface 留在解码器池上，上层不还。
-    //
-    // 池子取空后 send_packet 给 EAGAIN —— 背压来自 ffmpeg 自己的池。
+    // 有输出端时硬件帧原样带上去（D3D11 纹理 / MediaCodec buffer）：
+    // surface 要等 Java 归还帧才回池，所以在这里记一笔。
     //
     // 没有输出端（只解不显示、软解回落）仍转成内存，否则那类调用方会把池子囤死。
     const AVPixFmtDescriptor* desc =
@@ -466,6 +467,7 @@ Java_soko_ekibun_ffmpeg_AvCodec_receiveFramesNative(JNIEnv* env, jobject thiz,
         desc != nullptr && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL);
     if (hwFrame &&
         (frame->format == AV_PIX_FMT_MEDIACODEC || output != nullptr)) {
+      videoOutputHoldFrame(ctx, frame);
       out.push_back(frame);
       continue;
     }
@@ -479,11 +481,20 @@ Java_soko_ekibun_ffmpeg_AvCodec_receiveFramesNative(JNIEnv* env, jobject thiz,
 
   auto arr = newAvFrameArray(env, (jint)out.size());
   if (!arr) {
-    for (auto frame : out) av_frame_free(&frame);
+    for (auto frame : out) {
+      videoOutputReleaseFrame(frame);
+      av_frame_free(&frame);
+    }
     return nullptr;
   }
   for (size_t i = 0; i < out.size(); ++i) {
     jobject frameObj = newAvFrame(env, out[i], pstream);
+    if (!frameObj) {
+      // 建不出 Java 对象只可能是 OOM：还回 native，占的额度也退掉。
+      videoOutputReleaseFrame(out[i]);
+      av_frame_free(&out[i]);
+      continue;
+    }
     env->SetObjectArrayElement(arr, (jsize)i, frameObj);
     env->DeleteLocalRef(frameObj);
   }
@@ -503,6 +514,9 @@ extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_ffmpeg_AvCodec_closeNative(
 
 extern "C" JNIEXPORT void JNICALL Java_soko_ekibun_ffmpeg_AvFrame_closeNative(
     JNIEnv* env, jobject thiz, jlong ptr) {
+  auto frame = (AVFrame*)ptr;
+  // 硬解帧回到 native：surface 随 av_frame_free 回池，账同步减回来。
+  videoOutputReleaseFrame(frame);
   av_frame_free((AVFrame**)&ptr);
 }
 

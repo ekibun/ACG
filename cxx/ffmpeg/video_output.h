@@ -39,5 +39,19 @@ AVCodecContext* videoOpenHardwareDecoder(JNIEnv* env, AVStream* stream,
 // 帧由调用方持有（收帧时没有 unref），这里只读；返回 true 表示像素已经进了环。
 bool videoOutputShowFrame(VideoOutput* output, AVFrame* frame);
 
+// 在途的硬解帧：解码器已经交出去、Java 还没还回来的张数。上限是 `ctx->extra_hw_frames`
+// —— 池 = 解码器自身所需 + extra（avcodec.h 的原文是 extra 只加在内部需要之上），压在
+// extra 以内时解码器那一份一分没动，送包永远拿得到 surface。
+//
+// 窗口满时收帧返空数组、帧留在解码器里，送包随即撞输入单槽 EAGAIN，压力回到解复用。
+// 没有输出端（Android、软解回落）时不受限：room 恒为 INT_MAX，hold / release 空转。
+//
+// 计数挂在 `ctx->opaque` 指向的输出端上；`Hold` 顺手把解码器挂到 `frame->opaque`，
+// `Release` 从那取回来减账。契约是「帧先于解码器归还」（`FFPlayer.closeAsync` 在 pause
+// 之后先关帧、再关 codec），否则 Release 摸的是已经释放的上下文。
+int videoOutputFrameRoom(AVCodecContext* ctx);
+void videoOutputHoldFrame(AVCodecContext* ctx, AVFrame* frame);
+void videoOutputReleaseFrame(AVFrame* frame);
+
 // 释放挂在解码器上的输出端资源，必须在 avcodec_free_context 之前调。
 void videoReleaseCodecOutput(AVCodecContext* ctx);

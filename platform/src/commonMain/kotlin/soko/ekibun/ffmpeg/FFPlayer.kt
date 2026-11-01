@@ -396,6 +396,7 @@ class FFPlayer(
                 lastJob?.join()
                 // 循环直到投递成功
                 while (isPacketValid()) {
+                  if (!isPlaying() && packet == null) break
                   val (accepted, decoded) = codec.sendPacketAndGetFrames(packet)
                   if (!isPacketValid() || decoded == null) {
                     decoded?.forEach { it.close() }

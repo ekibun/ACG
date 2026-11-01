@@ -5,6 +5,7 @@
 // 调用方（ffmpeg.cpp）只认 video_output.h。
 #include "video_output.h"
 
+#include <climits>
 #include <cstdio>
 
 extern "C" {
@@ -28,6 +29,14 @@ VideoOutput* videoOutputOfCodec(AVCodecContext*) {
 // 直出帧自带 buffer、上屏是 release_buffer（在 presentVideoFrame
 // 里），这里无事可做。
 bool videoOutputShowFrame(VideoOutput*, AVFrame*) { return false; }
+
+// Android 的帧占的是 codec 的输出 buffer（`hw_buffer_count`），没有静态池；
+// 取空时 receive_frame 给 EAGAIN 而不是塞满后的 ENOMEM，没有窗口要数。
+int videoOutputFrameRoom(AVCodecContext*) { return INT_MAX; }
+
+void videoOutputHoldFrame(AVCodecContext*, AVFrame*) {}
+
+void videoOutputReleaseFrame(AVFrame*) {}
 
 AVCodecContext* videoOpenHardwareDecoder(JNIEnv*, AVStream* stream,
                                          const AVCodec* software,

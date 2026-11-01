@@ -341,11 +341,11 @@ native 侧每个 `AVIOContext` 分配一次读数组并反复用，`AvIO.read(bu
 
 ⇒ **送包的 `<0` 是终态，没有可重试的余地**：失败那次 `av_packet_unref` 已经把包从解码器里丢掉
 （`decode.c:501`），解码器跳过这一帧，参考链断到下一个 IDR——重送同一个包只会再失败一次（surface
-仍然没有），「当收下继续」就是静默花屏十秒。所以它只有一种处理：结束这一轮，让上层重启。正因如此，
-窗口必须在**送之前**判，事后兜不住。
+仍然没有），「当收下继续」就是静默花屏十秒。所以它只有一种处理：结束这一轮，让上层重启。收帧端
+的计数（见下条）把这条路堵掉之后，它只剩兜底意义。
 
 ⇒ 收帧侧的 `r < 0` 现在一律折叠成「现在没有帧」（只有 `AVERROR_EOF` 算吐干净）：`ENOMEM` 走到这里
-会被吞掉，那一帧静默消失。要么同样按轮次失败上报，要么由上面的计数保证它不会发生。
+会被吞掉，那一帧静默消失。收帧端的计数就是让 `ENOMEM` 不发生的那一层；真见到它，就是计数算错了。
 
 ⇒ **桌面硬解池是静态的，它不提供背压**：装不下时 `d3d11va_pool_alloc` 打
 `Static surface pool size exceeded` 并返回 NULL（`libavutil/hwcontext_d3d11va.c:263`），
@@ -362,8 +362,11 @@ native 侧每个 `AVIOContext` 分配一次读数组并反复用，`AvIO.read(bu
 `buffer_frame` 空着时才顺带解一帧（`decode.c:740`），不收帧就停在输入单槽上，全程只占 1 张 surface。
 要撞池子必须「收帧并压住」——别把「没看到池子日志」当成「有背压」。
 
-⇒ **压住几帧目前没有结构性上界**：读包闸门按最空的流判，收帧又一次性取完，池子挤爆就是丢帧。
-窗口化改造（一次一包 + 逐帧回调，或按 `extra_hw_frames` 在收帧端计数）见 `TODO.md` E9。
+⇒ **「压住几帧没有上界」这条已经补上**：收帧端按 `extra_hw_frames` 守在途张数
+（`video_output.h` 的 `videoOutputFrameRoom` / `videoOutputHoldFrame` /
+`videoOutputReleaseFrame`；计数挂在 `ctx->opaque` 指向的输出端上，帧靠 `frame->opaque` 记住
+自己属于哪个解码器），到上限就不再收 ⇒ 池里给解码器那一份一分没动，`send_packet` 的 ENOMEM
+不可达，送包端也就不需要闸门。
 
 ⇒ 片尾没有单独的 `drain`：冲刷就是 `sendPacketAndGetFrames(null)`（送空包 + 收一轮，同一次加锁），
 返回 `null` 就是吐干净了，见 §1.8。

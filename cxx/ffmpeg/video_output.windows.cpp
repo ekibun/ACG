@@ -24,6 +24,8 @@ extern "C" {
 #include <jni.h>
 #include <windows.h>
 
+#include <atomic>
+#include <climits>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -145,6 +147,8 @@ struct VideoOutput {
   uint64_t serial = 0;
   /** 选为显示帧的次数，画布据此判断要不要重画。 */
   uint64_t shown = 0;
+  /** 交出去、还没还回来的硬解帧张数：收帧端按它算窗口还剩几格。 */
+  std::atomic<int> outstanding{0};
   /** blit 提交完成的通知物：等 GPU 写完这一格再去画。 */
   ID3D11Query* blitDone = nullptr;
 };
@@ -483,7 +487,7 @@ static AVCodecContext* openSharedDeviceCodec(AVStream* stream,
       //
       // 池是静态的：装不下时 ffmpeg 报 Static surface pool size exceeded
       // 并丢帧，不是 EAGAIN。
-      ctx->extra_hw_frames = 12;
+      ctx->extra_hw_frames = 3;
       if (avcodec_open2(ctx, decoder, nullptr) >= 0) return ctx;
       avcodec_free_context(&ctx);
       return nullptr;
@@ -511,6 +515,33 @@ VideoOutput* videoOutputFrom(JNIEnv* env, jobject handle) {
 
 VideoOutput* videoOutputOfCodec(AVCodecContext* ctx) {
   return (VideoOutput*)ctx->opaque;
+}
+
+int videoOutputFrameRoom(AVCodecContext* ctx) {
+  VideoOutput* sink = videoOutputOfCodec(ctx);
+  if (sink == nullptr || ctx->extra_hw_frames <= 0) return INT_MAX;
+  std::lock_guard<std::mutex> guard(sink->lock);
+  const int left = ctx->extra_hw_frames - sink->outstanding.load();
+  return left > 0 ? left : 0;
+}
+
+void videoOutputHoldFrame(AVCodecContext* ctx, AVFrame* frame) {
+  VideoOutput* sink = videoOutputOfCodec(ctx);
+  if (sink == nullptr || frame == nullptr) return;
+  // 帧引解码器本体：release 时靠它找回这块输出端。
+  frame->opaque = ctx;
+  std::lock_guard<std::mutex> guard(sink->lock);
+  sink->outstanding.fetch_add(1);
+}
+
+void videoOutputReleaseFrame(AVFrame* frame) {
+  if (frame == nullptr || frame->opaque == nullptr) return;
+  auto* ctx = (AVCodecContext*)frame->opaque;
+  frame->opaque = nullptr;
+  VideoOutput* sink = videoOutputOfCodec(ctx);
+  if (sink == nullptr) return;
+  std::lock_guard<std::mutex> guard(sink->lock);
+  if (sink->outstanding.load() > 0) sink->outstanding.fetch_sub(1);
 }
 
 AVCodecContext* videoOpenHardwareDecoder(JNIEnv* env, AVStream* stream,

@@ -56,16 +56,18 @@ Android MediaCodec 的 ByteBuffer 路线，落点在 `cxx/ffmpeg/ffmpeg.cpp` 的
 ⚠️ serial 判据（`mediacodec.c:92`）：flush / seek 之后旧 serial 的 buffer 释放变成 no-op ——
 不崩溃、不泄漏，但槽位要等 codec 重建才回。
 
-### 1.4 现有的背压已经够用
+### 1.4 背压来自收帧端的窗口，不来自池子
 
-`FFPlayer.kt` 的闸门是 `sendingPacket > 3 || min(queue) > 3` 就停读 ⇒ 预读深度 ≤ 3~4 帧，
-与池子同一量级。**不需要新增限速器**。
+桌面零拷贝下 `AVFrame` 带着解码器的 surface 一路到送显，所以收帧端按 `extra_hw_frames` 记
+「交出去、还没还回来」的张数（`video_output.h` 的 `videoOutputFrameRoom` /
+`videoOutputHoldFrame` / `videoOutputReleaseFrame`）：到上限就不再收，帧留在解码器里 ⇒
+`buffer_frame` 非空 ⇒ 下一次 `send_packet` 只塞输入单槽、不解码 ⇒ 再下一次 EAGAIN ⇒ 上层重试、
+读包停下。池里给解码器的那一份因此一分没动，`send_packet` 的 ENOMEM 不可达，**送包端不需要闸门**。
 
-⚠️ `ffmpeg.cpp` 的 `kMaxSendRetry = 16` 建立在「帧不会长期卡在解码器外面」的前提上。
-只在 **surface 路线**下会被推翻：帧已经交给 Java、却仍占着池子，`receive_frame` 收不出新帧、
-`send_packet` 也进不去，于是 16 次空转后丢包并打一条错误日志 —— 那是误判。
-本实现走 §2.2 的 ByteBuffer 路线，出帧时当场 `releaseOutputBuffer`，帧不占池子，
-所以这个上限原样保留；换成 ImageReader / surface 回读时才需要让 EAGAIN 原样上浮。
+⚠️ 窗口满 + 解码器输出槽还压着一帧时，两个入口都不会自己前进：播放轮靠 playJobs 当场消费帧
+自己解开，步进轮会先停消费。所以解码作业**不能**因为轮次结束就丢掉已经读出来的包 ——
+`stepForward` 不 seek，靠的正是「解复用器停在上一帧之后」，丢一个包下一次步进就跳帧
+（`FFPlayerSeekFrameSequenceTest` 会红）。现在只允许在片尾冲刷（`packet == null`）时提前退出。
 
 ---
 
@@ -259,12 +261,14 @@ D3D11 解码纹理 ──VideoProcessorBlt──▶ RGBA 共享纹理(NT 句柄)
   ```
 
   `extra_hw_frames` 是**纯增量，只覆盖「上层同时压住的帧数」**，不覆盖参考帧与工作帧；上层即取即
-  `unref` 时可以取 0，照样跑。现值 `ctx->extra_hw_frames = 12` 就等于「上层可压 12 帧」，没有额外
-  余量；早先记的「实测 8 不够」，是当时上层压住的帧数超过了 8。
+  `unref` 时可以取 0，照样跑。现值 `ctx->extra_hw_frames = 3` 就等于「上层最多压 3 帧」，没有额外
+  余量——收帧端按它停手（见 `playback-invariants.md` §2.10）。
   装不下时 `d3d11va_pool_alloc` 打 `Static surface pool size exceeded` 并返回 NULL
   （`libavutil/hwcontext_d3d11va.c:263`），一路变成 `avcodec_send_packet` 的 **ENOMEM，不是
   EAGAIN**；判据与「只发不收先撞哪个」的实测见 `playback-invariants.md` §2.10。
-  压住几帧没有结构性上界这件事，见 `TODO.md` E9。
+  取 3 的实测（2026-11-02，`bbb-640x360-12s`）：整片播到底 300 帧一帧不丢，wall 12.08 s，
+  没有读超时、没有池溢出；音视频同播同样跑满 11.79 s。更小会撞上「一次 receive 交几帧」的粒度，
+  更大只是多占 surface。
 - **`DirectContext` 每次绘制现读**：Skiko 会重建 redrawer（后端回退、显示切换），旧上下文画出的
   图像不能再用，包装与快照都要丢弃重来。
 - **`notifyContentWillChange(DISCARD)` 不能省**：内容由 D3D11 写入，Skia 否则复用上一张快照，
