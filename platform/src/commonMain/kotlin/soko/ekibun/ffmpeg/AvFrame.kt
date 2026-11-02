@@ -9,9 +9,6 @@ class AvFrame(
   val width: Int,
   val height: Int,
 ) : Pointer(nativePtr) {
-  /** 该帧正被某个播放轮次消费；不为 null 就别碰。 */
-  var processing: FFPlayer.PTS? = null
-
   companion object {
     init {
       loadLibrary("ffmpeg")

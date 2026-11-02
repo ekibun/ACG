@@ -75,6 +75,43 @@ class FFPlayerStepTest {
   }
 
   /**
+   * 有音频流时退帧同样要退得动。退帧轮把目标帧定在 `resyncTo`，音频帧比画面先越过它 ——
+   * 那是音频时间轴在推进，不是「seek 落到了后面」，不能据此收掉整轮。
+   */
+  @Test(timeout = 120_000)
+  fun stepBackSucceedsWithAudioStreamPlaying() {
+    val media = TestMedia.path(TestMedia.BBB_640X360_12S_FASTSTART)
+    val frames: MutableList<Long?> = Collections.synchronizedList(ArrayList<Long?>())
+    runBlocking {
+      // 音频帧报自己的时间戳、并按实时节奏放：画面才会走到片中，而不是停在第一帧
+      val player =
+        FFPlayer(media.toString(), IOHandler(), TestSurface(paceAudio = true, reportAudioTs = true)) {
+          if (it is FFPlayer.Event.Frame) frames.add(it.pts)
+        }
+      try {
+        val streams = player.getStreams().associateBy { it.codecType }
+        assertTrue(
+          streams.containsKey(AVMediaType.AUDIO),
+          "用例前提：素材要带音频流，实际 ${streams.keys}",
+        )
+        val playJob = launch { player.play(streams, 0) }
+        withTimeout(20_000) { while ((frames.lastOrNull() ?: 0) < 6_000_000) delay(10) }
+        player.pause()
+        playJob.join()
+        val shown = frames.filterNotNull()
+        assertTrue(shown.last() >= 5_000_000, "用例前提：暂停时要停在片中，实际 ${shown.takeLast(3)}")
+
+        // 连退两次：每次都必须真的退动，而不是被音频帧提前收轮
+        repeat(2) {
+          assertTrue(player.stepBack(), "有音频流时退帧不该失败（第 $it 次）")
+        }
+      } finally {
+        player.closeAsync()
+      }
+    }
+  }
+
+  /**
    * 片尾退一帧：解码器重排缓冲里的尾帧必须能在「是不是前一帧」判定之前进队列（见
    * `playback-invariants` 1.8）。drain 排在读循环之后、而循环以「队列空」为退出条件时，退帧轮里
    * 队列不会空（有一帧正等着判），尾帧永远出不来 —— 判据等满超时后把倒数第三帧当成前一帧，

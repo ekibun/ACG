@@ -1,9 +1,13 @@
 package soko.ekibun.ffmpeg
 
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
@@ -96,6 +100,19 @@ class FFPlayer(
     seekImpl(p, resumeAfter = true)
   }
 
+  /**
+   * 解码作业的归属域：挂在播放器上，不挂在轮次上。
+   *
+   * 轮次收场不能等它 —— 硬解窗口满了要等上层把帧还回来才腾得出位置，而这一轮取帧的作业已经退了，
+   * 这口气只有下一路 seek（关帧 + 停 surface + 换 `pts`）能给。依赖留着的话 `resumeImpl` 不返回，
+   * `round.join()` 跟着卡死，症状是「退帧卡住，直到下一次退帧才把上一轮的日志打完」。
+   */
+  private val decodeScope =
+    CoroutineScope(
+      // 脱出轮次的作业树之后异常不再经由轮次上抛，就地记下来，别掀掉整个进程
+      SupervisorJob() + playerDispatcher + CoroutineExceptionHandler { _, e -> e.printStackTrace() },
+    )
+
   suspend fun pause() =
     withContext(playerDispatcher) {
       pts?.playing = false
@@ -131,19 +148,24 @@ class FFPlayer(
       pts = newPts
       pause()
       if (pts !== newPts) return@withContext false
+      decodeJobs.values.joinAll()
+      if (pts !== newPts) return@withContext false
       // pause() 把 playing 置假了，新轮的意图在这里补回来：seek 期间（慢源可达上百毫秒）另一个
       // seek 靠读它判断「本来在播吗」，留成假就会被判成暂停态，只送一帧就收轮
       newPts.playing = resumeAfter
       // 只关得掉不在飞行中的帧；飞行中的由各自的作业收尾时归还
-      frames.values.forEach { list -> list.filter { it.processing == null }.forEach { it.close() } }
+      frames.values.forEach { list ->
+        list.forEach { it.close() }
+        list.clear()
+      }
       frames.clear()
       // 换了位置，「上一帧」不再是参考：差 2 s 就抬时钟的判据只对连续播放成立
       lastFrameTs = null
       // flush 丢弃解码器内部的参考帧历史，与 drain（取残余尾帧）是两件事
       codecs.forEach {
         it.value.flush()
+        if (pts != newPts) return@withContext false
       }
-      if (pts != newPts) return@withContext false
       surfaceContext?.stop()
       // 即使传了 stream，mp4/mov 也只落关键帧；落点靠下面的丢帧收敛补齐
       if (pts != newPts) return@withContext false
@@ -179,7 +201,7 @@ class FFPlayer(
           if (skipAdBefore) setSkipAd(true)
         }
       } else {
-        playingJob = async(playerDispatcher) { resumeImpl(stepMode = false, resyncTo, backstep) }
+        playingJob = async { resumeImpl(stepMode = false, resyncTo, backstep) }
       }
     }
 
@@ -200,10 +222,18 @@ class FFPlayer(
     withContext(playerDispatcher) {
       val current = lastFrameTs ?: return@withContext false
       // 试着跳1ms；没退动（一帧没送显，或退回原帧）再退 1 s 重试
-      seekImpl(maxOf(current - 1000, 0), resumeAfter = false, resyncTo = current, backstep = true)
+      if (
+        !seekImpl(maxOf(current - 1000, 0), resumeAfter = false, resyncTo = current, backstep = true)
+      ) {
+        return@withContext false
+      }
       if (lastFrameTs == null || lastFrameTs == current) {
         // 1ms不够跳分片，重试一次1s
-        seekImpl(maxOf(current - AV_TIME_BASE, 0), resumeAfter = false, resyncTo = current, backstep = true)
+        if (
+          !seekImpl(maxOf(current - AV_TIME_BASE, 0), resumeAfter = false, resyncTo = current, backstep = true)
+        ) {
+          return@withContext false
+        }
       }
       lastFrameTs != null && lastFrameTs != current
     }
@@ -242,11 +272,10 @@ class FFPlayer(
             // 取第一个没处理的帧
             val frames = frames[stream.index]
             val frame =
-              frames?.firstOrNull { it.processing == null } ?: run {
+              frames?.firstOrNull() ?: run {
                 delay(1.milliseconds)
                 continue
               }
-            frame.processing = pts
             // 没消费就说明轮次在它显示之前停了，那种帧必须还回队列
             var consumed = false
             try {
@@ -256,13 +285,7 @@ class FFPlayer(
                   // 等下一帧
                   while (true) {
                     if (!isPlaying()) break@updateJob
-                    val index = frames.indexOfFirst { it == frame }
-                    if (index < 0) {
-                      // 队列被换位置清掉了，这帧已经没人要
-                      consumed = true
-                      break@updateJob
-                    } else if (index + 1 < frames.size) {
-                      val next = frames[index + 1]
+                    frames.getOrNull(1)?.let { next ->
                       if (next.timeStamp < resyncTo) {
                         // 下一帧不是就丢掉
                         consumed = true
@@ -279,8 +302,8 @@ class FFPlayer(
               }
               // seek到了后面的帧，结束流程。这帧不消费、还回队列：1 s 退避的落点就是这里，
               // 用户接着点播放就是从上屏那帧往下走
-              if (backstep && resyncTo != null && frame.timeStamp > resyncTo) {
-                pts.playing = false
+              if (backstep && resyncTo != null && frame.timeStamp >= resyncTo) {
+                if (codecType == AVMediaType.VIDEO) pts.playing = false
                 break@updateJob
               }
               // sws 转到输出缓冲
@@ -321,11 +344,8 @@ class FFPlayer(
               // 有音频时视频帧不报时间戳（时间轴由音频推），纯视频才由画面报
               if (!ptsFromAudio || codecType == AVMediaType.AUDIO) onEvent(Event.Frame(frame.timeStamp))
             } finally {
-              if (consumed) {
-                frames.remove(frame)
+              if (consumed && frames.remove(frame)) {
                 frame.close()
-              } else {
-                frame.processing = null
               }
             }
           }
@@ -390,7 +410,7 @@ class FFPlayer(
         flushCodecs.forEach { codec ->
           val lastJob = decodeJobs[codec.streamIndex]
           decodeJobs[codec.streamIndex] =
-            launch {
+            decodeScope.launch {
               packet.use { packet ->
                 // 先等codec把上一个作业提交完
                 lastJob?.join()
@@ -433,7 +453,11 @@ class FFPlayer(
 
   suspend fun closeAsync() =
     withContext(playerDispatcher) {
+      pts = null
       pause()
+      decodeJobs.values.joinAll()
+      // 解码作业不在轮次的作业树里，播放器关掉了就顺手收掉这个域，别留下孤儿
+      decodeScope.cancel()
       // 必须排在 [pause] 之后：此刻留在队列里的都是没人要的
       frames.values.forEach { list -> list.forEach { it.close() } }
       frames.clear()
@@ -442,7 +466,7 @@ class FFPlayer(
       super.closeDeferred().join()
       // 各 codec 有自己的归属 dispatcher，要等归还真的落地
       codecs
-        .map { async(playerDispatcher) { it.value.closeDeferred().join() } }
+        .map { async { it.value.closeDeferred().join() } }
         .awaitAll()
       codecs.clear()
     }

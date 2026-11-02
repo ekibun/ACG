@@ -36,6 +36,11 @@ internal class TestSurface(
   private val paceAudio: Boolean = false,
   private val onVideo: ((ByteArray) -> Unit)? = null,
   private val onAudio: ((samples: Int) -> Unit)? = null,
+  /**
+   * 音频帧回报它自己的时间戳（平台侧的真实行为）。默认 `false` 时返回 0，
+   * 播放时钟就停在那儿 —— 只有视频轴被判据用到的用例才需要打开它。
+   */
+  private val reportAudioTs: Boolean = false,
 ) : AvSurfaceContext() {
   override val sampleRate: Int = rate
   override val channels: Int = 2
@@ -68,7 +73,7 @@ internal class TestSurface(
         val samples = buffer.size / (channels * 2)
         onAudio?.invoke(samples)
         if (paceAudio && samples > 0) delay((samples * 1000L / sampleRate).coerceAtLeast(1).milliseconds)
-        0
+        if (reportAudioTs) frame.timeStamp else 0
       }
 
       else -> -1

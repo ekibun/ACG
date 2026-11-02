@@ -89,6 +89,12 @@ if (len == AVERROR_EOF) {
 `max(3/4 帧, 1 s)` 才能跨过分片边界；代价是多解一小段帧（实测每次 170~210 ms，与「从片头解到
 当前位置」同量级，因为落点本来就是片头）。
 
+⇒ 「落点越过了目标」（`frame.timeStamp > resyncTo`）**只能由画面判**。音频帧的格点比画面细
+（48 kHz 下 21.333 ms 一帧，与帧间隔无关），退帧轮里必然有一帧越过 `resyncTo` —— 那是时间轴在
+往前走，不是落点越界。拿它收轮会把整轮连 `pts.playing` 一起掐掉：症状是退帧时断时续地打印
+`backstep failed`，能否退动只取决于画面与音频谁先解到目标（实测真实 HLS 源上失败的那两个
+「now」落在同一条音频格点上，相差正好 6 帧）。
+
 ### 1.5 `AvIO.Handler.open` 不许抛异常
 
 `open` 跑在 native 的 `io_open` 回调里：Kotlin 异常会 pending 在 JNI 上没人接，下一次 JNI 调用直接
@@ -352,6 +358,22 @@ native 侧每个 `AVIOContext` 分配一次读数组并反复用，`AvIO.read(bu
 `avcodec_send_packet` 因此返回 **ENOMEM**，**不是 EAGAIN**（EAGAIN 只来自输入侧那个单槽
 `buffer_pkt`）。所以送包必须按三值处理：`0` 收下 / `1` EAGAIN 重试 / `<0` 失败；把 `<0` 当成
 「收下」，那一次送包就静默丢了，参考链断到下一个 IDR。
+
+### 2.11 解码作业不挂在轮次的作业树上
+
+`resumeImpl` 末尾的 `playJobs.joinAll()` 只等取帧作业。解码作业是 `launch` 出来的**子作业**，而
+kotlinx 的 Job 要「体跑完 **且** 所有子作业完」才转 COMPLETED —— 所以体最后一句都打完了，
+`round.join()` 仍可能不返回（实测日志：`end resume join` 已打，`end round` 要等到下一次 seek 才打）。
+
+卡的是送包重试（2.9 / 2.10）：硬解窗口满 ⇒ `avcodec_send_packet` 一直 EAGAIN，腾位置要靠上层把帧
+还回去，而这一轮取帧的作业已经退了。这口气只有下一路 seek（关帧 + 停 surface + 换 `pts`）能给。
+
+⇒ 解码作业挂在播放器的域上（`decodeScope`），不是轮次的子作业：轮次收场不等它，它自己按
+`isPacketValid()` 走 —— 真换了位置就丢弃并退出，没换位置就把帧留给下一轮。
+
+⇒ **不能改成「轮次收场就停手」**：`stepForward` 每轮都不 seek，推进靠的正是上一轮留下、还没送完的
+包，收场即丢会让连续步进跳帧（`FFPlayerSeekFrameSequenceTest.stepForwardAfterSeekShowsEachOwnFrame`
+当场红）。
 
 ⇒ **池子只是给上层的额度，不含余量**：`池 = 参考帧 + 1 张输出帧 + 3 张工作帧 + extra_hw_frames`
 （`decode.c:1099`、`:1155`），`extra_hw_frames` 正好覆盖「上层同时压住几帧」，取 0 也对（即取即
