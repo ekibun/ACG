@@ -1,6 +1,7 @@
 package soko.ekibun.acg.player
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -106,11 +107,81 @@ class HlsAdSkipTest {
         val elapsed = System.currentTimeMillis() - startedAt
         player.pause()
         job.join()
+        val skipped = events.filterIsInstance<FFPlayer.Event.AdSkipped>()
         assertTrue(
-          events.any { it is FFPlayer.Event.AdSkipped },
+          skipped.isNotEmpty(),
           "10 s → 18 s 之间应当报过一次 AdSkipped，实际 ${events.filter { it !is FFPlayer.Event.Frame }}",
         )
+        // 断点两侧：from 是跳过前最后一帧（回退的落点），to 是接上的第一帧，必须前后有序
+        skipped.forEach {
+          assertTrue(
+            it.from in 11_000_000L..13_000_000L,
+            "from 应当是广告前的位置，实际 ${it.from}",
+          )
+          assertTrue(
+            it.to in 17_000_000L..18_000_000L,
+            "to 应当是广告结束后的位置，实际 ${it.to}",
+          )
+        }
         assertTrue(elapsed < 6_000, "跳过广告不该停顿：10 s → 18 s 用了 ${elapsed}ms")
+      } finally {
+        player.closeAsync()
+      }
+    }
+
+  /**
+   * 回退跳过走 `reverseAd`：seek 之后那一轮本身是带 `backstep` 的步进轮，`skipAdBefore` 才成立、
+   * 跳过才临时关掉，预读因此能把广告边界读过去；随后 `resume()` 从队头接着放。
+   *
+   * 判据三条：从广告首帧开始播（不是预读位置）、不再发 `AdSkipped`（否则提示会反复弹）、
+   * 轮结束已把开关恢复（这一集后面的广告照跳）。
+   */
+  @Test(timeout = 120_000)
+  fun revertingSeekPlaysTheSkippedAd() =
+    runBlocking {
+      val events: MutableList<FFPlayer.Event> = ArrayList()
+
+      fun snapshot(): List<FFPlayer.Event> = synchronized(events) { events.toList() }
+      val player =
+        FFPlayer(TestMedia.path("media/hls-ad/playlist.m3u8").toString(), IOHandler(), TestSurface()) { event ->
+          synchronized(events) { events += event }
+        }
+      try {
+        val streams = player.getStreams().associateBy { it.codecType }
+        val job = launch { player.play(streams, 10_000_000) }
+        // 先让它跳过一次，并播到广告之后
+        withTimeout(30_000) {
+          while (
+            snapshot().filterIsInstance<FFPlayer.Event.AdSkipped>().isEmpty() ||
+            snapshot().filterIsInstance<FFPlayer.Event.Frame>().none { (it.pts ?: 0) >= 13_000_000 }
+          ) {
+            delay(20)
+          }
+        }
+        val from = snapshot().filterIsInstance<FFPlayer.Event.AdSkipped>().first().from
+        val mark = synchronized(events) { events.size }
+
+        player.reverseAd(from)
+        delay(4_000)
+        player.pause()
+        job.join()
+
+        val after = snapshot().drop(mark)
+        val frames = after.filterIsInstance<FFPlayer.Event.Frame>().mapNotNull { it.pts }
+        val inAd = frames.filter { it in from..16_900_000 }
+        assertTrue(inAd.size > 60, "回退之后应当播出广告段的帧，实际 ${inAd.size} 帧，前几帧=${frames.take(8)}")
+        // 从广告首帧起播：不能落在预读停下的地方（那里可能已经在广告中段）
+        val firstAdFrame = inAd.firstOrNull() ?: error("回退之后没有广告段的帧")
+        assertTrue(
+          firstAdFrame - from < 200_000,
+          "回退应当从断点后一帧起播，实际首帧 $firstAdFrame，断点 $from",
+        )
+        assertEquals(
+          0,
+          after.count { it is FFPlayer.Event.AdSkipped },
+          "回退之后不该再判一次广告，实际 ${after.filter { it !is FFPlayer.Event.Frame }}",
+        )
+        assertTrue(player.isSkipAd, "回退不改跳过开关，之后的广告还要继续跳")
       } finally {
         player.closeAsync()
       }

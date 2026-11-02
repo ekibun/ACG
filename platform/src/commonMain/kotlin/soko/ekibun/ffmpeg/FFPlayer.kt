@@ -43,6 +43,7 @@ class FFPlayer(
     /**
      * 解复用器跳过了一段插播广告。[from]/[to] 是声明轴上的位置（微秒），
      * 在画面真正走到 [to] 之后才发出（读包是预读的，读到时发会比画面早好几秒）。
+     * [from] 是断点前的最后一帧，也是「回退这次跳过」该落到的位置。
      */
     data class AdSkipped(
       val from: Long,
@@ -83,13 +84,6 @@ class FFPlayer(
     private const val READ_STALL_MS = 300L
   }
 
-  /** 开一轮独占播放：作废上一轮并等它收干净；本轮身份由 [PTS] 对象标识。 */
-  private suspend fun takeOverPlayback(): Boolean {
-    val before = pts
-    pause()
-    return pts === before
-  }
-
   /** 画面上那一帧的时间戳；还没显示过帧时为 `null`。 */
   private var lastFrameTs: Long? = null
 
@@ -97,7 +91,6 @@ class FFPlayer(
     streams: Map<Int, AvStream>,
     seek: Long? = null,
   ) = withContext(playerDispatcher) {
-    if (!takeOverPlayback()) return@withContext
     val p = seek ?: pts?.now(surfaceContext?.speedRatio ?: 1f) ?: 0
     pts = PTS(streams).also { it.playing = true }
     seekImpl(p, resumeAfter = true)
@@ -112,58 +105,59 @@ class FFPlayer(
 
   private var playingJob: Job? = null
 
-  override suspend fun seekTo(
-    ts: Long,
-    stream: AvStream?,
-    minTs: Long,
-    maxTs: Long,
-    flags: Int,
-  ) = withContext(playerDispatcher) {
-    // 「本来在播吗」必须在 [takeOverPlayback] 之前读：它会把上一轮作废
-    val resumeAfter = pts?.playing == true
-    if (!takeOverPlayback()) return@withContext
-    seekImpl(ts, stream, minTs, maxTs, flags, resumeAfter)
-  }
+  suspend fun seekTo(ts: Long) =
+    withContext(playerDispatcher) {
+      // 「本来在播吗」要在换 PTS 之前读：seekImpl 一进门就换对象、停旧轮
+      seekImpl(ts, resumeAfter = pts?.playing == true)
+    }
 
-  /** [seekTo] 的实现体：轮次闸已经开过，这里只做跳转本身。 */
+  /**
+   * [seekTo] 的实现体：轮次闸已经开过，这里只做跳转本身。
+   *
+   * @return 本轮是否作数。`false` = 中途被另一路 seek 顶掉，调用方不能再对这个位置做后续动作
+   *   （比如 [reverseAd] 的续播）。
+   */
   private suspend fun seekImpl(
     ts: Long,
-    stream: AvStream? = null,
-    minTs: Long = Long.MIN_VALUE,
-    maxTs: Long = Long.MAX_VALUE,
-    flags: Int = 0,
     resumeAfter: Boolean,
     /** 本轮收敛到的目标；`null` = 用 [ts]。 */
     resyncTo: Long? = null,
     /** 退帧轮（mpv 的 `hrseek_backstep`）：停到 `resyncTo` 之前的最后一帧。 */
     backstep: Boolean = false,
-  ) = withContext(playerDispatcher) {
-    val oldPts = pts ?: throw Exception("no pts data")
-    val newPts = PTS(oldPts.streams, ts)
-    pts = newPts
-    // 只关得掉不在飞行中的帧；飞行中的由各自的作业收尾时归还
-    frames.values.forEach { list -> list.filter { it.processing == null }.forEach { it.close() } }
-    frames.clear()
-    // 换了位置，「上一帧」不再是参考：差 2 s 就抬时钟的判据只对连续播放成立
-    lastFrameTs = null
-    // flush 丢弃解码器内部的参考帧历史，与 drain（取残余尾帧）是两件事
-    codecs.forEach {
-      it.value.flush()
+  ): Boolean =
+    withContext(playerDispatcher) {
+      val oldPts = pts ?: throw Exception("no pts data")
+      val newPts = PTS(oldPts.streams, ts)
+      pts = newPts
+      pause()
+      if (pts !== newPts) return@withContext false
+      // pause() 把 playing 置假了，新轮的意图在这里补回来：seek 期间（慢源可达上百毫秒）另一个
+      // seek 靠读它判断「本来在播吗」，留成假就会被判成暂停态，只送一帧就收轮
+      newPts.playing = resumeAfter
+      // 只关得掉不在飞行中的帧；飞行中的由各自的作业收尾时归还
+      frames.values.forEach { list -> list.filter { it.processing == null }.forEach { it.close() } }
+      frames.clear()
+      // 换了位置，「上一帧」不再是参考：差 2 s 就抬时钟的判据只对连续播放成立
+      lastFrameTs = null
+      // flush 丢弃解码器内部的参考帧历史，与 drain（取残余尾帧）是两件事
+      codecs.forEach {
+        it.value.flush()
+      }
+      if (pts != newPts) return@withContext false
+      surfaceContext?.stop()
+      // 即使传了 stream，mp4/mov 也只落关键帧；落点靠下面的丢帧收敛补齐
+      if (pts != newPts) return@withContext false
+      super.seekTo(ts, null, Long.MIN_VALUE, Long.MAX_VALUE, 0)
+      if (pts != newPts) return@withContext false
+      when {
+        // 视频轨在：步进轮靠「下一帧画面」停住，续播轮带 resyncTo 做丢帧收敛
+        newPts.streams.containsKey(AVMediaType.VIDEO) ->
+          resume(stepMode = !resumeAfter, resyncTo = resyncTo ?: ts, backstep = backstep)
+        // 纯音频没有「下一帧画面」，stepMode 会一路解到 EOF
+        resumeAfter -> resume(resyncTo = resyncTo ?: ts, backstep = backstep)
+      }
+      true
     }
-    if (pts != newPts) return@withContext
-    surfaceContext?.stop()
-    // 即使传了 stream，mp4/mov 也只落关键帧；落点靠下面的丢帧收敛补齐
-    if (pts != newPts) return@withContext
-    super.seekTo(ts, stream, minTs, maxTs, flags)
-    if (pts != newPts) return@withContext
-    when {
-      // 视频轨在：步进轮靠「下一帧画面」停住，续播轮带 resyncTo 做丢帧收敛
-      newPts.streams.containsKey(AVMediaType.VIDEO) ->
-        resume(stepMode = !resumeAfter, resyncTo = resyncTo ?: ts, backstep = backstep)
-      // 纯音频没有「下一帧画面」，stepMode 会一路解到 EOF
-      resumeAfter -> resume(resyncTo = resyncTo ?: ts, backstep = backstep)
-    }
-  }
 
   /** 从当前位置起本轮播放作业；[stepMode] 时送到第一帧就收轮。 */
   suspend fun resume(
@@ -195,7 +189,6 @@ class FFPlayer(
       val p = pts ?: return@withContext
       // 纯音频没有「下一帧画面」，放进去会一路解到 EOF
       if (!p.streams.containsKey(AVMediaType.VIDEO)) return@withContext
-      if (!takeOverPlayback()) return@withContext
       resume(stepMode = true)
     }
 
@@ -206,7 +199,6 @@ class FFPlayer(
   suspend fun stepBack(): Boolean =
     withContext(playerDispatcher) {
       val current = lastFrameTs ?: return@withContext false
-      if (!takeOverPlayback()) return@withContext false
       // 试着跳1ms；没退动（一帧没送显，或退回原帧）再退 1 s 重试
       seekImpl(maxOf(current - 1000, 0), resumeAfter = false, resyncTo = current, backstep = true)
       if (lastFrameTs == null || lastFrameTs == current) {
@@ -216,8 +208,16 @@ class FFPlayer(
       lastFrameTs != null && lastFrameTs != current
     }
 
+  suspend fun reverseAd(from: Long) =
+    withContext(playerDispatcher) {
+      // 输了竞态就别续播：`resume()` 不顶轮，它会把另一路 seek 刚建好的 PTS 直接放起来
+      if (!seekImpl(from, resumeAfter = false, backstep = true)) return@withContext
+      resume()
+    }
+
   private val codecs = HashMap<Int, AvCodec>()
   private val frames = HashMap<Int, ArrayList<AvFrame>>()
+  private val decodeJobs = HashMap<Int, Job>()
 
   /** 跑一轮播放；[stepMode] 时送到第一帧就收轮。 */
   private suspend fun resumeImpl(
@@ -235,7 +235,6 @@ class FFPlayer(
     val isPlaying = { isActive && pts == this@FFPlayer.pts && pts.playing }
     // 判断AvPacket是否继续传入解码器
     val isPacketValid = { pts == this@FFPlayer.pts }
-    val decodeJobs = HashMap<Int, Job>()
     val playJobs =
       pts.streams.map { (codecType, stream) ->
         launch {
@@ -296,7 +295,8 @@ class FFPlayer(
                 // 差超过[AD_GAP_US]就resync
                 val lastTs = lastFrameTs
                 if (lastTs != null && frame.timeStamp - lastTs > AD_GAP_US) {
-                  onEvent(Event.AdSkipped(frame.timeStamp, lastTs))
+                  // 按声明轴先后给：from 是断点前最后一帧，也就是「回退跳过」的落点
+                  onEvent(Event.AdSkipped(from = lastTs, to = frame.timeStamp))
                   pts.update(frame.timeStamp)
                 } else {
                   while (frame.timeStamp > pts.now(surfaceContext?.speedRatio ?: 1f)) {
@@ -347,7 +347,7 @@ class FFPlayer(
         val packet =
           try {
             withTimeout(READ_STALL_MS.milliseconds) { getPacket(pts.streams.values) }
-          } catch (e: TimeoutCancellationException) {
+          } catch (_: TimeoutCancellationException) {
             // [READ_STALL_MS] 没有读到包：卡住。continue 让循环回到 isPlaying()，pause 靠它退出
             if (!isReadTimeout) {
               isReadTimeout = true
@@ -413,13 +413,15 @@ class FFPlayer(
             }
         }
         // EOF跳出循环
-        if (packet == null) break
-      }
-      // 等解码结束
-      decodeJobs.values.joinAll()
-      // 等frame消费完
-      while (frames.values.sumOf { it.size } > 0 && isPlaying()) {
-        delay(1.milliseconds)
+        if (packet == null) {
+          // 等取帧结束
+          decodeJobs.values.joinAll()
+          // 等frame消费完
+          while (frames.values.sumOf { it.size } > 0 && isPlaying()) {
+            delay(1.milliseconds)
+          }
+          break
+        }
       }
     } finally {
       isActive = false

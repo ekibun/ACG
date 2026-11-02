@@ -121,7 +121,7 @@ open class AvFormat(
     }
 
   /** 容器级 seek；`stream` 为 null 时单位是 `AV_TIME_BASE` 微秒，否则用该流的 `time_base`。 */
-  open suspend fun seekTo(
+  suspend fun seekTo(
     ts: Long,
     stream: AvStream? = null,
     minTs: Long = Long.MIN_VALUE,
