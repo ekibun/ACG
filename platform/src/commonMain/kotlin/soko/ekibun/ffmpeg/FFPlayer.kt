@@ -74,6 +74,11 @@ class FFPlayer(
 
   private var pts: PTS? = null
 
+  init {
+    // 视图可能比页面先拆，输出端要能反过来停住这一侧
+    surfaceContext?.attachPlayer(this)
+  }
+
   companion object {
     /** 播放侧的归属线程：播放入口只在它上面调。全进程共用，从不关闭。 */
     private val playerDispatcher by lazy { ThreadDispatcher("ffplayer") }
@@ -445,6 +450,8 @@ class FFPlayer(
 
   suspend fun closeAsync() =
     withContext(playerDispatcher) {
+      // 输出端与页面各会关一次；第二次 native 句柄已还，整段跳过，别再碰已拆的输出端
+      if (isClosed) return@withContext
       pts = null
       pause()
       decodeJobs.values.joinAll()
@@ -461,5 +468,7 @@ class FFPlayer(
         .map { async { it.value.closeDeferred().join() } }
         .awaitAll()
       codecs.clear()
+      // 输出端不该再持有已关掉的播放器
+      surfaceContext?.detachPlayer(this@FFPlayer)
     }
 }

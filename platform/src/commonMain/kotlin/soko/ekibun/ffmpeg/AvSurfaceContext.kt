@@ -1,5 +1,6 @@
 package soko.ekibun.ffmpeg
 
+import kotlinx.coroutines.runBlocking
 import soko.ekibun.Pointer
 import soko.ekibun.loadLibrary
 
@@ -141,6 +142,32 @@ abstract class AvSurfaceContext : Pointer() {
   abstract suspend fun pause()
 
   abstract suspend fun stop()
+
+  /** 正在用这个输出端的播放器：它还在解码时，这个输出端一块资源都不能放。 */
+  @Volatile
+  private var player: FFPlayer? = null
+
+  internal fun attachPlayer(player: FFPlayer) {
+    this.player = player
+  }
+
+  /** 已经被下一个播放器顶替就不动。 */
+  internal fun detachPlayer(player: FFPlayer) {
+    if (this.player === player) this.player = null
+  }
+
+  /**
+   * 先停用它的播放器再拆：子类 `close()` 后半段放的是解码线程正在写的平台资源，而 `super.close()`
+   * 先于它们执行。视图比页面先 Dispose，调用方排不出这个顺序（`playback-invariants.md` §2.8）。
+   *
+   * 只能在 UI 侧的拆除路径上调；在播放器自己的线程上关它会等死。
+   */
+  override fun close() {
+    val active = player
+    player = null
+    if (active != null) runBlocking { active.closeAsync() }
+    super.close()
+  }
 
   /** 释放 native 上下文；「只释放一次」由 [Pointer.markClosed] 保证，子类在 `super.close()` 之后再关自己的资源。 */
   override suspend fun releaseImpl(ptr: Long) = closeNative(ptr)
