@@ -169,7 +169,13 @@ class FFPlayer(
       surfaceContext?.stop()
       // 即使传了 stream，mp4/mov 也只落关键帧；落点靠下面的丢帧收敛补齐
       if (pts != newPts) return@withContext false
-      super.seekTo(ts, null, Long.MIN_VALUE, Long.MAX_VALUE, 0)
+      val skipAdBefore = isSkipAd && backstep
+      if (skipAdBefore) setSkipAd(false)
+      try {
+        super.seekTo(ts, null, Long.MIN_VALUE, Long.MAX_VALUE, 0)
+      } finally {
+        if (skipAdBefore) setSkipAd(true)
+      }
       if (pts != newPts) return@withContext false
       when {
         // 视频轨在：步进轮靠「下一帧画面」停住，续播轮带 resyncTo 做丢帧收敛
@@ -188,21 +194,7 @@ class FFPlayer(
     backstep: Boolean = false,
   ): Unit =
     withContext(playerDispatcher) {
-      if (stepMode) {
-        // 退帧轮不跳插播广告：要找的那一帧本身可能就在广告段里，跳过会把它从帧流里删掉。
-        // 恢复放在这一轮真的结束之后 —— 读循环还在收尾时开回去会漏跳。
-        val skipAdBefore = isSkipAd && backstep
-        if (skipAdBefore) setSkipAd(false)
-        try {
-          val round = async(playerDispatcher) { resumeImpl(stepMode = true, resyncTo, backstep) }
-          playingJob = round
-          round.join()
-        } finally {
-          if (skipAdBefore) setSkipAd(true)
-        }
-      } else {
-        playingJob = async { resumeImpl(stepMode = false, resyncTo, backstep) }
-      }
+      playingJob = async { resumeImpl(stepMode, resyncTo, backstep) }
     }
 
   /** 前进一帧并停住（[resume] 的 `stepMode`）；并发调用同样是顶掉而非排队。 */
@@ -223,7 +215,7 @@ class FFPlayer(
       val current = lastFrameTs ?: return@withContext false
       // 试着跳1ms；没退动（一帧没送显，或退回原帧）再退 1 s 重试
       if (
-        !seekImpl(maxOf(current - 1000, 0), resumeAfter = false, resyncTo = current, backstep = true)
+        !seekImpl(maxOf(current - AV_TIME_BASE / 1000, 0), resumeAfter = false, resyncTo = current, backstep = true)
       ) {
         return@withContext false
       }
@@ -241,7 +233,7 @@ class FFPlayer(
   suspend fun reverseAd(from: Long) =
     withContext(playerDispatcher) {
       // 输了竞态就别续播：`resume()` 不顶轮，它会把另一路 seek 刚建好的 PTS 直接放起来
-      if (!seekImpl(from, resumeAfter = false, backstep = true)) return@withContext
+      if (!seekImpl(from + AV_TIME_BASE / 10, resumeAfter = false, backstep = true)) return@withContext
       resume()
     }
 
