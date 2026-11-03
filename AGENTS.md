@@ -73,7 +73,7 @@ trigger: always_on
 
 - **DO：文档与注释用中文，报错与调试输出用英文，界面文案用中文。** 判据是**谁读它**：开发者读的（异常 message、`check`/`error` 提示、日志、断言消息）用英文保证 ASCII；用户读的（`@Composable` 里的 `Text`、`label`、给用户看的 HTML 页）是本地化内容，保持中文。标识符、路径、任务名、命令保持英文原样，不要翻译或改写。
 
-- **DO：提交信息写 `模块: 动词 + 对象`。** 换行说明**为什么**（不是怎么做）。模块用真实路径前缀（`cxx/ffmpeg`、`platform`、`shared/player`、`androidApp`），不用 `feat` / `fix` 式前缀。修 bug、某个用途、或光看代码说不清的上下文必须写明；第二段只在真有价值时加，别机械地每条都附。好：`shared/player: 移除无用的 action kind 包装`；坏：`refactor(pi): 清理`（类型前缀 + 罗列）、`cxx/ffmpeg: 归档旧文档` + 「旧文档不再使用」（只是复述主题）。
+- **DO：提交信息写 `模块: 动词 + 对象`。** 换行说明**为什么**（不是怎么做）。模块用真实路径前缀，写到能定位子系统的深度（`cxx/ffmpeg`、`platform/ffmpeg`、`shared/ui`、`androidApp`），不用 `feat` / `fix` 式类型前缀，也不要只写到模块层的 `platform` / `shared`。修 bug、某个用途、或光看代码说不清的上下文必须写明；第二段只在真有价值时加，别机械地每条都附。好：`platform/ffmpeg: 撤回落点挪进广告内`、`shared/ui: 进度条画出卡顿`；坏：`refactor(pi): 清理`（类型前缀 + 罗列）、`platform: 修播放器`（只到模块层，看不出是哪一支）、`cxx/ffmpeg: 归档旧文档` + 「旧文档不再使用」（只是复述主题）。
 
 - **DO：Windows 上按 UTF-8 读写，别在乱码上做判断。** 用 PowerShell `Get-Content` 读文件时传 `-Encoding UTF8 -LiteralPath`；PowerShell 5.1 的重定向（`*>`）写的是 UTF-16，中文会乱码——输出落盘再读，不要将就着读；看到乱码先怀疑 shell 解码与编码，而不是文件损坏。
 
