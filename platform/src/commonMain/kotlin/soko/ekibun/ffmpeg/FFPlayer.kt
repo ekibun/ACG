@@ -47,7 +47,7 @@ class FFPlayer(
     /**
      * 解复用器跳过了一段插播广告。[from]/[to] 是声明轴上的位置（微秒），
      * 在画面真正走到 [to] 之后才发出（读包是预读的，读到时发会比画面早好几秒）。
-     * [from] 是断点前的最后一帧，也是「回退这次跳过」该落到的位置。
+     * [from] 是断点前的最后一帧（回退落点），[to] 是断点后的第一帧（撤销落点）。
      */
     data class AdSkipped(
       val from: Long,
@@ -235,6 +235,12 @@ class FFPlayer(
       lastFrameTs != null && lastFrameTs != current
     }
 
+  /**
+   * 回退这次广告跳过：seek 到 [from] 之后 100 ms 再接着播。
+   *
+   * 100 ms 只为把 seek 目标挪开断点（压在 [from] 上会重走边界、判定再跳一次），不是起播位置：
+   * 续播那轮不带 `resyncTo`，没有丢帧收敛，实际从广告分片开头起。撤销是另一头的 `seekTo(to)`。
+   */
   suspend fun reverseAd(from: Long) =
     withContext(playerDispatcher) {
       // 输了竞态就别续播：`resume()` 不顶轮，它会把另一路 seek 刚建好的 PTS 直接放起来

@@ -20,6 +20,7 @@ import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,8 +58,8 @@ fun PlayScreen() {
   val playing = remember { mutableStateOf(false) }
   // 读包卡住：进度条下方扫一道浅色光
   val stalled = remember { mutableStateOf(false) }
-  // 刚跳过的广告断点（声明轴微秒）；非 null 时左下角挂着回退提示
-  val skippedAdFrom = remember { mutableStateOf<Long?>(null) }
+  // 刚跳过的广告断点（声明轴微秒）；非 null 时左下角挂着回退 / 撤销提示
+  val adNotice = remember { mutableStateOf<AdSkipNotice?>(null) }
 
   DisposableEffect(Unit) {
     onDispose {
@@ -68,11 +69,12 @@ fun PlayScreen() {
     }
   }
 
-  // 提示只留 5 s；期间又跳了一段，键一变这个效应就重起、重新计时
-  LaunchedEffect(skippedAdFrom.value) {
-    if (skippedAdFrom.value == null) return@LaunchedEffect
+  // 两态都只挂 5 s；翻态时键一变，效应重起、重新计时
+  LaunchedEffect(adNotice.value) {
+    val pending = adNotice.value ?: return@LaunchedEffect
     delay(AD_SKIP_NOTICE_MS)
-    skippedAdFrom.value = null
+    // 只收自己这一条：到期的续体可能已排在队列里，而翻态那次取消要等重组才落地
+    if (adNotice.value === pending) adNotice.value = null
   }
 
   // 总时长未知（0）时 Slider 的区间退化成 0..0（分数会除零），给它一个空轨道兜底
@@ -91,7 +93,7 @@ fun PlayScreen() {
                 try {
                   player.value?.closeAsync()
                   stalled.value = false
-                  skippedAdFrom.value = null
+                  adNotice.value = null
                   val newPlayer =
                     FFPlayer(
                       url.value,
@@ -108,8 +110,8 @@ fun PlayScreen() {
                           }
                           FFPlayer.Event.ReadTimeout -> stalled.value = true
                           FFPlayer.Event.ReadTimeoutResume -> stalled.value = false
-                          // 断点是声明轴上的一段：from 是跳过前最后一帧的位置
-                          is FFPlayer.Event.AdSkipped -> skippedAdFrom.value = it.from
+                          is FFPlayer.Event.AdSkipped ->
+                            adNotice.value = AdSkipNotice(from = it.from, to = it.to)
                         }
                       },
                     )
@@ -151,13 +153,17 @@ fun PlayScreen() {
             modifier = Modifier.matchParentSize(),
             onSurfaceContext = { surfaceContext.value = it },
           )
-          AdSkippedOverlay(
-            visible = skippedAdFrom.value != null,
-            onRevert = {
-              MainScope().launch {
-                val from = skippedAdFrom.value ?: return@launch
-                skippedAdFrom.value = null
-                player.value?.reverseAd(from)
+          AdSkipNoticeOverlay(
+            notice = adNotice.value,
+            onAction = {
+              val notice = adNotice.value
+              if (notice != null) {
+                // 先翻状态再动播放器：慢源上 seek 要几百毫秒，按钮得立刻换向
+                adNotice.value = notice.copy(reverted = !notice.reverted)
+                MainScope().launch {
+                  val player = player.value ?: return@launch
+                  if (notice.reverted) player.seekTo(notice.to) else player.reverseAd(notice.from)
+                }
               }
             },
             modifier = Modifier.align(Alignment.BottomStart).padding(12.dp),
@@ -231,36 +237,58 @@ fun PlayScreen() {
   }
 }
 
+/** 跳过提示的状态：`已跳过广告 / 回退` ⇄ `已回到广告 / 撤销`，两个位置各对应一个方向的动作。 */
+private data class AdSkipNotice(
+  /** 断点前最后一帧（声明轴微秒）。 */
+  val from: Long,
+  /** 断点后第一帧（声明轴微秒）。 */
+  val to: Long,
+  /** 已经回到广告里，按钮是「撤销」。 */
+  val reverted: Boolean = false,
+)
+
 /**
- * 播放画面左下角的跳过提示：告诉用户这里少了一段，并给出回到跳过前的入口。
+ * 左下角的跳过提示：告诉用户这里少了一段，并给出反方向的入口。
  *
  * 淡入淡出单独封一层：调用点在 `Column` 的 `Box` 里，直接写 `AnimatedVisibility` 会被
  * `ColumnScope` 那个同名扩展抢走（`@LayoutScopeMarker` 下用不了隐式接收者）。
  */
 @Composable
-private fun AdSkippedOverlay(
-  visible: Boolean,
-  onRevert: () -> Unit,
+private fun AdSkipNoticeOverlay(
+  notice: AdSkipNotice?,
+  onAction: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
+  // 退场时 notice 已是 null：靠这份快照留住最后一次的内容，标签就不在淡出时翻回上一种状态
+  val shown = remember { mutableStateOf<AdSkipNotice?>(null) }
+  SideEffect {
+    if (notice != null) shown.value = notice
+  }
   AnimatedVisibility(
-    visible = visible,
+    visible = notice != null,
     modifier = modifier,
     enter = fadeIn() + slideInVertically { it / 2 },
     exit = fadeOut(),
   ) {
-    Surface(
-      shape = RoundedCornerShape(8.dp),
-      color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
-      contentColor = MaterialTheme.colorScheme.onSurface,
-    ) {
-      Row(
-        modifier = Modifier.padding(start = 12.dp, end = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    // 进场时快照还没写进来，用 notice；退场时它已是 null，才靠快照
+    val current = notice ?: shown.value
+    if (current != null) {
+      Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
       ) {
-        Text("已跳过广告", style = MaterialTheme.typography.labelLarge)
-        TextButton(onClick = onRevert) {
-          Text("回退")
+        Row(
+          modifier = Modifier.padding(start = 12.dp, end = 4.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Text(
+            if (current.reverted) "已回到广告" else "已跳过广告",
+            style = MaterialTheme.typography.labelLarge,
+          )
+          TextButton(onClick = onAction) {
+            Text(if (current.reverted) "撤销" else "回退")
+          }
         }
       }
     }

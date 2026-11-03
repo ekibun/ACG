@@ -186,4 +186,74 @@ class HlsAdSkipTest {
         player.closeAsync()
       }
     }
+
+  /**
+   * 撤销是 [FFPlayer.seekTo] 到 `to`，与上一条拼成往返。验三条：落点钉在 `to`（广告帧不再出现）、
+   * 不再报 `AdSkipped`、画面继续往前播。
+   */
+  @Test(timeout = 120_000)
+  fun undoingTheRevertLandsPastTheAd() =
+    runBlocking {
+      val events: MutableList<FFPlayer.Event> = ArrayList()
+
+      fun snapshot(): List<FFPlayer.Event> = synchronized(events) { events.toList() }
+      val player =
+        FFPlayer(TestMedia.path("media/hls-ad/playlist.m3u8").toString(), IOHandler(), TestSurface()) { event ->
+          synchronized(events) { events += event }
+        }
+      try {
+        val streams = player.getStreams().associateBy { it.codecType }
+        val job = launch { player.play(streams, 10_000_000) }
+        // 先跳过一次，提示才拿得到断点两侧的位置
+        withTimeout(30_000) {
+          while (snapshot().filterIsInstance<FFPlayer.Event.AdSkipped>().isEmpty()) delay(20)
+        }
+        val skipped = snapshot().filterIsInstance<FFPlayer.Event.AdSkipped>().first()
+
+        // 两个入口都按 UI 的写法 launch 出去：它们要等自己那一轮结束才返回，等就把窗口关没了
+        val beforeRevert = synchronized(events) { events.size }
+        launch { player.reverseAd(skipped.from) }
+        withTimeout(30_000) {
+          while (
+            snapshot()
+              .drop(beforeRevert)
+              .filterIsInstance<FFPlayer.Event.Frame>()
+              .none { (it.pts ?: 0) in skipped.from..(skipped.to - 1_000_000) }
+          ) {
+            delay(20)
+          }
+        }
+
+        val mark = synchronized(events) { events.size }
+        launch { player.seekTo(skipped.to) }
+        withTimeout(30_000) {
+          while (
+            snapshot()
+              .drop(mark)
+              .filterIsInstance<FFPlayer.Event.Frame>()
+              .none { (it.pts ?: 0) >= skipped.to + 1_000_000 }
+          ) {
+            delay(20)
+          }
+        }
+        player.pause()
+        job.join()
+
+        val after = snapshot().drop(mark)
+        val frames = after.filterIsInstance<FFPlayer.Event.Frame>().mapNotNull { it.pts }
+        val replayed = frames.filter { it < skipped.to - 500_000 }
+        assertTrue(replayed.isEmpty(), "撤销不该把画面丢回广告里，实际 ${replayed.take(8)}")
+        assertEquals(
+          0,
+          after.count { it is FFPlayer.Event.AdSkipped },
+          "撤销之后不该再判一次广告，实际 ${after.filter { it !is FFPlayer.Event.Frame }}",
+        )
+        assertTrue(
+          frames.max() >= skipped.to + 1_000_000,
+          "撤销之后应当接着往前播，最远只到 ${frames.max()}，断点 ${skipped.to}",
+        )
+      } finally {
+        player.closeAsync()
+      }
+    }
 }

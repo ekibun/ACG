@@ -145,14 +145,27 @@
 读包是 100 包预读，读位置比画面领先数秒 —— 读到空档就发事件会让提示比画面早好几秒。
 ⇒ 读到空档只进待发列表，等**第一帧显示到 `to` 之后**才发 `Event.AdSkipped(from, to)`；seek 清空。
 
-### 4.4 回退：整流关掉
+### 4.4 回退与撤销：两条 seek，不做「按区间放行」
 
-```c
-/* hls.sed 第 5 条 */ int acg_hls_set_skip_ad(AVFormatContext *s, int on);
-```
+| 动作 | 落点 | 入口 |
+| --- | --- | --- |
+| 回退这次跳过 | 广告分片开头（seek 目标是 `from + 100 ms`） | `FFPlayer.reverseAd(from)` |
+| 撤销回退 | `to`（广告后第一帧） | `FFPlayer.seekTo(to)` |
 
-回退 = `setSkipAd(false)` → `seekTo(from)`，之后这集所有广告照常播（用户自己的选择）。
-不做「按区间放行」的状态机，也就不存在「放行没覆盖到、按了像没反应」。
+- **回退的 seek 目标必须压在广告内，不能落在 `from` 上。** 落在断点前最后一帧时，续播要把那个
+  边界重走一遍、判定再跳一次，退回的广告根本播不出来（症状是「按了回退，画面还在广告后面」）。
+  那 100 ms 只解决判定，**不是起播位置**：后续那一轮 `resume()` 不带 `resyncTo`，没有丢帧收敛，
+  实际从广告分片开头起播。
+- **撤销不用新接口。** `to` 是断点后第一帧，`seekImpl` 的 `resyncTo` 丢帧收敛把落点钉死在这一帧，
+  不会停在广告里；`seekTo` 本来就按 `pts.playing` 决定续不续播，暂停态撤销也成立。
+- **回退不改跳过开关**，之后这一集的广告照跳（用例 `revertingSeekPlaysTheSkippedAd` 断言
+  `isSkipAd`）。要整集都不跳过是另一件事，得自己 `setSkipAd(false)`（落到 `hls.sed` 第 5 条的
+  `acg_hls_set_skip_ad`）。
+- **提示是个二态开关，不是一次性按钮。** `已跳过广告 / 回退` ⇄ `已回到广告 / 撤销`：按哪个就
+  回到另一态，连点就是在 `from` / `to` 之间来回跳。不做「放行区间」的状态机，也就不存在
+  「放行没覆盖到、按了像没反应」。
+- **两态都只挂 5 s**（`AD_SKIP_NOTICE_MS`），翻态时重新计时：跳过之后 5 s 内按得到回退，回到广告
+  之后 5 s 内按得到撤销。
 
 ### 4.5 纯视频流要自己抬时钟
 
@@ -189,13 +202,18 @@
 
 素材 `hls-ad`（`shared/src/jvmTest/resources/media/`）：主片 0–24 s，广告 12–17.1 s（媒体时间从
 1.483 s 重新起算，回跳 11.9 s），之后主片接着自己的媒体时间走到 25.5 s；广告两端都有标记。
-三个用例：
+五个用例：
 
 | 用例 | 开关 | 验什么 |
 | --- | --- | --- |
 | `HlsAdSkipTest.adSegmentsNeverReachTheCaller` | 默认开 | 广告三片的包一个都不到上层，声明轴只剩一个 ~5.1 s 空档；**接上的第一包是关键帧** |
 | `HlsAdSkipTest.skipDoesNotStallPlayback` | 默认开 | `10 s → 18 s` 墙钟 < 6 s（纯视频流不抬时钟会到 7 s 多） |
 | `HlsAdTimelineTest.framesStayContinuousAcrossAdBreaks` | `setSkipAd(false)` | 接缝 12 s / 17.1 s 两侧时间戳连续（平移本身，1.7） |
+| `HlsAdSkipTest.revertingSeekPlaysTheSkippedAd` | 默认开 | 回退之后播的是广告（首帧就在断点后一帧），不再报 `AdSkipped`，开关没被改 |
+| `HlsAdSkipTest.undoingTheRevertLandsPastTheAd` | 默认开 | 撤销之后没有广告帧（落点钉在 `to`）、不再报 `AdSkipped`、画面继续往前播 |
+
+`reverseAd` / `seekTo` 都要等自己那一轮结束才返回，用例里一律 `launch` 出去再等事件，不等调用返回 ——
+等返回的时候窗口已经过去了（`FFPlayerConcurrentSeekTest` 同一写法）。
 
 素材的广告就在声明 12 s 处，这本身就是 2.1 门槛降到 5 s 的证据：同一份列表在 30 s 门槛下
 回跳 11.9 s 不够，广告会照播；按现在的门槛，声明轴上唯一空档是 `12.042 s → 17.183 s`，
