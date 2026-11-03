@@ -36,6 +36,22 @@ val buildJni =
     }
   }
 
+// 原生库目录由根脚本给出（见根 build.gradle.kts 的「原生库复用」）：从属 worktree 直接读主仓的
+// cxx/build/bin，不复制；主仓读自己的，那要先把 buildJni 跑出来。
+val nativeBinDir: File = rootProject.extra["acgNativeBinDir"] as File
+val localBinDir: File = rootDir.resolve("cxx/build/bin")
+
+// 原生库的唯一入口：只负责「本地编还是直接读」这一件事，消费方一律挂它。
+val stageNativeLibs =
+  tasks.register("stageNativeLibs") {
+    description = "准备 cxx/build/bin 下的原生库：本地编译，或直接用主仓编好的"
+    group = "build"
+    // 复用时不复制：库就在 nativeBinDir 里，消费方直接读。
+    if (nativeBinDir.canonicalFile == localBinDir.canonicalFile) {
+      dependsOn(buildJni)
+    }
+  }
+
 // clang-format 闸门：进 MSYS2 跑 cxx/format.jni.sh，覆盖 cxx/ 三个顶层 C++ 文件。`clangCheck` 只校验，
 // `clangFormat` 就地重写。
 val clangCheck =
@@ -63,8 +79,8 @@ val clangFormat =
   }
 
 tasks.named<ProcessResources>("processResources") {
-  dependsOn(buildJni)
-  from(rootDir.resolve("cxx/build/bin"))
+  dependsOn(stageNativeLibs)
+  from(nativeBinDir)
 }
 
 // jar 不含 dll，运行期从 build/resources/main 或 app/resources 直接加载文件。
@@ -83,8 +99,8 @@ val syncNativeResources =
   tasks.register<Sync>("syncNativeResources") {
     description = "把 cxx/build/bin 的 dll 备成打包用的应用资源（appResourcesRootDir）"
     group = "build"
-    dependsOn(buildJni)
-    from(rootDir.resolve("cxx/build/bin")) {
+    dependsOn(stageNativeLibs)
+    from(nativeBinDir) {
       include("*.dll")
       into("windows-x64")
     }

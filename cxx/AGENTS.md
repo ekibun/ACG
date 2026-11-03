@@ -20,7 +20,9 @@ WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/de
   找参考实现（如 `fftools/ffplay.c`）**直接读本地文件，不要联网下载**；也不要修改它们。
   ffmpeg 的 submodule 指向上游 `FFmpeg/FFmpeg`，本地改动只以 `cxx/ffmpeg/patches/hls.sed` 形式存在，
   由构建在构建目录里应用（见 [ffmpeg 一节](#ffmpeg) 的「源码改动走 sed」）。
-- **重编与 dll 落位全自动，没有「手动同步」这一步**：所有消费链的任务图都挂着 `buildJni`
+- **重编与 dll 落位全自动，没有「手动同步」这一步**：所有消费链的任务图都挂着
+  `:desktopApp:stageNativeLibs`（默认即 `buildJni`；从属 worktree 会自动改成同步主仓的桌面产物，
+  见 [`docs/development/build.md`](../docs/development/build.md) 的「原生库复用」）
   （无 outputs 的 Exec，每次必跑，`cxx/` 一变就重编）—— `:desktopApp:run`（经 `prepareAppResources`）、
   `hotRun`（`hotSnapshotMain`）、IDE 直跑 MainKt（`processResources`）、打包（`syncNativeResources`）、
   `:shared:jvmTest` 与 `:platform:jvmTest`（各自 `jvmTestProcessResources` 显式 `dependsOn`）。落位五处：

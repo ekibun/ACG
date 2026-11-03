@@ -72,11 +72,11 @@ kotlin {
   }
 }
 
-// 把 cxx/build/bin 下的 native 库打进测试资源，并让 jvmTestProcessResources 依赖 buildJni。
+// 把原生库打进测试资源，并让 jvmTestProcessResources 依赖 stageNativeLibs。
+// 目录由根脚本给出：从属 worktree 直接读主仓的 cxx/build/bin，不复制。
 tasks.named<ProcessResources>("jvmTestProcessResources") {
-  dependsOn(":desktopApp:buildJni")
-  val binDir = rootProject.layout.projectDirectory.dir("cxx/build/bin")
-  from(binDir) {
+  dependsOn(":desktopApp:stageNativeLibs")
+  from(rootProject.extra["acgNativeBinDir"] as File) {
     include("*.dll", "*.so", "*.dylib")
   }
 }

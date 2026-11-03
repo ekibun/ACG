@@ -6,10 +6,10 @@
 
 - `:desktopApp:buildJni` 是唯一的 native 构建入口（Exec，无 outputs，每次必跑）。它进
   `cxx/` 跑 `build.jni.sh`，产物落在 `cxx/build/bin/`。
-- 所有消费 native 库的任务都挂 `dependsOn(":desktopApp:buildJni")`：
-  - `:desktopApp:processResources`（IDE 直跑 MainKt 用）
-  - `:desktopApp:syncNativeResources`（run 与打包共用）
-  - `:shared:jvmTestProcessResources` 与 `:platform:jvmTestProcessResources`
+- `:desktopApp:stageNativeLibs` 是「库从哪来」的唯一判定点，所有消费 native 库的任务都挂它：
+  `:desktopApp:processResources`（IDE 直跑 MainKt 用）、`:desktopApp:syncNativeResources`（run 与
+  打包共用）、`:shared:jvmTestProcessResources` 与 `:platform:jvmTestProcessResources`。
+  它只在本地编译时挂 `buildJni`；从属 worktree 里不挂任何东西（库直接读主仓的），见下节。
 - `:desktopApp:clangCheck` / `:desktopApp:clangFormat` 走 `cxx/format.jni.sh`，范围是 `cxx/` 下三个顶层 C++ 文件。
 - `:shared:devToolsAgentJar` 从测试运行时类路径里只挑 `soko/ekibun/DevToolsAgent*` 打成 premain agent jar，
   清单写 `Premain-Class`。
@@ -18,7 +18,7 @@
 
 ## dll 落位
 
-`cxx/build/bin/` 下的原生库出现在五个位置：
+原生库（主仓的 `cxx/build/bin/`；从属 worktree 直接读它，不复制）出现在五个位置：
 
 | 位置 | 供谁用 |
 | --- | --- |
@@ -29,7 +29,32 @@
 | `<app-image>/app/resources/` | 打包态 |
 
 - `jar` 任务 `exclude("**/*.dll")`，原生库不进 jar。
-- `syncNativeResources` 用 `Sync`（不是 `Copy`）：目标目录是 `cxx/build/bin` 的镜像，native 侧删掉的库跟着消失。
+- `syncNativeResources` 用 `Sync`（不是 `Copy`）：目标目录是来源目录的镜像，来源里删掉的库跟着消失。
+
+## 原生库复用（worktree 只做桌面端）
+
+worktree 的约定是「只改 Kotlin、UI 哪都能测」，所以只用主仓编好的桌面 dll；**Android 不走复用** ——
+那边要 native 与打包，回主仓做。
+
+- 识别：`git rev-parse --git-common-dir` 落在主仓的 `.git`、而 `--show-toplevel` 是别处，就是从属
+  工作树，主仓根取 common dir 的上一级。主仓自己、非 git 仓库都不触发。判定只在根
+  `build.gradle.kts` 里一次，结果经 `acgNativeBinDir` 交给各模块。
+- 主仓 `<主仓根>/cxx/build/bin` 有 dll 就复用：根脚本把这个**目录**交给各模块，消费方
+  （`processResources`、`syncNativeResources`、两处 `jvmTestProcessResources`）从它 `from()` 进
+  各自的资源目录 —— worktree 里**不复制**一份 `cxx/build/bin`，`buildJni` 也不在任务图里。落位与
+  加载顺序不变；主仓重编 dll 后，这里下次构建自动拿到新的。
+- 主仓没编过桌面端时退回本地编译并告警（那种情况本来也编不动）。
+- 复用方照旧能 `:desktopApp:run`、`hotRun`、打包：只是库的来源不同。
+- Android：没有复用路径。worktree 里跑 `:androidApp:externalNativeBuildDebug` / `assembleDebug`
+  会因缺 submodule 直接失败，这是预期 —— 打 APK 回主仓。（曾试过让 cmake 把预编译 `.so` 拷进
+  自己的产物目录：AGP 9.2.1 在构建阶段会清掉那片输出，零 target 的工程没有东西再重建它，结果是
+  `obj` 空、APK 悄悄缺库，所以不走。）
+
+**为什么不校验两端是否是同一份 C**：这条通道的前提就是「开 worktree = 不动 `cxx/`」，由使用者
+保证，脚本不做比对。代价要清楚 —— dll 的符号是**不带签名**的名称导出
+（[`cxx/AGENTS.md`](../../cxx/AGENTS.md) 的「JNI」），所以在这个 worktree 里改 C 或改 `external fun`
+的签名**不会报错**，只会拿着主仓的 dll 跑出参数错位。要改 C 就回主仓编 —— 那边编完，这个 worktree
+下次构建自动拿到新的库。
 
 ## 打包目录形状
 
