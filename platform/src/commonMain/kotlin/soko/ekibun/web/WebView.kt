@@ -110,6 +110,14 @@ interface WebviewContext : AutoCloseable {
   /** 开关开发者工具；桌面端无操作。 */
   suspend fun setDevtoolsEnabled(enabled: Boolean)
 
+  /**
+   * 切前后台：同一个实例换宿主，不重建页面。
+   *
+   * 后台态省资源（Android 不加载图片、桌面按 1×1 布局），挂到界面上之前要先置前台，
+   * 否则拿到的是一张缺图的页面。
+   */
+  suspend fun setVisible(visible: Boolean)
+
   /** 导航到 [url]，附带 [headers]。 */
   suspend fun navigate(
     url: String,
@@ -333,6 +341,20 @@ fun WebView(
 
 /** 默认首屏地址。 */
 internal const val DEFAULT_WEBVIEW_URL = "about:blank"
+
+/**
+ * 把一个**已经在跑**的 [WebviewContext] 铺到界面上。
+ *
+ * 与 [WebView] 的区别：这里不新建实例，前后台切换就是把同一个实例挂上/摘下——
+ * 页面状态（表单、滚动位置、登录进度）都留在原处。
+ */
+@Composable
+fun WebViewHost(
+  controller: WebviewContext,
+  modifier: Modifier = Modifier,
+) {
+  WebViewSurface(controller, modifier)
+}
 
 /** 释放动作用的进程级 scope，不随组合取消。 */
 private val disposeScope = CoroutineScope(Dispatchers.Default + SupervisorJob())

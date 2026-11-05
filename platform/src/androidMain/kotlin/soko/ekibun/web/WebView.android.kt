@@ -174,6 +174,10 @@ internal class AndroidWebviewContext(
   override suspend fun setDevtoolsEnabled(enabled: Boolean) =
     withContext(Dispatchers.Main) { WebView.setWebContentsDebuggingEnabled(enabled) }
 
+  // 后台态关掉图片加载：后台页多半只是跑脚本取数，图白下
+  override suspend fun setVisible(visible: Boolean) =
+    withContext(Dispatchers.Main) { view.settings.blockNetworkImage = !visible }
+
   override suspend fun navigate(
     url: String,
     headers: Map<String, String>,

@@ -168,12 +168,13 @@ async (_binding) => {
    *   // 2) 跑页面 JS 取值：script 的返回值（JSON）解析后交回
    *   const data = await webview(url, {}, "JSON.stringify(window.__NUXT__)");
    */
-  const webview = async (url, header, script, onInterceptRequest) => {
+  const webview = async (url, header, script, onInterceptRequest, show) => {
     const ret = await _binding("webview", [
       "" + (url || ""),
       header || {},
       script == null ? null : "" + script,
-      typeof onInterceptRequest === "function" ? onInterceptRequest : null
+      typeof onInterceptRequest === "function" ? onInterceptRequest : null,
+      !!show
     ]);
     // 按返回值类型解析：null 为无脚本 / 脚本无返回值，字符串为脚本返回值（JSON），对象为命中的拦截。
     if (ret == null) return undefined;            // 无脚本 / 脚本无返回值

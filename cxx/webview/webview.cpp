@@ -453,7 +453,8 @@ class WebviewContext
       public ICoreWebView2NavigationCompletedEventHandler,
       public ICoreWebView2NavigationStartingEventHandler,
       public ICoreWebView2DocumentTitleChangedEventHandler,
-      public ICoreWebView2ProcessFailedEventHandler {
+      public ICoreWebView2ProcessFailedEventHandler,
+      public ICoreWebView2NewWindowRequestedEventHandler {
   std::mutex mu_;
   jobject ctx_ = nullptr;
   jmethodID onWebResourceRequested;
@@ -595,6 +596,10 @@ class WebviewContext
       *ppv = static_cast<ICoreWebView2ProcessFailedEventHandler*>(this);
       return S_OK;
     }
+    if (riid == IID_ICoreWebView2NewWindowRequestedEventHandler) {
+      *ppv = static_cast<ICoreWebView2NewWindowRequestedEventHandler*>(this);
+      return S_OK;
+    }
     return E_NOINTERFACE;
   }
   // ICoreWebView2CreateCoreWebView2ControllerCompletedHandler
@@ -616,6 +621,7 @@ class WebviewContext
     webview_->add_NavigationStarting(this, &token);
     webview_->add_DocumentTitleChanged(this, &token);
     webview_->add_ProcessFailed(this, &token);
+    webview_->add_NewWindowRequested(this, &token);
 
     webview_->QueryInterface(IID_ICoreWebView2_2, &webview2_);
     // 缓存本上下文的 cookie manager，供后续读写复用。
@@ -626,7 +632,8 @@ class WebviewContext
     if (SUCCEEDED(webview_->get_Settings(settings.GetAddressOf())) &&
         settings) {
       settings->put_IsScriptEnabled(TRUE);
-      settings->put_AreDefaultScriptDialogsEnabled(FALSE);
+      // 关掉会让 confirm() 恒为 false，登出这类要确认的按钮就成了没反应
+      settings->put_AreDefaultScriptDialogsEnabled(TRUE);
       settings->put_IsStatusBarEnabled(FALSE);
       settings->put_IsZoomControlEnabled(FALSE);
       settings->put_IsBuiltInErrorPageEnabled(FALSE);
@@ -635,6 +642,29 @@ class WebviewContext
 
     return S_OK;
   }
+  // ICoreWebView2NewWindowRequestedEventHandler
+  // 新窗口请求：右键「在新窗口中打开」、target=_blank、window.open。
+  // 不接管的话 WebView2 会自己弹一个顶层窗口，那个窗口不受我们管。
+  // 一律拦下，改成当前页导航。
+  HRESULT STDMETHODCALLTYPE
+  Invoke(ICoreWebView2* sender,
+         ICoreWebView2NewWindowRequestedEventArgs* args) override {
+    if (!sender || !args) return S_OK;
+    LPWSTR raw = nullptr;
+    std::wstring target;
+    if (SUCCEEDED(args->get_Uri(&raw)) && raw) {
+      target.assign(raw);
+      CoTaskMemFree(raw);
+    }
+    // 先声明接管，再自己导航；反过来 WebView2 仍会把弹窗开出来
+    args->put_Handled(TRUE);
+    if (!target.empty()) {
+      WV_LOG("new window taken over: %ls", target.c_str());
+      sender->Navigate(target.c_str());
+    }
+    return S_OK;
+  }
+
   // ICoreWebView2WebResourceRequestedEventHandler
   HRESULT STDMETHODCALLTYPE
   Invoke(ICoreWebView2* sender,
@@ -798,7 +828,15 @@ class WebviewContext
   }
   void attach(HWND parent) {
     if (!hwnd_ || !parent) return;
-    if (parent_ == parent) return;
+    if (!IsWindow(hwnd_)) {
+      // 父窗口先没了，子窗口被系统一起销毁，这里再 SetParent 也没用
+      WV_LOG("attach skipped: webview window was destroyed");
+      return;
+    }
+    if (parent_ == parent && IsWindow(parent_)) {
+      fitToParent();
+      return;
+    }
     parent_ = parent;
     // 先接父链，再改样式。
     SetParent(hwnd_, parent);
@@ -815,22 +853,36 @@ class WebviewContext
     WV_LOG("attach to AWT: %p", static_cast<void*>(parent));
     fitToParent();
   }
-  void detach() {
-    if (!hwnd_ || !parent_) return;
-    // detachThreadInput();
-    if (ctrl_) ctrl_->put_IsVisible(FALSE);
-    ShowWindow(hwnd_, SW_HIDE);
-    SetParent(hwnd_, nullptr);
-    LONG_PTR style = GetWindowLongPtrW(hwnd_, GWL_STYLE);
+  /**
+   * 同步摘下窗口，必须在父窗口销毁之前调用（AWT 的 `removeNotify` 里）。
+   *
+   * 父窗口一销毁，挂在它上面的子窗口会被系统一起销毁，WebView2 的窗口就没了；
+   * 之后再 attach 只是对着死句柄 SetParent，界面就是黑的。
+   * 窗口操作跨线程安全，COM 的可见性调用投回宿主线程。
+   */
+  void detachNow() {
+    const HWND hwnd = hwnd_;
+    if (!hwnd || !parent_) return;
+    ShowWindow(hwnd, SW_HIDE);
+    SetParent(hwnd, nullptr);
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
     style &= ~static_cast<LONG_PTR>(WS_CHILD | WS_CAPTION | WS_THICKFRAME);
     style |= WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
-    SetWindowLongPtrW(hwnd_, GWL_STYLE, style);
-    SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+    SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
                      SWP_FRAMECHANGED);
-    WV_LOG("detach from AWT: %p", static_cast<void*>(parent_));
+    // parent 还活着说明赶上了；webview 活着说明子窗口没被父窗口带走
+    WV_LOG("detach from AWT (parent alive=%d, webview alive=%d): %p",
+           IsWindow(parent_) ? 1 : 0, IsWindow(hwnd) ? 1 : 0,
+           static_cast<void*>(parent_));
     parent_ = nullptr;
+    // 投递排在后面的 attach 之前，重新挂上时 fitToParent 会再置回 TRUE
+    post([](WebviewContext* ctx) {
+      if (ctx->ctrl_) ctx->ctrl_->put_IsVisible(FALSE);
+    });
   }
+
   void fitToParent() {
     if (!hwnd_ || !parent_) return;
     RECT rc{};
@@ -1167,7 +1219,8 @@ extern "C" JNIEXPORT void JNICALL
 Java_soko_ekibun_web_Webview2Context_detach(JNIEnv* env, jclass, jlong pctx) {
   if (pctx != 0) {
     WebviewContext* ctx = reinterpret_cast<WebviewContext*>(pctx);
-    ctx->post([](WebviewContext* ctx) { ctx->detach(); });
+    // 同步：调用点是 AWT 的 removeNotify，晚一步父窗口就被销毁了
+    ctx->detachNow();
   }
 }
 

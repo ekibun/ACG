@@ -8,6 +8,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -30,7 +31,7 @@ import soko.ekibun.quickjs.JSError
 @Preview(showBackground = true)
 @Composable
 fun CodeScreen() {
-  var text by remember { mutableStateOf(TextFieldValue()) }
+  var text by remember { mutableStateOf(TextFieldValue(highlight(SAMPLE_BACKGROUND))) }
   var evalval by remember { mutableStateOf("") }
 
   Column {
@@ -57,6 +58,10 @@ fun CodeScreen() {
             }.toString()
         }
       }) { Text("Run>") }
+
+      // 两个现成的例子：一个后台跑、一个直接铺到前台
+      TextButton(onClick = { text = TextFieldValue(highlight(SAMPLE_BACKGROUND)) }) { Text("示例：后台") }
+      TextButton(onClick = { text = TextFieldValue(highlight(SAMPLE_FOREGROUND)) }) { Text("示例：前台") }
     }
     Text(
       text = evalval,
@@ -68,3 +73,31 @@ fun CodeScreen() {
     )
   }
 }
+
+/** 后台抓一页：任务缩在右下角，不挡当前页。 */
+private const val SAMPLE_BACKGROUND = """// 后台跑：任务缩成右下角一个「1 个任务在后台」的胶囊，不挡当前页面。
+// 页面每次加载完成都执行一次脚本，返回非 null 就把结果交回来；任务结束后胶囊自己消失。
+// 这里是求值，不能写顶层 await，所以包一层 async IIFE。
+(async () => {
+  const page = await webview(
+    "https://bgm.tv/",
+    {},
+    "JSON.stringify({ title: document.title, links: document.querySelectorAll('a').length })"
+  );
+  return page;
+})()"""
+
+/** 直接铺到前台：适合登录、人机验证这类要人盯着点的页面。 */
+private const val SAMPLE_FOREGROUND = """// 第五个参数为 true：创建即前台，整块界面换成这个页面。
+// 没登录时停在登录页（脚本返回 null 就继续等），登录跳转后再跑一遍脚本才收工。
+// 顶部「后台」= 收起并开始 30 秒倒计时，到点强制关闭；「关闭」= 立刻结束。
+(async () => {
+  const page = await webview(
+    "https://bgm.tv/login",
+    {},
+    "JSON.stringify(document.querySelector('input[name=password]') ? null : { url: location.href })",
+    null,
+    true
+  );
+  return page;
+})()"""

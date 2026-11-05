@@ -1,5 +1,6 @@
 package soko.ekibun.acg
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
@@ -13,6 +14,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import soko.ekibun.acg.ui.comp.webview.WebviewTaskHost
 import soko.ekibun.acg.ui.screen.CodeScreen
 import soko.ekibun.acg.ui.screen.CollectionScreen
 import soko.ekibun.acg.ui.screen.PlayScreen
@@ -35,26 +37,31 @@ private enum class AppTab(
 @Preview
 fun App() {
   MaterialTheme {
-    var selected by remember { mutableIntStateOf(0) }
-    val tabs = AppTab.entries
+    Box(Modifier.fillMaxSize()) {
+      var selected by remember { mutableIntStateOf(0) }
+      val tabs = AppTab.entries
 
-    Column(Modifier.fillMaxSize()) {
-      PrimaryTabRow(selectedTabIndex = selected) {
-        tabs.forEachIndexed { index, tab ->
-          Tab(
-            selected = index == selected,
-            onClick = { selected = index },
-            text = { Text(tab.label) },
-          )
+      Column(Modifier.fillMaxSize()) {
+        PrimaryTabRow(selectedTabIndex = selected) {
+          tabs.forEachIndexed { index, tab ->
+            Tab(
+              selected = index == selected,
+              onClick = { selected = index },
+              text = { Text(tab.label) },
+            )
+          }
+        }
+
+        when (tabs[selected]) {
+          AppTab.Play -> PlayScreen()
+          AppTab.Web -> WebScreen(Modifier.fillMaxSize())
+          AppTab.Collect -> CollectionScreen(Modifier.fillMaxSize())
+          AppTab.Code -> CodeScreen()
         }
       }
 
-      when (tabs[selected]) {
-        AppTab.Play -> PlayScreen()
-        AppTab.Web -> WebScreen(Modifier.fillMaxSize())
-        AppTab.Collect -> CollectionScreen(Modifier.fillMaxSize())
-        AppTab.Code -> CodeScreen()
-      }
+      // 插件发起的 WebView 任务：缩成右下角胶囊，点开可切前台
+      WebviewTaskHost()
     }
   }
 }

@@ -150,6 +150,80 @@
 
 ⇒ 桥不许用 `import()` / `require()`，理由与崩溃点见 playback-invariants.md §6.4。
 
+### 3.5.1 WebView 每次调用都是一个任务
+
+`webview` 不是「开一个窗口取点东西就关」，而是一个**可以被用户看到、被挂起、被关掉的任务**
+（`WebviewTask`）：默认在后台跑，界面上缩成右下角一个胶囊，点开能切到前台。
+
+⇒ **超时不在这里掐**。原来是整轮 30 秒硬超时，那会把「用户正在输密码」直接掐断；
+现在只有**放到后台满 30 秒**才强制关闭，挂在前台等操作时不计时。
+
+⇒ **前台同时只有一个**（`WebviewTasks.foreground`）。提第二个时第一个自动退到后台并开始倒计时
+——两个可见窗口叠在一起，用户分不清该点哪个。
+
+⇒ **`show = true` 的任务没有「后台」**（`WebviewTask.foregroundOnly`）。调用方正 `await` 着它，
+收进后台改变不了「没人操作就等不到结果」，只是把失败推迟 30 秒；所以界面上只给刷新与关闭，
+关闭即失败。这类任务显示期间独占前台，后来者进不来——用户正卡在登录页中间，不能被顶掉换成
+另一个页面。
+
+⇒ **切前后台、切任务都不重建**：每个任务各有一个常驻 `WebViewHost`，用 `key(task)` 钉住它在
+`Column` 里的位置；前台那个是 `weight(1f)`，其余是 `height(0.dp)`。切前台只是改高度——
+不建新组件、不换父节点、不 `SetParent`、也不加载第二次。原生窗口跟着缩到 1×1 藏着，
+peer 与父子关系都不动。表单内容、滚动位置、登录进度都留在原处，这也是「后台抓页面时被验证码
+拦住，用户切上去点一下能接着走」的前提。
+
+这条比「省资源」重要得多：**摘组合 = 销毁 AWT peer = WebView2 的原生窗口被系统一并销毁**，
+再挂回去是给一个可能已经不存在的窗口 `SetParent`。收成 0 高就绕开了整条链路。
+
+⇒ **脚本返回 null 表示「还没到位」**，等下一次 `PageFinished` 再跑。少了这一条，登录页刚加载完
+就触发 `PageFinished`，脚本一看「还在登录页」返回 null，任务当场就结束了，用户根本没机会输密码。
+`null` / `"null"` / 空串都算没结果；`false` 之类是真值，照收。用户在前台手动过验证码后，
+跳转触发的下一次 `PageFinished` 照样让脚本收尾——不需要为前后台写两套判定。
+
+⇒ 后台态省资源：Android 关掉 `blockNetworkImage`；桌面缩到 1×1（`fitToParent` 的下限），页面照常活着。
+
+⇒ **摘窗口只是兜底**，位置在 `WebViewCanvas.removeNotify()` 里、`super` 之前。宿主常驻之后这条路径
+只在「任务被注销」和「整个窗口关闭」时才会走；前者上下文已经 `close`、`isClosed` 直接跳过，所以
+实际只剩退出时跑一次，`submit` 异步投递足够（`detach()`）。
+
+这条**曾经**必须同步：只留一个宿主时，切任务会卸载 canvas，异步投递会晚到，`detach from AWT
+(parent alive=0, webview alive=1)` —— `SetParent` 失败，窗口成了没人管的孤儿。现在每个任务各有
+常驻宿主，这条路径不会再走到；但如果哪天改回「卸载再挂回」，同步必须跟着回来。
+
+同理 `setVisible(false)` 在桌面上是空实现：缩成 1×1 后再挂回去，尺寸没变化时 `fitToParent` 不会重算。
+
+⇒ **重新挂载点在 `addNotify()`**。`componentShown` / `componentResized` 也会把 `attach` 带出来，
+但那是顺便：尺寸没变时 resize 不来，复用的组件也不会再走一次 show。addNotify 是唯一必然发生的点。
+
+⇒ 这条链有回归测试：`platform/src/jvmTest/.../WebviewCanvasRemountTest.kt` 用真实 AWT 宿主走一遍
+「挂上 → 摘掉 → 再挂上」，靠页面里的 `innerWidth` 判定窗口是否还活着且已重贴尺寸（窗口没了
+`evaluate` 直接返回 null，没重贴则是 1）。
+
+⇒ 任务列表由引擎登记（`WebviewTasks`），界面只读：这样「请求先到、界面后组合」也能追上。
+
+⇒ **任务工具栏的状态（地址 / 标题 / 进度）由 `WebViewEvent` 折出来**（`WebviewPage.reduce`），
+不另开通道：`PageStarted` 清进度、`Progress` 给小数、`PageFinished` 收成 1、`TitleChanged` 给标题
+（空白当没给，界面回退到地址）。进度条那行高度固定，否则每次开关都会带着 WebView 重新贴边、
+页面抖一下。
+
+⇒ **任务栏不给后退 / 前进**（`WebViewPane(history = false)`）：脚本发起的页面有明确目的（登录、
+抓一次数据），让用户在里面随便逛只会把流程带偏。← → 只出现在「浏览器」页签。
+
+`WebScreen` 本身不可直接复用——它自己 `createWebviewContext()`，接待不了外部传进来的任务；
+共用的是 `WebViewPane`：工具栏 + 进度 + 承载面 + 后端起不来时的提示，参数只收普通状态，
+承载面由调用方以 content 传入（两边拿控制器的途径不同）。
+
+⇒ **覆盖层的点击拦截不必自己写**：`WebViewPane` 是 `Surface`，本身占住命中区域；后台任务面板
+高度为 0，点击自然落到页面上。外层再叠一层 `background` + 吞事件的 `pointerInput` 是重复的。
+
+⇒ 工具栏只用 `←` `→` 与中文标签，不引图标库：`⟳` 这类符号在 Android 系统字体里不一定有，
+会渲染成方块。按钮可点区域靠 `clickable` + `padding` 撑开，命中范围不随字形宽度缩水。
+
+⇒ **新窗口一律接管到当前页**。右键「在新窗口中打开」、`target="_blank"`、`window.open` 都会触发
+WebView2 的 `NewWindowRequested`；不接管的话它会弹一个不受我们管、也不在 AWT 布局里的顶层窗口。
+WebView2 没有「只关掉菜单里那一项」的设置，`AreDefaultContextMenusEnabled(FALSE)` 会把整个右键
+菜单（复制、粘贴）一起废掉，所以接回调更划算。
+
 ### 3.6 `openBrowserAsync` 的用法归插件
 
 ⇒ `{{callback}}` 换进去的值必须在查询串里百分号编码（`: / ? #` 都要编）。

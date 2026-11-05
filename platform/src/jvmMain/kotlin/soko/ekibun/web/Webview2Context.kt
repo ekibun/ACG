@@ -36,6 +36,10 @@ class Webview2Context(
   /** 桌面端的 devtools 由 [openDevTools] 打开，这里无操作。 */
   override suspend fun setDevtoolsEnabled(enabled: Boolean) = Unit
 
+  // 桌面上"不可见"由 WebViewCanvas 销毁时 detach 保证，这里不用改尺寸：
+  // 一旦缩成 1×1，再挂回去若尺寸没变就拿不到新的 bounds，页面是一片黑
+  override suspend fun setVisible(visible: Boolean) = Unit
+
   override suspend fun navigate(
     url: String,
     headers: Map<String, String>,
@@ -130,6 +134,12 @@ class Webview2Context(
     submit { attach(ptr, view) }
   }
 
+  /**
+   * 摘窗口（异步投递），调用点只有 AWT 的 `removeNotify`：任务注销与窗口关闭，晚到都无所谓。
+   *
+   * 若哪天改成「卸载宿主再挂回来」，必须换回同步——父窗口一销毁会连带销毁子窗口，
+   * 之后再 `attach` 只能对着死句柄 `SetParent`。
+   */
   fun detach() {
     submit { detach(ptr) }
   }

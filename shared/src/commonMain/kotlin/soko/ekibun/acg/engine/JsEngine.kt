@@ -2,15 +2,12 @@ package soko.ekibun.acg.engine
 
 import acg.shared.generated.resources.Res
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import soko.ekibun.browser.createCallbackSession
 import soko.ekibun.browser.launchExternalBrowser
 import soko.ekibun.common.Http
@@ -25,7 +22,6 @@ import soko.ekibun.quickjs.QuickJS
 import soko.ekibun.web.WebViewEvent
 import soko.ekibun.web.createWebviewContext
 import soko.ekibun.web.getWebviewCookieManager
-import kotlin.time.Duration.Companion.seconds
 
 /** 授权链接里标出回调地址位置的占位符，见 [JsEngine.openBrowserAsync]。 */
 private const val CALLBACK_PLACEHOLDER = "{{callback}}"
@@ -109,7 +105,7 @@ class JsEngine {
                     CoroutineScope(Dispatchers.IO).async {
                       getWebviewCookieManager().set(args[0] as String, args[1] as String)
                     }
-                  // webview 的四个实参打进 args，args[3] 是拦截回调
+                  // webview 的实参打进 args：args[3] 是拦截回调，args[4] 是「创建即前台」
                   "webview" ->
                     CoroutineScope(Dispatchers.IO).asyncReleasing(args[3] as JSFunction?) {
                       webviewAsync(
@@ -133,6 +129,7 @@ class JsEngine {
                             }
                           }
                         },
+                        args[4] == true,
                       )
                     }
 
@@ -242,12 +239,18 @@ class JsEngine {
     return job
   }
 
-  /** 后台 WebView 桥：导航 [url]（附 [header]），加载完后执行 [script]；失败或超时抛 [JSError]。 */
+  /**
+   * WebView 桥：导航 [url]（附 [header]），加载完后执行 [script]；失败抛 [JSError]。
+   *
+   * 每次调用登记成一个 [WebviewTask]，默认后台跑、可提到前台（同一实例，不重建页面）；
+   * [show] 为真时创建即前台。只对后台计时：放到后台满 30 秒强制关闭（[WebviewTasks.toBackground]）。
+   */
   internal suspend fun webviewAsync(
     url: String,
     header: Map<Any, Any?>?,
     script: String?,
     interceptor: ((url: String, headers: Map<String, String>, method: String, isForMainFrame: Boolean) -> Any?)?,
+    show: Boolean = false,
   ): Any? {
     // header 展开成纯数据 Map，并补齐后台加载默认带的 Referer
     val normalized =
@@ -259,17 +262,26 @@ class JsEngine {
         normalized + ("Referer" to url)
       }
 
-    val outcome = CompletableDeferred<Any?>()
-    // 建 headless WebView 上下文
+    // 建 WebView 上下文：后台任务按 headless 建，创建后仍可切前台
     val ctx =
       try {
         createWebviewContext(isHeadless = true)
       } catch (t: Throwable) {
-        throw JSError("Create webview failed：${t.message ?: t}")
+        throw JSError("Create webview failed: ${t.message ?: t}")
       }
+
+    val task = WebviewTask(url, foregroundOnly = show)
+    task.controller = ctx
+    WebviewTasks.register(task)
+    // 默认后台：开始倒计时；要前台的立刻转正，倒计时随之取消
+    WebviewTasks.toBackground(task)
+    if (show) WebviewTasks.toForeground(task)
+    val outcome = task.outcome
 
     try {
       ctx.onEvent = { event ->
+        // 标题栏要的地址/标题/进度，与终止判定无关，先喂给任务
+        task.onEvent(event)
         when (event) {
           is WebViewEvent.PageFinished ->
             if (!outcome.isCompleted) {
@@ -278,9 +290,9 @@ class JsEngine {
                 outcome.complete(null)
               } else {
                 CoroutineScope(Dispatchers.IO).launch {
-                  // 执行脚本，返回值是 JSON 字符串，失败为 null
+                  // 脚本返回值是 JSON 字符串；给出 null 表示「还没到位」，等下一次加载完成
                   val json = runCatching { ctx.evaluate(script) }.getOrNull()
-                  outcome.complete(json)
+                  if (!json.hasNoScriptResult()) outcome.complete(json)
                 }
               }
             }
@@ -303,10 +315,9 @@ class JsEngine {
         }
       }
       ctx.navigate(url, baseHeaders)
-      return withTimeout(30.seconds) { outcome.await() }
-    } catch (_: TimeoutCancellationException) {
-      throw JSError("Background webView timeout：$url")
+      return outcome.await()
     } finally {
+      WebviewTasks.unregister(task)
       // 销毁上下文（close 非挂起）
       runCatching { ctx.close() }
     }
@@ -354,3 +365,12 @@ class JsEngine {
       }
     }
 }
+
+/**
+ * 脚本这次没给出结果：`null`、字符串 `"null"`、空串。
+ *
+ * 平台把返回值按 JSON 编码交回，所以脚本 `return null` 会变成 `"null"`，
+ * `JSON.stringify(null)` 则是带引号的 `"\"null\""`，两种都算「还没到位」。
+ */
+internal fun String?.hasNoScriptResult(): Boolean =
+  this == null || this == "null" || this == "\"null\"" || this == "\"\""

@@ -12,6 +12,7 @@ import java.awt.Canvas
 import java.awt.Color
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
+import javax.swing.SwingUtilities
 
 // 桌面端 WebView 平台层：上下文工厂与原生视图挂载面。
 // [Webview2Context] 建隐藏顶层窗口并起消息泵线程；组合树里放 AWT 组件，组件拿到 peer 后
@@ -28,11 +29,12 @@ internal actual fun WebViewSurface(
   content: @Composable () -> Unit,
 ) {
   val impl = controller as Webview2Context
-  // 一份上下文对应一个 AWT 组件
+  // 组合存活期间一个上下文一个 AWT 组件；宿主常驻，切前后台只改尺寸，不重建组件
   val canvas = remember(impl) { WebViewCanvas(impl) }
 
   DisposableEffect(impl, canvas) {
     canvas.startTracking()
+    // 摘窗口在 canvas 的 removeNotify 里做：那一步是同步的，赶得上 peer 销毁
     onDispose { canvas.stopTracking() }
   }
 
@@ -49,11 +51,8 @@ internal actual fun WebViewSurface(
   }
 }
 
-/**
- * AWT 侧的宿主组件：WebView2 的原生窗口 `SetParent` 到它身上。
- * 等 AWT 发出 `componentShown` / `componentResized` 后反复尝试 attach，attach 幂等。
- */
-private class WebViewCanvas(
+/** AWT 侧的宿主组件：WebView2 的原生窗口 `SetParent` 到它身上，attach 幂等。 */
+internal class WebViewCanvas(
   private val context: Webview2Context,
 ) : Canvas() {
   init {
@@ -73,6 +72,19 @@ private class WebViewCanvas(
       }
     }
 
+  /** peer 每次重建都走这里；`componentShown` / `componentResized` 只是顺带，这个是必然发生的点。 */
+  override fun addNotify() {
+    super.addNotify()
+    // peer 刚建好，句柄这会儿可能还取不到，排到下一轮事件派发再挂
+    SwingUtilities.invokeLater { attachIfPossible() }
+  }
+
+  /** 卸载时摘窗口：父窗口销毁会连带销毁子窗口，之后 attach 只能对着死句柄 SetParent。 */
+  override fun removeNotify() {
+    runCatching { context.detach() }
+    super.removeNotify()
+  }
+
   fun startTracking() {
     addComponentListener(componentListener)
   }
@@ -84,5 +96,7 @@ private class WebViewCanvas(
   private fun attachIfPossible() {
     if (!isDisplayable) return
     context.attach(this)
+    // 重新挂载时组件尺寸往往没变，`componentResized` 不会来，这里补一次
+    context.fitToParent()
   }
 }
