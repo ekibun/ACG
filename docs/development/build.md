@@ -13,8 +13,8 @@
 - `:desktopApp:clangCheck` / `:desktopApp:clangFormat` 走 `cxx/format.jni.sh`，范围是 `cxx/` 下三个顶层 C++ 文件。
 - `:shared:devToolsAgentJar` 从测试运行时类路径里只挑 `soko/ekibun/DevToolsAgent*` 打成 premain agent jar，
   清单写 `Premain-Class`。
-- `:shared:hotRun` / `hotRunAsync` 由 `:shared` 侧跨项目配置（`evaluationDependsOn(":desktopApp")`），
-  注入 `-javaagent` 与 `-Dacg.dev.*` 参数。
+- `:shared:debugPlay` 注入 `-javaagent` 与 `-Dacg.dev.*` 参数；`:desktopApp:hotRun` 跑正式应用，
+  不再挂 agent。
 
 ## dll 落位
 
@@ -80,8 +80,9 @@ worktree 的约定是「只改 Kotlin、UI 哪都能测」，所以只用主仓�
 ## dev 媒体服务器
 
 - `:shared:devMediaServer` 手动常驻启动（`DevServerKt`），工作目录为仓库根。
-- `hotRun` 链路把 agent 挂到应用进程，传 `-javaagent`、`-Dacg.dev.server.port`、
+- `debugPlay` 链路把 agent 挂到验证窗口进程，传 `-javaagent`、`-Dacg.dev.server.port`、
   `-Dacg.dev.classpath`、`-Dacg.dev.pidfile`、`-Dacg.dev.logfile`、`-Dacg.dev.workdir`。
+  服务器随窗口进程起落，窗口一关就收场。
 
 ## 检查范围
 

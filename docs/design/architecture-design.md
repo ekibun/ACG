@@ -51,6 +51,50 @@ UI (Compose: 收藏/搜索/条目/播放/设置)
 同步：  本地先行 + 失败重试（直连 Bangumi，last-write-wins 用本地时间戳）
 ```
 
+### 1.1 UI 层内部结构
+
+上面那张图只切到「UI 是一层」，没定这一层内部怎么组织。对齐 nowinandroid 的 UDF
+（[ModularizationLearningJourney](https://github.com/android/nowinandroid/blob/main/docs/ModularizationLearningJourney.md)）
+后补齐为：**一个页面一个纵向切片，层内依赖单向**。
+
+```mermaid
+flowchart LR
+    S["ui/screen/XScreen.kt<br/>只画 UiState"] --> VM["ui/screen/XViewModel.kt<br/>StateFlow&lt;XUiState&gt;"]
+    VM --> R["data/XRepository.kt<br/>接口"]
+    R --> I["data/XRepositoryImpl.kt<br/>internal"]
+    I --> E["source / engine / player<br/>既有能力链"]
+    T["ui/theme/Theme.kt"] -.只被 screen 用.-> S
+```
+
+四条硬约束：
+
+- **`ui/screen` 不许 import `source` / `engine` / `player` 的具体实现类。** 要数据只经
+  `data` 的 Repository 接口；数据源客户端（`BgmSource` 一类）是实现的内部细节。
+- **状态只有一个出口**：`StateFlow<XUiState>`，`XUiState` 是不可变 `data class`，把分散的可变
+  字段收成一份；UI 不持有 `var`，非法组合（如 `loading` 与 `error` 同时成立）用 `sealed` 或
+  字段约束排掉。
+- **事件单向**：UI 只调 `viewModel.onAction(...)`；挂起函数留在 ViewModel 里，不暴露给界面。
+- **主题只有一处**：`ui/theme/Theme.kt` 的 `AcgTheme`，明暗两套 `ColorScheme` + 一份
+  `Typography`；界面不出现裸 `Color(...)` 字面量（语法高亮调色板除外）。
+
+不引入 nowinandroid 的 `core:designsystem` 规模（catalog App、图标集、组件库），也不引入
+domain/use case 层 —— 当前没有跨 feature 复用的用例，加一层只会多出一堆单行转发。
+
+`androidx.lifecycle.ViewModel` 走已有依赖 `org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0`
+（`shared/build.gradle.kts`），`commonMain` 可用，**不新增依赖**。
+
+**nowinandroid 没有官方 KMP 版**（`android/nowinandroid` 是 Android-only，无 iOS/desktop/`commonMain`
+目标）。社区版 [nowinkmp](https://github.com/lihenggui/nowinkmp) 只迁完 `core:*` 与
+`app-nia-catalog`，`feature:*` 与 `app` 均未开始 —— 能参考 core 层，参考不到 feature 层。共享 UI
+形态的完整样本是 Kotlin [官方样本列表](https://kotlinlang.org/docs/multiplatform/multiplatform-samples.html)
+里的 Rijksmuseum 与 Shopping By KMP（多模块 + CMP + ViewModel + Koin）。因此本文只搬 NiA 的
+**约定**，不搬它的模块图，仅两处必须替换：
+
+| nowinandroid | 本工程 |
+| --- | --- |
+| Hilt（KSP 只覆盖 Android/JVM） | 构造注入；容器方案等第二个数据源出现再定 |
+| `dynamicLightColorScheme` / `dynamicDarkColorScheme`（Android 12+） | `AcgTheme` 自带明暗两套 `ColorScheme`，桌面端无等价物 |
+
 ## 2. 领域模型
 
 ```kotlin
@@ -145,6 +189,21 @@ resolveEpisode(line, episode)     → { url, headers? }            // sort + lin
 
 ## 5. 落地顺序
 
+> **2026-11 重排：骨架前置。** 现有业务界面按一次性验证面处理，回到空目录重写，并按 §1.1 的
+> UDF 组织。顺序因此加一步「骨架」，且它必须排在业务页之前 —— 页面归零之后，主题与页面结构
+> 不再是装修而是地基，晚定一天就要多返工一个页面。
+>
+> 「推到」的边界，不是整个 `ui/`：
+>
+> | 处理 | 内容 | 理由 |
+> | --- | --- | --- |
+> | **保留并搬进新结构** | `ui/screen/CollectionState.kt` 的 `generation` 过期应答、凭据回填、分页 | 是真业务逻辑，[shared-layer §5.3](../development/shared-layer.md) 有判据，丢了要重查一遍 |
+> | **保留** | `ui/comp/RemoteImage.kt` | 图片缓存的 7 条约束（预算按解码字节、`redirect = "follow"`、取消原样抛）写在 [shared-layer §5.1-5.2](../development/shared-layer.md) |
+> | **已挪进测试** | `DebugPlayScreen` / `DebugWebScreen` / `DebugCodeScreen` | 内核验证面，放在 `:shared:jvmTest` 的 `ui/screen`（与正式页面同包，靠 `Debug` 前缀区分），每页一个 `main`（`:shared:debugPlay` / `debugWeb` / `debugCode` 起真窗口），不进 `jvmTest` 任务 |
+> | **归零重写** | `CollectionScreen`、`App.kt` 的 tab 骨架、`ui/comp` 其余展示件 | 只承载布局；`PlayerSlider` 的缓冲态渲染逻辑先抄走再重写 |
+>
+> 业务页的推进方式改为「一次一个切片」：骨架 → 收藏（真 UDF）→ 详情 → 搜索 → 设置。
+
 > **落地状态（2026-10 更新）：** 第 2 条已经落了**第一个切片**，但形态与本文草案不同，以
 > [./bgm-plugin.md](./bgm-plugin.md) 为准：
 > - 包名是 `acg.source`（`BgmSource`），**不是** `acg.catalog.bgm`；「不进 `acg.engine`」这条
@@ -156,10 +215,13 @@ resolveEpisode(line, episode)     → { url, headers? }            // sort + lin
 > - 限流退避、`epochTimeMs()`、kotlinx-serialization、`model` 包、持久化分片**都还没做**；
 >   目前唯一的持久化是扁平的字符串设置表（凭据 + token）。
 
+0. **骨架**（先做，不动能力链）：`ui/theme/Theme.kt` 的 `AcgTheme`、`App.kt` 的顶层 tab、
+   `data/` 下第一个 Repository 接口位。判据：新页面只靠 `ui/screen` + `data` 两处就能写完，
+   不需要碰 `source` / `engine` / `player`。
 1. `epochTimeMs()` 原语 + kotlinx-serialization 依赖（改依赖先确认）+ `model` 包类型
 2. `acg.catalog.bgm`：DTO + mapper + 限流退避（UA 必带，~3 req/s）
 3. 持久化分片 + 收藏/历史仓库（本地先行）
 4. `HtmlParser` 宿主原语 + JS 数据源契约（search/resolveEpisode）+ Line 绑定
-5. 业务四页 UI（收藏 → 详情 → 搜索 → 设置）
+5. 业务四页 UI：收藏（第一个真 UDF 切片）→ 详情 → 搜索 → 设置，从 §1.1 的结构写起
 6. WebView 投前台（先 Android 验证交互，再桌面 C++ 小改）
 7. P2：AniList mapper、per-episode 精确进度、Animeko 订阅兼容解释器（`"a"`+`"no-channel"` 先行）、边播边缓存、torrent

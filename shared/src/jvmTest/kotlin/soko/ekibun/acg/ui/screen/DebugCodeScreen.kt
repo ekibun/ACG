@@ -1,7 +1,9 @@
 package soko.ekibun.acg.ui.screen
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -14,63 +16,71 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
 import soko.ekibun.acg.engine.JsEngine
 import soko.ekibun.acg.ui.comp.highlight
+import soko.ekibun.acg.ui.comp.webview.WebviewTaskHost
+import soko.ekibun.acg.ui.debugApplication
 import soko.ekibun.quickjs.JSError
 
-// 脚本页签，带 @Preview；按误报关掉 preview-public-check。
+// 脚本控制台验证窗口，带 @Preview；按误报关掉 preview-public-check。
 @Suppress("ktlint:compose:preview-public-check")
 @Preview(showBackground = true)
 @Composable
-fun CodeScreen() {
+fun DebugCodeScreen() {
   var text by remember { mutableStateOf(TextFieldValue(highlight(SAMPLE_BACKGROUND))) }
   var evalval by remember { mutableStateOf("") }
+  val scope = rememberCoroutineScope()
 
-  Column {
-    TextField(
-      value = text,
-      onValueChange = {
-        text = TextFieldValue(highlight(it.text), it.selection, it.composition)
-      },
-      modifier =
-        Modifier
-          .fillMaxWidth()
-          .verticalScroll(rememberScrollState())
-          .weight(1f),
-    )
-    Row {
-      Button(onClick = {
-        MainScope().launch {
-          evalval =
-            try {
-              val ret = JsEngine.instance.evaluate(text.text)
-              if (ret is Deferred<*>) ret.await() else ret
-            } catch (e: JSError) {
-              e
-            }.toString()
-        }
-      }) { Text("Run>") }
+  Box(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize()) {
+      TextField(
+        value = text,
+        onValueChange = {
+          text = TextFieldValue(highlight(it.text), it.selection, it.composition)
+        },
+        modifier =
+          Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .weight(1f),
+      )
+      Row {
+        Button(onClick = {
+          scope.launch {
+            evalval =
+              try {
+                val ret = JsEngine.instance.evaluate(text.text)
+                if (ret is Deferred<*>) ret.await() else ret
+              } catch (e: JSError) {
+                e
+              }.toString()
+          }
+        }) { Text("Run>") }
 
-      // 两个现成的例子：一个后台跑、一个直接铺到前台
-      TextButton(onClick = { text = TextFieldValue(highlight(SAMPLE_BACKGROUND)) }) { Text("示例：后台") }
-      TextButton(onClick = { text = TextFieldValue(highlight(SAMPLE_FOREGROUND)) }) { Text("示例：前台") }
+        // 两个现成的例子：一个后台跑、一个直接铺到前台
+        TextButton(onClick = { text = TextFieldValue(highlight(SAMPLE_BACKGROUND)) }) { Text("示例：后台") }
+        TextButton(onClick = { text = TextFieldValue(highlight(SAMPLE_FOREGROUND)) }) { Text("示例：前台") }
+      }
+      Text(
+        text = evalval,
+        modifier =
+          Modifier
+            .padding(10.dp)
+            .verticalScroll(rememberScrollState())
+            .weight(1f),
+      )
     }
-    Text(
-      text = evalval,
-      modifier =
-        Modifier
-          .padding(10.dp)
-          .verticalScroll(rememberScrollState())
-          .weight(1f),
-    )
+
+    // 插件发起的 WebView 任务：缩成右下角胶囊，点开可切前台。与内容平级，后台时点击才穿得过去
+    WebviewTaskHost()
   }
 }
 
@@ -101,3 +111,8 @@ private const val SAMPLE_FOREGROUND = """// 第五个参数为 true：创建即�
   );
   return page;
 })()"""
+
+// 手动验证入口：人肉敲插件 JS 的控制台。
+fun main() {
+  debugApplication("脚本") { DebugCodeScreen() }
+}

@@ -20,7 +20,7 @@ import androidx.compose.ui.unit.dp
 /**
  * 一块完整的 WebView 区域：工具栏 + 进度 + 承载面，后端起不来时盖一层提示。
  *
- * 承载面由调用方以 [content] 传入：「浏览器」页签自己建控制器，插件的任务由引擎给。
+ * 承载面由调用方以 [content] 传入：「浏览器」验证窗口自己建控制器，插件的任务由引擎给。
  */
 @Composable
 fun WebViewPane(

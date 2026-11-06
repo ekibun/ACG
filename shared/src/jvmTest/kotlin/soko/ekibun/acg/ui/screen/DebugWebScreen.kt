@@ -6,6 +6,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import kotlinx.coroutines.launch
 import soko.ekibun.acg.ui.comp.webview.WebViewPane
+import soko.ekibun.acg.ui.debugApplication
 import soko.ekibun.web.WebView
 import soko.ekibun.web.WebViewLoadingState
 import soko.ekibun.web.rememberWebViewState
@@ -13,9 +14,9 @@ import soko.ekibun.web.rememberWebViewState
 /** 默认首页地址。 */
 const val WEBVIEW_HOME_URL: String = "https://www.google.com"
 
-/** 「浏览器」页签：带历史与刷新的完整 WebView，首屏加载 [homeUrl]。 */
+/** 「浏览器」验证窗口：带历史与刷新的完整 WebView，首屏加载 [homeUrl]。 */
 @Composable
-fun WebScreen(
+fun DebugWebScreen(
   modifier: Modifier = Modifier,
   homeUrl: String = WEBVIEW_HOME_URL,
 ) {
@@ -24,7 +25,6 @@ fun WebScreen(
       // 开启开发者工具（F12）
       enableDevtools = true
     }
-  // 工具栏命令都是挂起函数，点击回调自带协程上下文
   val scope = rememberCoroutineScope()
   val loading = state.loadingState
 
@@ -42,4 +42,9 @@ fun WebScreen(
   ) {
     WebView(state = state, modifier = Modifier.fillMaxSize())
   }
+}
+
+// 手动验证入口：真窗口下 WebView2 才挂得上子窗口。
+fun main() {
+  debugApplication("浏览器") { DebugWebScreen(Modifier.fillMaxSize()) }
 }

@@ -274,11 +274,15 @@ classDiagram
 `shared/src/commonMain/kotlin/soko/ekibun/acg/` 下四个包，都不进任何继承树，只把上面两族接起来
 （`Http` 已整体下沉到 `:platform`，本层只经 `soko.ekibun.common.Http` 调用）：
 
-- **`ui`** —— Compose 界面。`App.kt` 是两端共用入口，一个 `PrimaryTabRow` 挂四个页签：
-  `PlayScreen`（播放）、`WebScreen`（浏览器）、`CollectionScreen`（收藏）、`CodeScreen`
-  （脚本控制台）。`ui/comp` 放可复用的小组件（代码着色 `highlight`、网络图 `RemoteImage`）。
-  前三页里的播放与浏览器**是内核验证面**，收藏页是第一个真业务页（形态依据见
-  [design/bgm-plugin.md](./design/bgm-plugin.md)）；业务四页里的详情 / 搜索 / 设置仍未落地。
+- **`ui`** —— Compose 界面。`App.kt` 是两端共用入口，当前只挂第一个真业务页 `CollectionScreen`
+  （形态依据见 [design/bgm-plugin.md](./design/bgm-plugin.md)）。`ui/comp` 放可复用的小组件，播放器单独一窝
+  `ui/comp/player/`：状态持有者 `PlayerController`、画面 `PlayerSurface`、控制条 `PlayerControls`、
+  滑轨 `PlayerSlider`（入参都只有 controller，参考 mediamp 的 `MediampPlayerSurface` 形状）；同层还有
+  代码着色 `highlight`、网络图 `RemoteImage`、可见页与任务覆盖层 `webview/`。播放、浏览器、脚本控制台这三个**内核验证面
+  不在应用里**，已挪进 `:shared:jvmTest` 的 `ui/screen`（`DebugPlayScreen` / `DebugWebScreen` /
+  `DebugCodeScreen`，与正式页面同包、`Debug` 前缀区分），每页一个 `main`，用
+  `:shared:debugPlay` / `debugWeb` / `debugCode` 起真窗口（人工入口，不进测试任务）。
+  业务四页里的详情 / 搜索 / 设置仍未落地。
 - **`source`** —— 数据源客户端。目前只有 `BgmSource`：把 JS 插件交回来的 `Map` 收成强类型
   （`BgmUser` / `BgmCollectionItem` / …）。它自己**不发 HTTP**，网络出口全在插件里，
   见下文「脚本插件链」。
@@ -442,16 +446,16 @@ flowchart TD
 
 ## 开发面（不参与打包）
 
-`:shared:jvmTest` 里除了用例，还住着一套**跑应用时用的开发工具**（`:platform:jvmTest` 只有用例）：
-dev 媒体服务器（`DevServer` / `TestMediaServer`）、应用内的 DEV 控制条（`DevStrip`，经
-`-Dacg.dev.classpath` 用子 ClassLoader 装载）、以及把它们挂到 `hotRun` 应用进程上的
-`DevToolsAgent`（premain agent）。服务器与 `hotRun` 同生共死，生命周期归 agent ——
-Gradle 只传 `-javaagent` 与 `-D`。
+`:shared:jvmTest` 里除了用例，还住着一套**调验证窗口时用的开发工具**（`:platform:jvmTest` 只有用例）：
+dev 媒体服务器（`DevServer` / `TestMediaServer`）、窗口内的 DEV 控制条（`DevStrip`，经
+`-Dacg.dev.classpath` 用子 ClassLoader 装载）、以及把它们挂到 `debugPlay` 窗口进程上的
+`DevToolsAgent`（premain agent）。服务器与窗口进程同生共死，生命周期归 agent ——
+Gradle 只传 `-javaagent` 与 `-D`。`hotRun` 跑的是正式应用，不挂 agent（应用里已无播放页）。
 
 两处 jvmTest 的资源都从 `cxx/build/bin` 取 native 库（`jvmTestProcessResources` 显式
 `dependsOn(":desktopApp:stageNativeLibs")`），保证「改了 `cxx/` 只跑测试」也不会静默用旧 dll。
 
-`PlayScreen` 默认指向 `http://127.0.0.1:8099/media/hls-ad/playlist.m3u8`（夹广告的 HLS 素材，
+`debugPlay` 窗口默认指向 `http://127.0.0.1:8099/media/hls-ad/playlist.m3u8`（夹广告的 HLS 素材，
 逐帧能看到烧录的时间码与分片序号；广告在声明 12 s 处，播到那里会被解复用器直接跳过，
 见 [design/hls-ad-skip.md](./design/hls-ad-skip.md)）。控制条能冻结 / 恢复 / 限速，用法见
 [development/debug-playback.md](./development/debug-playback.md)。

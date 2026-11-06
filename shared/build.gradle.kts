@@ -49,6 +49,8 @@ kotlin {
       implementation("junit:junit:4.13.2")
       // 提供 DevStrip 的编译期 Compose API（ComposePanel / material3）。
       implementation(compose.desktop.currentOs)
+      // 提供 Dispatchers.Main（Swing EDT）：验证窗口与将来的 ViewModel 都要它。
+      implementation(libs.kotlinx.coroutinesSwing)
     }
   }
 }
@@ -76,7 +78,7 @@ dependencies {
   androidRuntimeClasspath(libs.compose.uiTooling)
 }
 
-// —— dev 媒体服务器：Gradle 通过 -javaagent 与 -D 把 agent 挂到 hotRun 的应用进程，其余由 DevToolsAgent 负责 ——
+// —— dev 媒体服务器：Gradle 通过 -javaagent 与 -D 把 agent 挂到 debugPlay 的验证窗口进程，其余由 DevToolsAgent 负责 ——
 // 服务器代码（DevServerKt / TestMediaServer / DevStrip）位于本模块 jvmTest。
 
 val jvmTestRuntimeClasspath =
@@ -113,29 +115,52 @@ tasks.register<JavaExec>("devMediaServer") {
   dependsOn("compileTestKotlinJvm")
 }
 
-// 给 :desktopApp 的 hotRun / hotRunAsync 注入 -javaagent 与 -D 参数。
-evaluationDependsOn(":desktopApp")
-
-project(":desktopApp")
-  .tasks
-  .withType<JavaExec>()
-  .matching { it.name == "hotRun" || it.name == "hotRunAsync" }
-  .configureEach {
-    dependsOn(devToolsAgentJar)
+// —— 手动验证窗口：每个页面一个入口，只供人启动，不进 jvmTest 任务 ——
+// 必须是真 AWT 窗口：SwingPanel / JAWT 要挂 Win32 子窗口，离屏场景挂不上。
+listOf(
+  Triple("debugPlay", "soko.ekibun.acg.ui.screen.DebugPlayScreenKt", "播放"),
+  Triple("debugWeb", "soko.ekibun.acg.ui.screen.DebugWebScreenKt", "浏览器"),
+  Triple("debugCode", "soko.ekibun.acg.ui.screen.DebugCodeScreenKt", "脚本"),
+).forEach { (taskName, rootClass, label) ->
+  tasks.register<JavaExec>(taskName) {
+    group = "debug"
+    description = "启动「$label」手动验证窗口"
+    classpath(jvmTestRuntimeClasspath)
+    mainClass.set(rootClass)
+    workingDir = rootProject.projectDir
+    // 走 jvmTestClasses 而非 compileTestKotlinJvm：原生库是经 jvmTestProcessResources 拷进测试资源的。
+    dependsOn("jvmTestClasses")
     jvmArgs(
-      "-javaagent:" +
-        devToolsAgentJar
-          .get()
-          .archiveFile
+      "-Dstdout.encoding=UTF-8",
+      "-Dstderr.encoding=UTF-8",
+      "--enable-native-access=ALL-UNNAMED",
+      "-Dacg.debug.dir=" +
+        layout.buildDirectory
           .get()
           .asFile
+          .resolve("debug")
           .absolutePath,
-      "-Dacg.dev.server.port=" +
-        providers.gradleProperty("devPort").orElse("8099").get(),
-      "-Dacg.dev.classpath=" +
-        jvmTestRuntimeClasspath.joinToString(File.pathSeparator, transform = { it.absolutePath }),
-      "-Dacg.dev.pidfile=" + devMediaServerPid.get().asFile.absolutePath,
-      "-Dacg.dev.logfile=" + devMediaServerLog.get().asFile.absolutePath,
-      "-Dacg.dev.workdir=" + rootProject.projectDir.absolutePath,
     )
   }
+}
+
+// dev 服务器与 DEV 控制条只挂「播放」验证窗口：hotRun 跑的是正式应用，里面已无播放页。
+tasks.named<JavaExec>("debugPlay") {
+  dependsOn(devToolsAgentJar)
+  jvmArgs(
+    "-javaagent:" +
+      devToolsAgentJar
+        .get()
+        .archiveFile
+        .get()
+        .asFile
+        .absolutePath,
+    "-Dacg.dev.server.port=" +
+      providers.gradleProperty("devPort").orElse("8099").get(),
+    "-Dacg.dev.classpath=" +
+      jvmTestRuntimeClasspath.joinToString(File.pathSeparator, transform = { it.absolutePath }),
+    "-Dacg.dev.pidfile=" + devMediaServerPid.get().asFile.absolutePath,
+    "-Dacg.dev.logfile=" + devMediaServerLog.get().asFile.absolutePath,
+    "-Dacg.dev.workdir=" + rootProject.projectDir.absolutePath,
+  )
+}

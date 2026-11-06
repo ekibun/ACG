@@ -61,7 +61,7 @@ fun WebviewTaskHost(modifier: Modifier = Modifier) {
   }
 }
 
-/** 一个任务的面板：与「浏览器」页签共用 [WebViewPane]，只是不给后退 / 前进。 */
+/** 一个任务的面板：与「浏览器」验证窗口共用 [WebViewPane]，只是不给后退 / 前进。 */
 @Composable
 private fun WebviewTaskPane(task: WebviewTask) {
   val page by task.page.collectAsState()

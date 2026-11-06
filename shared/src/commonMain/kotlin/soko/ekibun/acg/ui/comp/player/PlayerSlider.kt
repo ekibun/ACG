@@ -1,4 +1,4 @@
-package soko.ekibun.acg.ui.comp
+package soko.ekibun.acg.ui.comp.player
 
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat

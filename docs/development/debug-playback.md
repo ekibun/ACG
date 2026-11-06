@@ -4,18 +4,28 @@
 
 ## 本地媒体服务器
 
-hotRun 的应用进程由 premain agent（`DevToolsAgent`）托管 dev 服务器，应用退出时经 shutdown hook 收场；端口用 `-PdevPort=<n>` 指定。硬杀 Gradle 客户端的残留，下一次 hotRun 前按 PID 文件自愈。手动常驻（curl 调试，无控制条）：
+`debugPlay` 的窗口进程由 premain agent（`DevToolsAgent`）托管 dev 服务器与控制条，窗口一关经 shutdown hook 一并收场；端口用 `-PdevPort=<n>` 指定。硬杀 Gradle 客户端的残留，下一次 `debugPlay` 前按 PID 文件自愈。只想 curl 调试、不开窗口时用手动常驻：
 
 ```bash
 ./gradlew :shared:devMediaServer                 # 端口 8099
 ./gradlew :shared:devMediaServer --args="--port 9000"
 ```
 
+验证窗口是人工入口，每页一个（真 AWT 窗口，不进 `jvmTest`）：
+
+```bash
+./gradlew :shared:debugPlay                      # 播放：自带 dev 服务器与 DEV 控制条
+./gradlew :shared:debugWeb                       # 浏览器 / WebView2 宿主
+./gradlew :shared:debugCode                      # 脚本控制台
+```
+
+数据目录落 `shared/build/debug`（`-Dacg.debug.dir` 可改），设置与 WebView2 的 user data folder 跨启动保留。
+
 素材全部按 `/media/<路径>` 从分包里的 `media/` 取，没有「换一个文件」的参数：临时想换，丢进
 `shared/src/jvmTest/resources/media/`，或者直接丢进 `shared/build/processedResources/jvm/test/media/`
 （后者不用重编），再用 `/media/<名字>` 取。
 
-- PlayScreen 默认 URL：`http://127.0.0.1:8099/media/hls-ad/playlist.m3u8`（夹广告的 HLS；
+- `debugPlay` 默认 URL：`http://127.0.0.1:8099/media/hls-ad/playlist.m3u8`（夹广告的 HLS；
   `/media` 本身返回入库的那份 bbb 单文件）；应用主窗口右上角有 DEV 控制条（冻结 / 恢复 / 限速）。
 - 播放中途热改：`curl http://127.0.0.1:8099/__control/freeze`（掐断，复现 stall）、`/resume`、`/throttle?bps=<n>`（0 = 解除）、`/shutdown`。
 - **测试不经过这个常驻进程**：用例各自进程内起 `TestMediaServer`（ephemeral 端口、计数器隔离），常驻实例会让请求计数与冻结状态跨用例串味。
