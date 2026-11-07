@@ -93,7 +93,7 @@
 `lastFrameTs` 已经是本轮的帧，差值照样 > 2 s。
 
 **被否决：在 native 判据里加「seek 之后不判」。** `FFPlayer.play()` 也走 `hls_read_seek`，
-一刀切会把「从广告前几秒起播」的跳过一起废掉（`HlsAdSkipTest.skipDoesNotStallPlayback`
+一刀切会把「从广告前几秒起播」的跳过一起废掉（`FFPlayerTest.skipRevertAndUndoRoundTrip`
 直接红）。按「换过一片就恢复」又救不了退帧——退帧轮里 `m005 → a000` 那一处换片正好是被误判
 的那一处。
 
@@ -158,8 +158,8 @@
   实际从广告分片开头起播。
 - **撤销不用新接口。** `to` 是断点后第一帧，`seekImpl` 的 `resyncTo` 丢帧收敛把落点钉死在这一帧，
   不会停在广告里；`seekTo` 本来就按 `pts.playing` 决定续不续播，暂停态撤销也成立。
-- **回退不改跳过开关**，之后这一集的广告照跳（用例 `revertingSeekPlaysTheSkippedAd` 断言
-  `isSkipAd`）。要整集都不跳过是另一件事，得自己 `setSkipAd(false)`（落到 `hls.sed` 第 5 条的
+- **回退不改跳过开关**，之后这一集的广告照跳（用例 `skipRevertAndUndoRoundTrip` 的
+  回退段断言 `isSkipAd`）。要整集都不跳过是另一件事，得自己 `setSkipAd(false)`（落到 `hls.sed` 第 5 条的
   `acg_hls_set_skip_ad`）。
 - **提示是个二态开关，不是一次性按钮。** `已跳过广告 / 回退` ⇄ `已回到广告 / 撤销`：按哪个就
   回到另一态，连点就是在 `from` / `to` 之间来回跳。不做「放行区间」的状态机，也就不存在
@@ -200,20 +200,18 @@
 
 ## 七、实测与用例
 
-素材 `hls-ad`（`shared/src/jvmTest/resources/media/`）：主片 0–24 s，广告 12–17.1 s（媒体时间从
+素材 `hls-ad`（仓库根的 `test-media/hls-ad/`）：主片 0–24 s，广告 12–17.1 s（媒体时间从
 1.483 s 重新起算，回跳 11.9 s），之后主片接着自己的媒体时间走到 25.5 s；广告两端都有标记。
-五个用例：
+三个用例：demux 层那条在 `AvFormatTest`，播放层两条在 `FFPlayerTest`：
 
 | 用例 | 开关 | 验什么 |
 | --- | --- | --- |
-| `HlsAdSkipTest.adSegmentsNeverReachTheCaller` | 默认开 | 广告三片的包一个都不到上层，声明轴只剩一个 ~5.1 s 空档；**接上的第一包是关键帧** |
-| `HlsAdSkipTest.skipDoesNotStallPlayback` | 默认开 | `10 s → 18 s` 墙钟 < 6 s（纯视频流不抬时钟会到 7 s 多） |
-| `HlsAdTimelineTest.framesStayContinuousAcrossAdBreaks` | `setSkipAd(false)` | 接缝 12 s / 17.1 s 两侧时间戳连续（平移本身，1.7） |
-| `HlsAdSkipTest.revertingSeekPlaysTheSkippedAd` | 默认开 | 回退之后播的是广告（首帧就在断点后一帧），不再报 `AdSkipped`，开关没被改 |
-| `HlsAdSkipTest.undoingTheRevertLandsPastTheAd` | 默认开 | 撤销之后没有广告帧（落点钉在 `to`）、不再报 `AdSkipped`、画面继续往前播 |
+| `AvFormatTest.adSegmentsNeverReachTheCaller` | 默认开 | 广告三片的包一个都不到上层，声明轴只剩一个 ~5.1 s 空档；**接上的第一包是关键帧** |
+| `skipRevertAndUndoRoundTrip` | 默认开 | 一轮三段：跳过只在接缝留一个 4–6 s 的声明空档（判据是帧 DTS，不是墙钟）、回退后首帧就在断点后一帧且不再报 `AdSkipped`、撤销后不再出现广告帧且画面继续往前 |
+| `framesStayContinuousAcrossBothAdBreaks` | `setSkipAd(false)` | 接缝 12 s / 17.1 s 两侧时间戳连续（平移本身，1.7）。两处接缝由**同一次播放**切两段判，不另开一轮 |
 
 `reverseAd` / `seekTo` 都要等自己那一轮结束才返回，用例里一律 `launch` 出去再等事件，不等调用返回 ——
-等返回的时候窗口已经过去了（`FFPlayerConcurrentSeekTest` 同一写法）。
+等返回的时候窗口已经过去了（`FFPlayerTest` 同一写法）。
 
 素材的广告就在声明 12 s 处，这本身就是 2.1 门槛降到 5 s 的证据：同一份列表在 30 s 门槛下
 回跳 11.9 s 不够，广告会照播；按现在的门槛，声明轴上唯一空档是 `12.042 s → 17.183 s`，

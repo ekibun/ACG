@@ -33,7 +33,8 @@
 
 > **DO:** 守住这条归属。宿主写凭据是因为那个值来自界面、且要在登录**之前**就落盘；插件写
 > 登录态是因为 token 的形状是 OAuth 的事、宿主不该知道。两边各写一份键名字面量 —— 用一条跨界的
-> 用例钉住（`PluginHostTest.readsBackTheSessionItStored`）。宿主侧只有凭据两个键有 Kotlin 常量。
+> 用例钉住（原 `PluginHostTest.readsBackTheSessionItStored` 已删，现在没有自动覆盖，只能靠 `debugCode`
+> 手工跑一次 bgm 源核对键名）。宿主侧只有凭据两个键有 Kotlin 常量。
 
 > **DO:** 凭据缺任一个都当没配（`BgmSource.credentials()`）—— 少了 `client_secret` 换不到 token，
 > 报错要报在用户填的地方，不要等浏览器弹出来再失败。
@@ -114,12 +115,15 @@
 
 | 验什么 | 在哪 |
 | --- | --- |
-| 模块 `import()` 与 `callPlugin` 的通路（真 `bgm.js`，不打网络） | `shared/src/jvmTest/.../engine/PluginHostTest.kt` |
-| 应答 → 强类型（含整数/浮点标签、缺字段、条目缺 `subject`） | `shared/src/jvmTest/.../source/BgmSourceMappingTest.kt` |
-| `Settings` 能力的真派发（写/读/删/非字符串值） | `shared/src/jvmTest/.../engine/SettingsAbilityTest.kt` |
+| 能力桥的真派发：`args` 形状与返回值、`Settings` 读写删、`fetch` 的请求侧（方法 / Content-Type / body）与响应侧、`FormData`、`openBrowser` 回调编排 | `shared/src/jvmTest/.../engine/JsEngineTest.kt` |
+| WebView2 宿主端到端：拦截回调看得见子资源、脚本结果拿得回、cookie 跨任务共享 | `shared/src/jvmTest/.../engine/JsEngineTest.kt`（末尾三条） |
+| 任务注册表：前台互斥、后台倒计时、关闭让等待方失败、注销 | `shared/src/jvmTest/.../engine/WebviewTaskTest.kt` |
+| 标题栏状态从平台事件折出来（`reduce`） | `shared/src/jvmTest/.../engine/WebviewTaskTest.kt` |
+| 应答 → 强类型（整数/浮点标签、缺字段、条目缺 `subject`） | `shared/src/jvmTest/.../source/BgmSourceTest.kt` |
 | 设置落盘本身（DataStore、父目录、删除） | `platform/src/jvmTest/.../common/SettingsStoreTest.kt` |
-| `Http` 真的把方法、Content-Type、body 发对（换 token 那条路的前提） | `shared/src/jvmTest/.../engine/JsEngineFetchTest.kt` |
 
-**没有**自动覆盖的：真跑一遍 OAuth（要人在浏览器里点）、收藏页的界面。前者只能人工走一遍；
+**没有**自动覆盖的：插件的 `import()` / `callPlugin` 真实通路（原 `PluginHostTest` 已随 jvmTest 精简
+删掉，现在只靠 `debugCode` 里手工跑一次 bgm 源）、真跑一遍 OAuth（要人在浏览器里点）、收藏页的界面。
+OAuth 只能人工走一遍；
 后者的验证方式是桌面端起应用、切到「收藏」页签（`CollectionScreen` 的 `load()` 会落到
 `settingsStore`，出现 `%APPDATA%\ekibun\ACG\settings.preferences_pb` 即「组合 + 设置链路通」）。

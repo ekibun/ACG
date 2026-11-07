@@ -7,12 +7,29 @@
 
 ---
 
+## 〇、一条判据值不值得留
+
+判断标准只有一条：**坏了会不会自己响**。编译、抛异常、崩进程、变慢 —— 占一样就不必再写用例；
+全都不会、只表现成界面错位或静默降级，才需要断言钉住。「它是不是纯函数 / 状态机」不是理由。
+
+两个对照：
+
+- `WebviewPage.reduce` 是纯状态机，仍然留一条 —— 因为 `TitleChanged("   ")` 不返回 `null` 只会让标题栏
+  显示空白、`Progress(1.4f)` 不夹到 1 只会让进度条溢出、`LoadFailed` 动了 `progress` 只会让进度条乱跳，
+  三处都不抛不崩。反过来，`PageStarted` → 0、`UrlChanged` → 地址这种读代码就明白的分支不单独断言，
+  链上最后一帧的最终状态已经把它们带过去了。
+- `SeekWindowSemanticsTest` 曾是纯函数用例，已删 —— 它断言的是抄进来的 ffplay 公式，本工程并不使用
+  那个阈值，删掉不会有任何东西失去保护。
+
+这也是**用例不复述实现**的边界：复述的实现一旦改动，测试跟着改一遍、两边一起错；上一条的三处
+判据背后是「用户看得见的行为」，不是 `when` 分支的形状。
+
 ## 一、`Pointer` 与线程归属
 
 ### 1.1 关闭断言的是线程没了，不是 `isClosed` 旗标
 
 `isClosed` 只说明「本类不再接活」，旗标置位时归属线程可能仍在退出路上。
-⇒ `closeShutsDownOwnerThread` / `ownedDispatcherIsClosedAfterReleaseLands` 断言的是**线程 `isAlive`**。
+⇒ `closingShutsTheOwnerAndRejectsFurtherDispatch` / `dispatcherOwnershipDecidesTheThreadShutdown` 断言的是**线程 `isAlive`**。
 ⇒ 独占线程的关闭挂在 `closeDeferred()` 的完成上而非 `close()` 里，`await()` 回来时线程仍在退出路上，
 所以断言前要再 `join` 一次。
 
@@ -52,19 +69,20 @@ kotlinx 的兜底会把「归属线程已经没了」藏起来：裸 `dispatch` 
 ### 2.1 `AvIO.read` 返回 0 是「读空」，不是 EOF
 
 依据见 [playback-invariants.md](playback-invariants.md) §1.2：`avio` 只把 `AVERROR_EOF` 与负数当终止。
-⇒ 假 IO（`TestIo`）读到尾必须返回 `AVERROR_EOF`；「打不开」是另一回事，在更早的分支返回 `-1`。
+⇒ 假 IO（`TestIO`）读到尾必须返回 `AVERROR_EOF`；「打不开」是另一回事，在更早的分支返回 `-1`。
 
 ### 2.2 读错误折成 EOF 之后，只能在「不静默」上做断言
 
 任何负返回值都会被 avio 毒化成 `eof_reached`，`getPacket` 在 API 层分不开「出错」与「读完」
 ⇒ 断言只能落两处：以 `null` 收场（不挂死、不抛），且标准输出上有那条 error 日志。
-`AvReadErrorFoldTest` 取 10 秒素材（≈160 KB，5 次 32 KB 读）并把失败点设在第 4 次 read：
+`AvFormatTest` 取 10 秒素材（≈160 KB，5 次 32 KB 读）并把失败点设在第 4 次 read：
 前 3 次够 `find_stream_info` 用，错误因此必然落在 `getPacket` 阶段。
 
 ### 2.3 打开失败不许抛异常
 
 `io_open` 回调里抛异常会 pending 在 JNI 上炸 JVM。⇒ `AvIO.Handler.open` 打不开时返回恒失败的 IO，
-由 `avformat_open_input` 自己失败，Kotlin 侧以 `IllegalStateException` 收场。
+由 `avformat_open_input` 自己失败，Kotlin 侧以 `IllegalStateException` 收场（`AvFormatTest`
+两种形态各钉一条：抛异常被 JNI 就地消化、返回 `FailingAvIO` 由 open 自己失败）。
 泄漏本身从 JVM 观测不到，这条钉的是「失败路径能干净走完、不再崩 native」。
 
 ### 2.4 嵌套 `io_open` 失败会二次关闭 pb
@@ -85,7 +103,7 @@ jobject 交给 `GetObjectClass` ⇒ `EXCEPTION_ACCESS_VIOLATION`（证据见 `cx
 
 `avpriv_set_pts_info(st, 64, 1, sample_rate)` ⇒ 合成 8 kHz WAV 的 `timeBaseNum = 1`、
 `timeBaseDen = 8000`，一格 125 µs。
-⇒ 同一个合成源要 1 s 就够（`AvFormatDurationTest` 要更宽的容差窗口，取 2 s）。
+⇒ 同一个合成源要 1 s 就够（`AvFormatTest` 要更宽的容差窗口，取 2 s）。
 
 ### 2.7 送显缓冲必须引用相等
 
@@ -98,12 +116,17 @@ native 侧只在长度对不上时才新建（`getBufferNative` 对得上就覆�
 `swr` 每帧输出的样本数不恒定（末帧还是残帧），复用不作保证 ⇒ 判据写成「长度种类数 × 4 ≤ 帧数」，
 而不是「恒同一块」。真每帧新建时种类数就等于帧数。
 
-### 2.9 seek 的丢帧收敛
+### 2.9 seek 的丢帧收敛只能整链验
 
 容器级 seek 会把目标**四舍五入**折回流时基，偏移不足半格就落回原格（见 invariants §1.4）
 ⇒ 单帧步退的步长 ε 取 3/4 个 tick：下界大于半格、上界小于一帧间隔。
-`AV_NOSYNC_THRESHOLD` 是 10 秒，而本工程帧时间戳是**微秒** ⇒ 阈值必须写 `10 * 1_000_000`；
-写成 `10` 会把所有帧都判成「落后太多」，收敛直接失效。
+
+收敛本身**没有纯函数可测**：生产侧只有一行 `frame.timeStamp < resyncTo`（`resyncTo` 只由
+`seekImpl` 给出，没有 ffplay 那种「差距过大就不丢」的阈值分支）。把 `frame_drops_early` 抄一份进
+测试再断言抄件，测的是抄件、不是本工程 —— 曾经的 `SeekWindowSemanticsTest` 就是这种空转，已删。
+⇒ 判据落在整链上：seek 之后每一帧都得是自己的像素（`FFPlayerTest` 的
+`playAndStepAfterSeekShowEachOwnFrame`）；手工验法是 seek 到
+中间位置后逐帧比对画面，看有没有补播落点之前的帧。
 
 ---
 
@@ -115,16 +138,18 @@ native 侧只在长度对不上时才新建（`getBufferNative` 对得上就覆�
 | --- | --- | --- |
 | `frozen` | 播放中途断网 | 停笔但**不 close**：close 等于告诉客户端 body 结束，那是「截断」不是「卡住」 |
 | `heartbeat` | 客户端撒手 | body 发完不关、每 50 ms 续 1 字节 ⇒ 服务端**看得见** `exited` 追上 `entered`，不必「睡够猜」 |
-| `cutAfterBytes` | body 没发完就断链 | 客户端读会抛；这是截断，不是卡住 |
-| `declareLength = false` | 长度未知 | 声明了固定长度却只发一部分是「长度对不上」，客户端抛 `ClosedByteChannelException` |
-| `hangFirstResponse` | 卡在请求里 | 只有第一条停住，后续正常发完 ⇒ abort 之后下一次读才能验「重连」 |
+| `hangFirstResponse` | 卡在正文上 | 只发响应头、body 不给；只有第一条停住，后续正常发完 ⇒ abort 之后下一次读才能验「重连」 |
+| `firstChunkDelayMs` | 卡在第一块之前 | 响应头已到、一个字节都没来 ⇒ 验「作废能叫醒等正文的读」的另一个阻塞点 |
+| `declareLength = false` | 长度未知 | 分块传输、没有 `Content-Length`；`SEEK_END` / `AVSEEK_SIZE` 要长度的用例别开它 |
+| `honorRange = false` | 服务端不认 Range | 一律 200 从 0 整发 ⇒ `HttpIO` 必须靠白读推进到 `offset` |
+| `chunkDelayMs` / `bytesPerSecond` | 慢发 / 限速 | 「首读是流式的」「读还在进行中」这类判据的前提 |
 
-### 3.2 `servedLimit` 取 300,000 的理由
+### 3.2 真正的「截断」只能在裸 socket 上造
 
-下界要**高于开流消耗**（否则连流都打不开，测到的是「打不开流」）：443 KB faststart 素材开流只吃前
-约 32 KB（`moov` 全在前 11,381 字节内），实测 `getStreams()` 发 196,608 字节。
-上界要**明显低于素材总长** 443,429 字节 ⇒ 断点落在数据流中途，首帧必定出得来。
-300,000 = 总长的 66%，还留 34% 没发。改媒体就要按「开流消耗 / 素材总长」重测这个数。
+`TestServer` 造不出干净的截断：声明了 `Content-Length` 却少写，JDK 的 `HttpServer` 未必把连接
+断掉（客户端要等满 8 s 读超时才抛，测到的是闲置超时）；改成分块传输又在 `close()` 时补了终止块，
+等于没有截断。所以 `HttpTest` 自己开一个 `ServerSocket`：读掉请求、写半截响应、立刻断开，
+客户端拿到的才是 `unexpected end of stream`。
 
 ### 3.3 abort 的两种收场
 
@@ -133,11 +158,14 @@ native 侧只在长度对不上时才新建（`getBufferNative` 对得上就覆�
 - 没有读在等：`abort` 必须是 no-op。`FFPlayer` 每次 seek / 单帧步进都要 abort，无条件关响应会让
   每次极小步长操作都白重开一条会话 ⇒ 判据是请求数保持 1。
 
-### 3.4 流式判据看「首读耗时 vs 整包下发时长」
+### 3.4 流式判据看服务端的发送进度
 
-整包下发时长 = 块数 × 块间隔。首读**远早于**整包（< 一半）才说明没有在等整包。
-客户端侧的 `availableForRead` 峰值只需不超一个 avio 缓冲：服务端的 `served` 只说「写了多少」，
-socket 缓冲里堆了多少与客户端有没有读无关，拿它当「客户端已下载」是错的。
+判据落在 `server.served` 上：只消费了 1/4 的时候服务端还没发完（`served < 全长`），才说明没有在
+等整包 —— 一次性下完那种实现此刻 `served` 已经等于全长。用它代替「首读耗时 < 整包时长的一半」，
+是因为墙钟在快慢机器上给不出稳定结论。
+
+`availableForRead` 只作辅证（峰值不超一个 avio 缓冲）：它量的是 okio 缓冲里现成的字节，实测恒 0，
+单看它等于空转。
 
 ### 3.5 向前 seek 该白读还是该重开会话
 
@@ -194,8 +222,8 @@ player 置个 flag，毫秒级返回是必然的、测不到任何东西 ⇒ 先
 耗时断言成立的前提是「此刻确实在取包超时进行中」，且 `pause()` 返回时网络仍未恢复 ——
 少了这两条，断言就是空的。
 
-收场顺序也有讲究：**先掀服务端**（parked 的响应体被 close ⇒ 那次读拿到 IOException、读作业 unwind），
-再等 `closeAsync`；反过来先 close 的话播放轮次还卡在读里，`close` 自己就 join 不回来。
+断流现场现在由本地 `StallIO` 造（交够 N 字节后读永远不返回），不经过网络：收场靠 `abort` 叫醒那次读，
+正是产品里断网时走的那条路。`closeAsync` 若不能从 stall 里出来，就会卡在 `readerJob.join()`。
 
 ---
 
@@ -268,8 +296,9 @@ Kotlin `null` 只表示**失败**（超时 / 脚本抛错）。两者不能混�
 
 ## 七、测试基础设施四条纪律
 
-- `:platform` 的测试**不依赖** `:shared`（依赖方向反了）⇒ 页面服务端、cookie 管理、路径注入在两侧各
-  一份。两份 `TestPageServer` 的 PNG 与页面形状**必须一致**：改一处漏一处就是隐性的假红。
+- `:platform` 的测试**不依赖** `:shared`（依赖方向反了）⇒ 本地服务端与运行时引导在两侧各一份，但
+  每侧都只有**一个** `TestServer` + 一个 `TestEnv`，不按用途再拆。两份 `TestServer` **互不约束**：
+  页面与路由按各自用例的需要写，一侧改了另一侧照旧跑 —— 各自的判据各自守，没有跨模块的隐式契约。
 - `Paths.init` 只能成功一次 ⇒ 注入必须「可见性 + 互斥」且只做一次，多 fork / 并行下也一样。
 - 会阻塞、可能永不返回的用例，被测调用必须放**守护线程**跑：主线程挂在 `join` 上会把整个构建吊死。
 - 归属线程同名（`quickjs` / `avformat` 等），线程 dump 无法按名区分 ⇒ 摘要里额外打**栈顶帧**，让人认出谁是谁。

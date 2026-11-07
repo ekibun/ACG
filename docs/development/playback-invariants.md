@@ -95,11 +95,15 @@ if (len == AVERROR_EOF) {
 `backstep failed`，能否退动只取决于画面与音频谁先解到目标（实测真实 HLS 源上失败的那两个
 「now」落在同一条音频格点上，相差正好 6 帧）。
 
-### 1.5 `AvIO.Handler.open` 不许抛异常
+### 1.5 `AvIO` 回调里的 Kotlin 异常由 JNI 就地消化
 
-`open` 跑在 native 的 `io_open` 回调里：Kotlin 异常会 pending 在 JNI 上没人接，下一次 JNI 调用直接
-abort 整个 JVM。所以「打不开」必须返回一个 read/seek 恒失败的 `AvIO`（`FileIO` 对不存在的路径正是
-这个做法），让 `avformat_open_input` 以 I/O 错误干净收场。
+`open` / `read` / `seek` / `close` 四个回调都是从 native 进 Kotlin 的：异常在那里没人接，
+pending 在 JNI 上，下一次 JNI 调用就会拿着 null 句柄崩掉整个进程。所以 `ffmpeg.cpp` 每处调用之后
+都走 `swallowJavaException`：记一条 `AvIO <call> threw` 日志、`ExceptionDescribe`、`ExceptionClear`，
+再把这次调用折成 `AVERROR(EIO)`。
+
+⇒ 抛了不再崩，但那一路只剩 EIO —— 真实原因只在日志里。所以「打不开」仍要返回 read/seek 恒失败的
+`AvIO`（`FileIO` 对不存在的路径正是这个做法），让 `avformat_open_input` 干净收场。
 
 ### 1.6 每个 pb 只持有一个复用读数组
 
@@ -196,10 +200,12 @@ native 侧每个 `AVIOContext` 分配一次读数组并反复用，`AvIO.read(bu
 
 收敛排 `flushFrame` 之后就变成「先上屏再决定丢不丢」，主时钟被错误锚定后视频干等。
 
-⇒ 丢帧判据必须排在 `flushFrame` **之前**。口径照 ffplay 的 `frame_drops_early`
-（`cxx/ffmpeg/ffmpeg/fftools/ffplay.c:1842-1852`）：`diff = dpts - master_clock`，
-`|diff| < AV_NOSYNC_THRESHOLD && diff < 0` ⇒ 解码后立刻丢。`AV_NOSYNC_THRESHOLD = 10.0` 秒
-（fftools 自有常量，不在 libavutil）。
+⇒ 丢帧判据必须排在 `flushFrame` **之前**。口径同 ffplay 的 `frame_drops_early`
+（`cxx/ffmpeg/ffmpeg/fftools/ffplay.c:1842-1852`）：`diff < 0` ⇒ 解码后立刻丢。
+差别在「落后多少才算落后」：ffplay 拿 `|diff| < AV_NOSYNC_THRESHOLD`（10 秒）兜一道，
+本工程是**绝对判据** `frame.timeStamp < resyncTo`（`resyncTo` 只由 `seekImpl` 给出，就是本轮落点），
+没有「差距过大就保留」的分支，也没有那个常量 —— 别再照 ffplay 的阈值往代码里补常量，
+它在现有实现里没有落点。
 
 ⇒ **音频也要丢开头连续段**。落点是**容器级**的：seek 到 5.0s 时音频首包可能落在 3.90s、
 视频关键帧落在 4.0s。音频不丢会把主时钟按它的上屏时间戳重新锚定到目标之前，视频于是干等。
@@ -207,8 +213,9 @@ native 侧每个 `AVIOContext` 分配一次读数组并反复用，`AvIO.read(bu
 （native 已折算成 `AV_TIME_BASE` 微秒，与 seek 目标同单位）。
 
 ⚠️ **这条的「音频那半」目前没有测试守卫**，且不是加个音频流就行：
-`FFPlayerSeekFrameSequenceTest` 的 seek 用例全是纯视频流（主时钟只被 `resyncTo` 锚定，
-走不到「音频把锚点拉回去」那条路），`FFPlayerAudioOnlyTest` 只从 0 播到 EOF、不 seek。
+`FFPlayerTest` 的 seek 用例全是纯视频流（主时钟只被 `resyncTo` 锚定，走不到
+「音频把锚点拉回去」那条路）；其中唯一带音频的 `stepWithAudioStreamKeepsReportingAndStepping` 验的是
+反方向（音频先越过 `resyncTo` 时不能把这一轮收掉），断言里既没有锚点也没有可听缺口。
 真要补，需要三样东西（曾有一版完整实现 `FFPlayerSeekConvergenceTest.kt`，依赖已不存在的
 `AvPlayback`、不能直接恢复；本机暂存副本在 `build/_reverted/` 下 —— 不在版本控制里、`clean` 即丢）：
 
@@ -372,7 +379,7 @@ kotlinx 的 Job 要「体跑完 **且** 所有子作业完」才转 COMPLETED �
 `isPacketValid()` 走 —— 真换了位置就丢弃并退出，没换位置就把帧留给下一轮。
 
 ⇒ **不能改成「轮次收场就停手」**：`stepForward` 每轮都不 seek，推进靠的正是上一轮留下、还没送完的
-包，收场即丢会让连续步进跳帧（`FFPlayerSeekFrameSequenceTest.stepForwardAfterSeekShowsEachOwnFrame`
+包，收场即丢会让连续步进跳帧（`FFPlayerTest.stepForwardAndBackAfterSeekWalkFrames`
 当场红）。
 
 ⇒ **池子只是给上层的额度，不含余量**：`池 = 参考帧 + 1 张输出帧 + 3 张工作帧 + extra_hw_frames`
@@ -394,7 +401,7 @@ kotlinx 的 Job 要「体跑完 **且** 所有子作业完」才转 COMPLETED �
 返回 `null` 就是吐干净了，见 §1.8。
 
 ⇒ 没有输出端时（只解不显示、软解回落）仍然转成内存再交上去：那类调用方会把帧攒着，原样带
-surface 上去会把池子囤死（`HwDecodeTest` 就是这么挂的）。
+surface 上去会把池子囤死（`AvCodecTest` 就是这么挂的）。
 
 ## 三、桌面输出：视频上传与音频写入
 ## 三、桌面输出：视频上传与音频写入
@@ -470,13 +477,12 @@ body 是一条按需读的流（`Response.body.byteStream()`），读到哪下�
 既没有「拿到响应时已经在拉 body」这回事，也没有任何预读缓冲。
 
 ⇒ **整包缓冲是这层最容易退回去的形态**：它会表现成远程播放迟迟不出画面（等整包下完）、
-内存随文件大小走、无任何报错。判据是
-`HttpStreamingTest.firstReadReturnsLongBeforeTheWholeBodyArrives`（第一次读的耗时 < 整包下发时长的一半），
-以及 `HttpBodyDownloadTimingProbeTest`（读全程峰值不超过一个 avio 缓冲）。
+内存随文件大小走、无任何报错。判据是 `HttpTest.readingIsPullBased`（只消费了 1/4 时
+服务端还没发完，且本地存量峰值不超过一个 avio 缓冲）。
 
 ⇒ 同一入口两种读法要分流：流式边下边用走 `Response.read`（内部等数据到再读一段），
 一次性拿完走 `Response.readAll`（读完即 `close`，插件 JS 的 `Response.arrayBuffer()` 走这条，
-用例 `ReadAllClosesProbeTest`）。**混用会串**——读完再 `read` 只会拿到流尾。
+用例 `HttpTest.readAllClosesOnBothPaths`）。**混用会串**——读完再 `read` 只会拿到流尾。
 
 ### 4.2 闲置超时 = 两次读之间，由 okhttp 的 `readTimeout` 实现
 
@@ -490,8 +496,13 @@ okhttp 的 `readTimeout` 恰好就是这个语义（okio 的 `AsyncTimeout` 在�
 应用层再计一次只会多出一个与它不同源的判据。
 
 ⇒ **超时即这条连接作废**（okio 超时会关掉 socket），所以 `HttpIO` 的「超时 ⇒ 关掉、换一条重试」
-（`readSuspend` 的 `catch (Http.IdleTimeoutException)`）正好接住，不必再谈「连接还能不能留」。
+（`runSuspend` 的 `catch (Http.IdleTimeoutException)`）正好接住，不必再谈「连接还能不能留」。
 重试是整块重来：丢掉会话后回到块首重新装块，所以 `cacheBuf` 里的半块会被覆盖，不会拼出错位字节。
+
+⇒ **重试前不再额外退避**。能进那条 `catch` 就说明已经白等了一个完整超时（读 body / 等响应头都是
+8 s、连接超时 10 s），重试频率天然被限住在一次超时上；再 sleep 一个间隔只会把恢复时间翻倍
+（2026-11 实测：卡住后要 16 s 才恢复，去掉后 8 s）。真断网（拒绝连接 / DNS 失败）抛的是
+`ConnectException` 一类，根本不进这条分支，走的是报错链路 —— 所以这里不需要「防重连风暴」的退避。
 
 ⇒ 应用层靠 `FFPlayer.Event.ReadTimeout` / `ReadTimeoutResume` 一对事件区分「网络停住」与「播完了」：
 前者可恢复（换一条会话继续读），后者是 `null`（EOF）。只报一个 `null` 就分不出这两件事。
@@ -520,7 +531,7 @@ okhttp 的 `readTimeout` 恰好就是这个语义（okio 的 `AsyncTimeout` 在�
 ### 5.1 必须在 IO 层阻塞等
 
 **约束：`AvIO.read` 的回调来自 native `av_read_frame`，数据没到就一直等——没有「稍后重试」这个返回值。**
-返回值的两种合法解（`HttpReadContractTest` 钉着）与作废收场的正数返回，后果表见 §1.3
+返回值的两种合法解（`HttpIOTest` 钉着）与作废收场的正数返回，后果表见 §1.3
 （负值再读一轮、0 原地死循环、正数当场 return）。
 
 **闲置超时由传输层的 `readTimeout` 计时**（8 s，「两次读之间」，见 §4.2），不在这里另起一套计时器：
@@ -604,13 +615,14 @@ finally { abort.cancel(); handler.onSignal(null) }
 
 - 判据用 `Http.Response.isClosed`（取消也把它置成作废）：`catch (CancellationException)` 里只丢
   **真的被掀掉**的那条。作废也可能落在建连上，那时手上这条还活着、不该陪葬；
-- 下一次读 `cachedRsp == null` ⇒ 直接在逻辑游标上重发（`HttpAbortTest` 那条用例的后半段）。
+- 下一次读 `cachedRsp == null` ⇒ 直接在逻辑游标上重发（`HttpIOTest.abortWhileTheBodyIsHeld` / `abortBeforeTheFirstChunkArrives`
+  的后半段）。
 
 ⇒ **健康会话一样保不住**：被掀的那一刻字节还在 socket 上、没交付给任何人，救不回来；不 cancel 又会让
 那批字节被真的取走（§4.3 的 DON'T）。判据记在
-`HttpStreamingTest.abortWakesAHealthyReadButDropsTheSession`（请求数 1 → 2，下一次读在新会话上拿到正确字节）。
+`HttpIOTest.abortBeforeTheFirstChunkArrives`（请求数 1 → 2，下一次读在新会话上拿到正确字节）。
 
-⇒ 没人在等时 `abort` 仍是 no-op（`HttpStreamingTest.abortWithoutAnyWaitingReadKeepsTheSameSession`）——
+⇒ 没人在等时 `abort` 仍是 no-op（`HttpIOTest.abortWhenNobodyWaits`）——
 FFPlayer 每次 seek / 单帧步进都会 `abort`，而那种时刻通常没有读卡在网络上，会话照旧复用。
 
 > **DON'T:** 把 `close()` 与 `abort()` 合成一件事。`close` 是「这条 IO 到此为止」、无条件释放；
@@ -670,16 +682,16 @@ TLS + 响应头。扣减的 `availableForRead` 那部分本来就在本地，算
 
 `Http.Response.availableForRead` 量的是「已经从网络上取到本地、ffmpeg 还没拿到」的那部分
 （拉取式下就是 okio 缓冲里的字节；判据级用例
-`HttpReadContractTest.forwardSeekWithinBufferedRangeKeepsSessionButFarSeekDoesNot`，探针
-`HttpBodyDownloadTimingProbeTest.localBufferedAmountStaysFarBelowTheBodyWhileStreaming`）。
+`HttpIOTest.forwardSeekWithinBufferedRangeKeepsSessionButFarSeekDoesNot`，辅证
+`HttpTest.readingIsPullBased`）。
 下面三条每一条都能让上层判断错：
 
 1. **它是 0 就是「网络真的还没被读」**，不是「本对象还没拿到流引用」那类假 0。拉取式不预读：
    一次 `read` 都没调之前本地一个字节都没有（实测：空等 500 ms 后仍是 0 —— 这条**固化在实现里**，
-   不再单独跑用例：`HttpStreamingTest` 首读拿到的是「刚到的那一块」而非整包，已经是更强的判据）。
+   不再单独跑用例：`HttpIOTest` 首读拿到的是「刚到的那一块」而非整包，已经是更强的判据）。
 2. **空等不会让它涨。** 要它变大只能靠读，而读会同时推进 `Response.offset`。
 3. **上限不到一个 okio 段**（8 KiB；okio 每次只向网络要一个段，`InputStream.read` 凑满 `len` 之后
-   剩下的才算存量）。实测读满 2 MiB 全程峰值 **0 B**（`HttpBodyDownloadTimingProbeTest`）——
+   剩下的才算存量）。实测读满 2 MiB 全程峰值 **0 B**（`HttpTest.readingIsPullBased`）——
    ffmpeg 的 `len` 是 32 KiB、正好是 8 KiB 的整数倍，读完即空。⇒ §5.5 那条判据里的
    扣减项事实上恒为 0，判据退化成「本地存量里没有就换会话」。这不是缺陷：预读一小，
    「已缓冲」才诚实（拿它当「快下好了」的判据在任何一档下都错），代价只是跨会话时多开一条 range（§5.5）。
@@ -690,7 +702,7 @@ TLS + 响应头。扣减的 `availableForRead` 那部分本来就在本地，算
 
 `HttpIO` 之外还挂一层**进程级**字节缓存（`shared/src/commonMain/.../player/HttpCache.kt`）：已下过的字节按
 「流 URL + 块号」留住，seek 回到读过的区域时直接从内存给——免掉 TCP 往返 + TLS + 响应头的固定成本，
-也免掉重复下载。判据级用例 `HttpMemoryCacheTest`（收益看请求数、正确性看逐字节比对）。约束：
+也免掉重复下载。判据级用例 `HttpCacheTest`（收益看请求数、正确性看逐字节比对）。约束：
 
 1. **只当加速使。** 命中不了只意味着多一次网络请求；**任何路径都不许因此改变读出来的字节**。
 2. **键里必须有 URL。** 本对象跨播放会话存活，而 HLS 每个分片是不同 URL、偏移空间却相同——少了 URL
@@ -746,13 +758,13 @@ TLS + 响应头。扣减的 `availableForRead` 那部分本来就在本地，算
 任意偏差，两个方向各有分支接住：网络游标在逻辑游标**之后**（回退过，`rsp.offset > offset`）⇒ 关掉、重开在
 逻辑游标所在的块；**领先**到本地存量里已经没有 ⇒ 换一条真落得上的（换不到就保留手上那条）。
 ⇒ **字节永远来自真身**（不会把旧会话远处的字节当近处的给出去），代价是至多一条会话的建立。
-判据级用例五条：`HttpMemoryCacheTest.readingPastTheCachedPrefixReopensSessionAtTheLogicalOffset`（字节 + 会话数 +
+判据级用例五条：`HttpCacheTest.readingPastTheCachedPrefixReopensSessionAtTheLogicalOffset`（字节 + 会话数 +
 收场时 `entered == exited` 三判）、`backwardJumpIntoHalfCachedRegionMixesNetworkAndCache`
 （跳到第 100 块读 5 块、再回跳到第 95 块读 10 块 —— 后半段前 5 块走网络、后 5 块命中缓存）、
 `crossingTheCachedEdgeReturnsOnlyTheCachedPrefix`（从「104 块 + δ」起读一整块只返回 `32 KiB - δ`，
 下一轮从逻辑游标继续）、`trailingPartialBlockIsCachedAtEof`（尾块进缓存、重播整条零请求）与
 `blockIsFilledEvenWhenAvioAsksLess`（只读 4 KiB 也装整块：缓存里是满块，块内后续读零请求）。
-> **DO:** 用例把「命中」量成 `TestMediaServer.requests` 不涨，不要量 `served`——服务端是一口气把 body
+> **DO:** 用例把「命中」量成 `TestServer.requests` 不涨，不要量 `served`——服务端是一口气把 body
 > 写进 socket 的，读完它还在涨，那个数不代表「这次读要不要网络」。
 
 ---

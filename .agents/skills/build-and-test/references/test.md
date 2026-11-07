@@ -1,7 +1,7 @@
 # 测试
 
 ```bash
-./gradlew :platform:jvmTest --tests "soko.ekibun.web.Webview2Test" --console=plain
+./gradlew :platform:jvmTest --tests "soko.ekibun.web.Webview2ContextTest" --console=plain
 ./gradlew :shared:jvmTest --tests "soko.ekibun.acg.engine.BrowserLoginTest" --console=plain
 # 平台层（jni / quickjs / ffmpeg / web）在 :platform:jvmTest，其余在 :shared:jvmTest；--tests 认全限定名
 ```

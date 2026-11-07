@@ -10,6 +10,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -17,9 +18,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
-/**
- * quickjs 桥接层语义：求值与异常、各类型往返、`thisVal`、Java 异常回流、Promise ↔ Deferred、模块加载、泄漏报告。
- */
+/** quickjs 桥语义：求值、类型往返、异常回流、Promise、模块、泄漏报告、finalizer 只认 `AutoCloseable`。 */
 class QuickJSTest {
   private fun context(moduleHandler: ((String) -> String?)? = null) = QuickJS(moduleHandler)
 
@@ -56,8 +55,9 @@ class QuickJSTest {
     assertTrue("reference leak" !in out, "close must not report a leak:\n$out")
   }
 
-  @Test
-  fun evaluatePrimitives() {
+  /** 求值的返回值，以及三种失败面：JS 抛错、栈溢出都要变成可捕获的 [JSError]。 */
+  @Test(timeout = 60000)
+  fun evaluateRunsScriptsAndReportsErrors() {
     val ctx = context()
     try {
       assertEquals(1L, eval(ctx, "1"))
@@ -65,45 +65,28 @@ class QuickJSTest {
       assertEquals(true, eval(ctx, "true"))
       assertEquals(0.5, eval(ctx, "0.5"))
       assertEquals(null, eval(ctx, "null"))
-    } finally {
-      runBlocking { ctx.closeAndAssertNoLeak() }
-    }
-  }
 
-  @Test
-  fun evaluateThrowsJSError() {
-    val ctx = context()
-    try {
-      val err = assertFailsWith<JSError> { eval(ctx, "throw new Error('boom')") }
+      val thrown = assertFailsWith<JSError> { eval(ctx, "throw new Error('boom')") }
       assertEquals(
-        err.message?.contains("boom"),
         true,
-        "message should carry the JS text, got: ${err.message}",
+        thrown.message?.contains("boom"),
+        "message should carry the JS text, got: ${thrown.message}",
+      )
+
+      val overflow = assertFailsWith<JSError> { eval(ctx, "a=()=>a();a();") }
+      assertEquals(
+        true,
+        overflow.message?.contains("stack overflow", ignoreCase = true),
+        "expected a stack overflow error, got: ${overflow.message}",
       )
     } finally {
       runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
-  /** 栈溢出要变成可捕获的 [JSError]。 */
-  @Test
-  fun stackOverflowIsReported() {
-    val ctx = context()
-    try {
-      val err = assertFailsWith<JSError> { eval(ctx, "a=()=>a();a();") }
-      assertEquals(
-        err.message?.contains("stack overflow", ignoreCase = true),
-        true,
-        "expected a stack overflow error, got: ${err.message}",
-      )
-    } finally {
-      runBlocking { ctx.closeAndAssertNoLeak() }
-    }
-  }
-
-  /** 原始类型经 JS 往返后的类型与取值，含 `Char` / `Byte` / `Short`。 */
-  @Test
-  fun javaToJsRoundTripPrimitives() {
+  /** 原始类型、窄整数（`Char` / `Byte` / `Short`）、数组、`ArrayBuffer`。 */
+  @Test(timeout = 60000)
+  fun primitivesArraysAndBuffersRoundTrip() {
     val ctx = context()
     try {
       assertIs<JSFunction>(eval(ctx, "async (a) => a", name = "<testWrap>")).use { wrap ->
@@ -115,78 +98,123 @@ class QuickJSTest {
         assertEquals((primitives + narrow).size, wrapped.size)
         for (i in primitives.indices) {
           val expected = primitives[i]
-          val actual = wrapped[i]
           // 整数回来是 Long，小数回来是 Double
-          if (expected is Int) assertEquals(expected.toLong(), actual) else assertEquals(expected, actual)
+          if (expected is Int) assertEquals(expected.toLong(), wrapped[i]) else assertEquals(expected, wrapped[i])
         }
         val n = primitives.size
         assertEquals('z'.code.toLong(), wrapped[n], "Char converts to Int by code point")
         assertEquals(7L, wrapped[n + 1], "Byte converts to Int")
         assertEquals(9L, wrapped[n + 2], "Short converts to Int")
       }
-    } finally {
-      runBlocking { ctx.closeAndAssertNoLeak() }
-    }
-  }
 
-  /** 循环引用转换后身份保持：`a['a'] === a`。 */
-  @Test
-  fun recursiveObjectKeepsIdentity() {
-    val ctx = context()
-    try {
-      val wrap = assertIs<JSFunction>(eval(ctx, "async (a) => a", name = "<testWrap>"))
-      try {
-        // a['a'] = a，依赖 cache 才不会在转换时无限递归
-        val a = HashMap<String, Any?>()
-        a["a"] = a
-        // 整图展开后普通对象就是纯数据 Map，没有引用要还
-        val wrapped = assertIs<Map<*, *>>(callAsync(wrap, a))
-        val self = assertIs<Map<*, *>>(wrapped["a"])
-        assertTrue(self === wrapped, "recursive reference must map back to the same object")
-      } finally {
-        wrap.close()
+      // 数组分支用 ArrayList 承接，回来是 List；元素逐个原样落位
+      val arr = eval(ctx, "[1, 'a', true, null, [2, 3]]", name = "<arr>") as List<*>
+      assertEquals(5, arr.size)
+      assertEquals(1L, arr[0])
+      assertEquals("a", arr[1])
+      assertEquals(true, arr[2])
+      assertEquals(null, arr[3])
+      assertEquals(listOf(2L, 3L), arr[4])
+
+      // ArrayBuffer ↔ ByteArray
+      val bytes = byteArrayOf(1, 2, 3, 4)
+      assertIs<JSFunction>(eval(ctx, "async (b) => b", name = "<bufferWrap>")).use { wrap ->
+        assertContentEquals(bytes, callAsync(wrap, bytes) as ByteArray)
       }
     } finally {
-      // 显式归还后 close 不该报泄漏
       runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
-  /** 全部显式归还后 close 不报泄漏。 */
-  @Test
-  fun noLeakWhenEverythingIsReleased() {
-    val ctx = context()
-    val fn = assertIs<JSFunction>(eval(ctx, "()=>1", name = "<eval>"))
-    assertEquals(1L, fn.invoke())
-    fn.close()
-    runBlocking { ctx.closeAndAssertNoLeak() }
-  }
-
-  /** dup / free 的计数语义：多持有一次就多归还一次。 */
-  @Test
-  fun dupAndFreeBalance() {
+  /** 普通对象整图展开成 `Map`：含循环引用与 JS 侧对象往回转。 */
+  @Test(timeout = 60000)
+  fun objectsExpandToPlainData() {
     val ctx = context()
     try {
-      val fn = assertIs<JSFunction>(eval(ctx, "()=>1", name = "<eval>"))
-      assertEquals(1, fn.refCount)
-      fn.dup()
-      assertEquals(2, fn.refCount)
-      fn.free()
-      assertEquals(1, fn.refCount)
-      assertTrue(!fn.isClosed, "still held once, must not be released yet")
-      fn.free()
-      assertTrue(fn.isClosed, "refcount hit zero, must be released")
-      // 归零后重复 free 必须安全
-      fn.free()
-      fn.close()
+      assertIs<JSFunction>(eval(ctx, "async (a) => a", name = "<testWrap>")).use { wrap ->
+        val obj = HashMap<String, Any?>()
+        obj["n"] = 42
+        obj["d"] = 1.5
+        obj["s"] = "text"
+        obj["b"] = true
+        obj["bytes"] = byteArrayOf(9, 8, 7)
+        obj["list"] = listOf(1, 2, 3)
+        // 只有函数仍是包装，普通对象整图展开
+        val wrapped = assertIs<Map<*, *>>(callAsync(wrap, obj))
+        assertEquals(42L, wrapped["n"])
+        assertEquals(1.5, wrapped["d"])
+        assertEquals("text", wrapped["s"])
+        assertEquals(true, wrapped["b"])
+        assertContentEquals(byteArrayOf(9, 8, 7), wrapped["bytes"] as ByteArray)
+        assertEquals(listOf(1L, 2L, 3L), wrapped["list"])
+
+        // 循环引用：a['a'] = a
+        val self = HashMap<String, Any?>()
+        self["a"] = self
+        val cyclic = assertIs<Map<*, *>>(callAsync(wrap, self))
+        assertTrue(
+          assertIs<Map<*, *>>(cyclic["a"]) === cyclic,
+          "recursive reference must map back to the same object",
+        )
+      }
+
+      // JS 侧的对象往回转也一样
+      assertIs<JSFunction>(eval(ctx, "async (o) => o", name = "<roundTrip>")).use { wrap ->
+        val fromJs = assertIs<Map<*, *>>(eval(ctx, "({a: 1, b: 'two'})"))
+        val back = assertIs<Map<*, *>>(callAsync(wrap, fromJs))
+        assertEquals(setOf("a", "b"), back.keys)
+        assertEquals(1L, back["a"])
+        assertEquals("two", back["b"])
+      }
     } finally {
       runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
-  /** JS 侧调用 Java 函数时，参数与 `thisVal` 都要原样送达。 */
-  @Test
-  fun jsInvokableReceivesThisValAndArgs() {
+  /** 引用计数：多持有一次就多归还一次；归零后重复 `free` 必须安全。 */
+  @Test(timeout = 60000)
+  fun refCountingFreesOnlyAtZero() {
+    context().let { ctx ->
+      try {
+        val fn = assertIs<JSFunction>(eval(ctx, "()=>1", name = "<eval>"))
+        assertEquals(1L, fn.invoke())
+        assertEquals(1, fn.refCount)
+        fn.dup()
+        assertEquals(2, fn.refCount)
+        fn.free()
+        assertEquals(1, fn.refCount)
+        assertTrue(!fn.isClosed, "still held once, must not be released yet")
+        fn.free()
+        assertTrue(fn.isClosed, "refcount hit zero, must be released")
+        // 归零后重复 free 必须安全
+        fn.free()
+        fn.close()
+      } finally {
+        runBlocking { ctx.closeAndAssertNoLeak() }
+      }
+    }
+  }
+
+  /** 故意不归还：close 时逐一报告，再 close 一次不重复打印。 */
+  @Test(timeout = 60000)
+  fun unreturnedReferencesAreReportedOnClose() {
+    val leaky = context()
+    repeat(64) {
+      eval(leaky, "(() => 1)", name = "<leak>")
+    }
+    val out = leaky.closeCapturingOut()
+    assertTrue("reference leak:" in out, "expected a reference leak report, got: $out")
+    assertEquals(
+      64,
+      out.split("\n").count { it.contains("JSFunction") },
+      "every registered function should be listed in the report",
+    )
+    assertEquals("", leaky.closeCapturingOut(), "a second close must not report again")
+  }
+
+  /** JS 调 Java：`thisVal` 与实参原样送达；Java 抛出的异常变成 JS 异常，不被吞掉。 */
+  @Test(timeout = 60000)
+  fun invokableCarriesCallAndSurfacesJavaErrors() {
     val ctx = context()
     try {
       val seenThis = ArrayList<Any?>()
@@ -202,30 +230,15 @@ class QuickJSTest {
             return "ok"
           }
         }
-      val call =
-        assertIs<JSFunction>(
-          eval(ctx, "(function (func, arg) { return func.call(this, arg) })", name = "<testThis>"),
-        )
-      try {
-        val ret = call.invoke(func, "arg", thisVal = mapOf("name" to "this"))
-        assertEquals("ok", ret)
+      assertIs<JSFunction>(
+        eval(ctx, "(function (func, arg) { return func.call(this, arg) })", name = "<testThis>"),
+      ).use { call ->
+        assertEquals("ok", call.invoke(func, "arg", thisVal = mapOf("name" to "this")))
         assertEquals("arg", seenArgs[0][0])
         // 回调里交出来的普通对象同样是纯数据
-        val thisVal = assertIs<Map<*, *>>(seenThis[0])
-        assertEquals("this", thisVal["name"])
-      } finally {
-        call.close()
+        assertEquals("this", assertIs<Map<*, *>>(seenThis[0])["name"])
       }
-    } finally {
-      runBlocking { ctx.closeAndAssertNoLeak() }
-    }
-  }
 
-  /** Java 异常必须转成 JS 异常，不能被吞掉。 */
-  @Test
-  fun javaExceptionBecomesJsError() {
-    val ctx = context()
-    try {
       val boom =
         object : JSInvokable {
           override fun invoke(
@@ -233,25 +246,22 @@ class QuickJSTest {
             thisVal: Any?,
           ): Any? = throw IllegalStateException("kaboom")
         }
-      val setter = assertIs<JSFunction>(eval(ctx, "(f) => { this.__f = f }", name = "<set>"))
-      try {
+      assertIs<JSFunction>(eval(ctx, "(f) => { this.__f = f }", name = "<set>")).use { setter ->
         setter.invoke(boom)
         val err = assertFailsWith<JSError> { eval(ctx, "__f()") }
         assertTrue(
           err.message?.contains("kaboom") == true,
           "expected java message to surface, got: ${err.message}",
         )
-      } finally {
-        setter.close()
       }
     } finally {
       runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
-  /** 三种 Promise 全转成 Deferred：已 resolve、已 reject、永不 settle。 */
-  @Test
-  fun promisesBecomeDeferred() =
+  /** Promise ↔ Deferred 双向：三种 settle 状态都要转，Kotlin 的 Deferred 进 JS 也要能 await。 */
+  @Test(timeout = 60000)
+  fun promisesAndDeferredsMapBothWays() =
     runBlocking {
       val ctx = context()
       try {
@@ -277,225 +287,94 @@ class QuickJSTest {
         )
         // 永不 settle 的 promise 不完成
         assertEquals(null, withTimeoutOrNull(200) { pending.await() })
-      } finally {
-        runBlocking { ctx.closeAndAssertNoLeak() }
-      }
-    }
 
-  /** Kotlin 的 Deferred 传进 JS 后应当是 Promise，可被 await。 */
-  @Test
-  fun deferredBecomesJsPromise() =
-    runBlocking {
-      val ctx = context()
-      try {
-        val d = CompletableDeferred<Any?>()
-        val consume = assertIs<JSFunction>(eval(ctx, "async (p) => await p", name = "<await>"))
-        try {
+        // 反向：Kotlin 的 Deferred 进 JS 后是 Promise
+        val deferred = CompletableDeferred<Any?>()
+        assertIs<JSFunction>(eval(ctx, "async (p) => await p", name = "<await>")).use { consume ->
           val job =
             CoroutineScope(Dispatchers.Default).launch {
               delay(50)
-              d.complete("done")
+              deferred.complete("done")
             }
-          assertEquals("done", callAsync(consume, d))
+          assertEquals("done", callAsync(consume, deferred))
           job.join()
-        } finally {
-          consume.close()
         }
       } finally {
         runBlocking { ctx.closeAndAssertNoLeak() }
       }
     }
 
-  /** 数组元素逐个原样落位。 */
-  @Test
-  fun arrayElementsConvertOnce() {
-    val ctx = context()
-    try {
-      // 数组分支用 ArrayList 承接，回来是 List
-      val arr = eval(ctx, "[1, 'a', true, null, [2, 3]]", name = "<arr>") as List<*>
-      assertEquals(5, arr.size)
-      assertEquals(1L, arr[0])
-      assertEquals("a", arr[1])
-      assertEquals(true, arr[2])
-      assertEquals(null, arr[3])
-      assertEquals(listOf(2L, 3L), arr[4])
-    } finally {
-      runBlocking { ctx.closeAndAssertNoLeak() }
-    }
-  }
-
-  /** ArrayBuffer ↔ `ByteArray`。 */
-  @Test
-  fun arrayBufferRoundTrip() {
-    val ctx = context()
-    try {
-      val bytes = byteArrayOf(1, 2, 3, 4)
-      val wrap = assertIs<JSFunction>(eval(ctx, "async (b) => b", name = "<testWrap>"))
+  /** 模块加载：handler 给的源码能 import；handler 返回 null 时必须抛错，而不是挂起或读到过期异常。 */
+  @Test(timeout = 60000)
+  fun modulesLoadAndMissingOnesThrow() {
+    context { name -> if (name == "test") "export default 'test module';" else null }.let { ctx ->
       try {
-        assertContentEquals(bytes, callAsync(wrap, bytes) as ByteArray)
+        eval(
+          ctx,
+          """
+          import handlerData from 'test';
+          export default { data: handlerData };
+          """.trimIndent(),
+          name = "evalModule",
+          flag = JSEvalFlag.MODULE,
+        )
+        val eventual = assertIs<Deferred<Any?>>(eval(ctx, "import('evalModule')", name = "<import>"))
+        val awaited = assertIs<Map<*, *>>(runBlocking { eventual.await() })
+        assertEquals("test module", assertIs<Map<*, *>>(awaited["default"])["data"])
       } finally {
-        wrap.close()
+        runBlocking { ctx.closeAndAssertNoLeak() }
       }
-    } finally {
-      runBlocking { ctx.closeAndAssertNoLeak() }
     }
-  }
 
-  /** 多 tag 对象往返后各字段的类型与取值不变。 */
-  @Test
-  fun objectWithVariousTagsRoundTrips() {
-    val ctx = context()
-    try {
-      val wrap = assertIs<JSFunction>(eval(ctx, "async (a) => a", name = "<testWrap>"))
+    context { null }.let { ctx ->
       try {
-        val obj = HashMap<String, Any?>()
-        obj["n"] = 42
-        obj["d"] = 1.5
-        obj["s"] = "text"
-        obj["b"] = true
-        obj["bytes"] = byteArrayOf(9, 8, 7)
-        obj["list"] = listOf(1, 2, 3)
-        // 普通对象整图展开成 Map，只有函数仍是包装
-        val wrapped = assertIs<Map<*, *>>(callAsync(wrap, obj))
-        assertEquals(42L, wrapped["n"])
-        assertEquals(1.5, wrapped["d"])
-        assertEquals("text", wrapped["s"])
-        assertEquals(true, wrapped["b"])
-        assertContentEquals(byteArrayOf(9, 8, 7), wrapped["bytes"] as ByteArray)
-        assertEquals(listOf(1L, 2L, 3L), wrapped["list"])
-      } finally {
-        wrap.close()
-      }
-    } finally {
-      runBlocking { ctx.closeAndAssertNoLeak() }
-    }
-  }
-
-  /** 模块加载：[QuickJS] 构造时给的 handler 返回的源码应能被 import。 */
-  @Test
-  fun moduleLoading() {
-    val ctx = context { name -> if (name == "test") "export default 'test module';" else null }
-    try {
-      eval(
-        ctx,
-        """
-        import handlerData from 'test';
-        export default { data: handlerData };
-        """.trimIndent(),
-        name = "evalModule",
-        flag = JSEvalFlag.MODULE,
-      )
-      val eventual = eval(ctx, "import('evalModule')", name = "<import>")
-      val mod = assertIs<Deferred<Any?>>(eventual)
-      val awaited = assertIs<Map<*, *>>(runBlocking { mod.await() })
-      val default = assertIs<Map<*, *>>(awaited["default"])
-      assertEquals("test module", default["data"])
-    } finally {
-      runBlocking { ctx.closeAndAssertNoLeak() }
-    }
-  }
-
-  /** handler 返回 null 时 import 必须抛错，而不是挂起或读到过期异常。 */
-  @Test
-  fun missingModuleThrows() {
-    val ctx = context { null }
-    try {
-      val err =
-        assertFailsWith<JSError> {
-          runBlocking {
-            val p = assertIs<Deferred<Any?>>(eval(ctx, "import('nope')", name = "<import>"))
-            p.await()
+        val err =
+          assertFailsWith<JSError> {
+            runBlocking {
+              assertIs<Deferred<Any?>>(eval(ctx, "import('nope')", name = "<import>")).await()
+            }
           }
-        }
-      assertTrue(
-        err.message?.contains("nope") == true || err.message?.contains("could not load module") == true,
-        "expected module load failure, got: ${err.message}",
-      )
-    } finally {
-      runBlocking { ctx.closeAndAssertNoLeak() }
-    }
-  }
-
-  /** 整图展开出来的普通对象就是 `Map`，两端各转一圈后读法不变。 */
-  @Test
-  fun expandedObjectBehavesLikeMap() {
-    val ctx = context()
-    try {
-      val wrap = assertIs<JSFunction>(eval(ctx, "async (o) => o", name = "<w>"))
-      try {
-        val obj = assertIs<Map<*, *>>(eval(ctx, "({a: 1, b: 'two'})"))
-        val wrapped = assertIs<Map<*, *>>(callAsync(wrap, obj))
-        assertEquals(setOf("a", "b"), wrapped.keys)
-        assertEquals(1L, wrapped["a"])
-        assertEquals("two", wrapped["b"])
+        assertTrue(
+          err.message?.contains("nope") == true || err.message?.contains("could not load module") == true,
+          "expected module load failure, got: ${err.message}",
+        )
       } finally {
-        wrap.close()
+        runBlocking { ctx.closeAndAssertNoLeak() }
       }
-    } finally {
-      runBlocking { ctx.closeAndAssertNoLeak() }
     }
   }
 
-  /** 未显式释放的值在 close 时被逐一报告，且 close 不崩。 */
-  @Test
-  fun unclosedValuesAreSweptOnClose() {
-    val ctx = context()
-    // 故意不 close()：函数是整图展开之后唯一还持票的东西
-    repeat(64) {
-      eval(ctx, "(() => 1)", name = "<leak>")
+  /** 关闭之后再用要拒；`close()` 与 `closeDeferred()` 穿插调用也只销毁一次。 */
+  @Test(timeout = 60000)
+  fun closedContextIsInertAndCloseIsIdempotent() {
+    context().let { ctx ->
+      assertEquals(2L, eval(ctx, "1 + 1"))
+      ctx.close()
+      assertFailsWith<IllegalStateException> { eval(ctx, "1 + 1") }
     }
-    // 64 个函数都没归还 → close 时逐一报告
-    val out = ctx.closeCapturingOut()
-    assertTrue(
-      "reference leak:" in out,
-      "expected a reference leak report, got: $out",
-    )
-    assertEquals(
-      64,
-      out.split("\n").count { it.contains("JSFunction") },
-      "every registered function should be listed in the report",
-    )
-    // 已关闭时再调一次不重复打印
-    assertEquals("", ctx.closeCapturingOut())
+
+    val idempotent = context()
+    runBlocking { idempotent.closeDeferred().join() }
+    idempotent.close()
+    runBlocking { idempotent.closeAndAssertNoLeak() }
   }
 
-  /** close 之后再用：抛 [IllegalStateException]。 */
-  @Test
-  fun closedContextIsInert() {
-    val ctx = context()
-    assertEquals(2L, eval(ctx, "1 + 1"))
-    ctx.close()
-    assertFailsWith<IllegalStateException> { eval(ctx, "1 + 1") }
-  }
-
-  /** 关闭幂等：`close()` 与 `closeDeferred()` 穿插调用也只销毁一次。 */
-  @Test
-  fun closeIsIdempotentAcrossEntryPoints() {
-    val ctx = context()
-    runBlocking { ctx.closeDeferred().join() }
-    ctx.close()
-    runBlocking { ctx.closeAndAssertNoLeak() }
-  }
-
-  /** `timeout` 必须把死循环变成可捕获的 JS 错误。 */
-  @Test
-  fun timeoutInterruptsInfiniteLoop() {
-    val ctx = QuickJS(timeout = 1000)
-    try {
-      assertEquals(1L, eval(ctx, "1"))
-      val err = assertFailsWith<JSError> { eval(ctx, "while(true) {}") }
-      assertTrue(
-        err.message?.startsWith("InternalError: interrupted") == true,
-        "expected an interrupt error, got: ${err.message}",
-      )
-    } finally {
-      runBlocking { ctx.closeAndAssertNoLeak() }
+  /** 跑飞的脚本要能被停掉：`timeout` 打断死循环，`memoryLimit` 触发 out of memory。 */
+  @Test(timeout = 60000)
+  fun runawayScriptsAreInterruptedOrCapped() {
+    QuickJS(timeout = 1000).let { ctx ->
+      try {
+        assertEquals(1L, eval(ctx, "1"))
+        val err = assertFailsWith<JSError> { eval(ctx, "while(true) {}") }
+        assertTrue(
+          err.message?.startsWith("InternalError: interrupted") == true,
+          "expected an interrupt error, got: ${err.message}",
+        )
+      } finally {
+        runBlocking { ctx.closeAndAssertNoLeak() }
+      }
     }
-  }
 
-  /** `memoryLimit` 触发 out of memory。 */
-  @Test
-  fun memoryLimitIsEnforced() {
     QuickJS(memoryLimit = 1_000_000).use { ctx ->
       val err = assertFailsWith<JSError> { eval(ctx, "new Array(1000000).fill(0)") }
       assertTrue(
@@ -503,5 +382,53 @@ class QuickJSTest {
         "expected an out-of-memory error, got: ${err.message}",
       )
     }
+  }
+
+  /** finalizer 探针：被 JS 丢掉之后应当收到一次 `close()`。 */
+  private class Counted : AutoCloseable {
+    val closes = AtomicInteger(0)
+
+    override fun close() {
+      closes.incrementAndGet()
+    }
+  }
+
+  /** 有 `close()` 方法但**没实现** [AutoCloseable]：接口判据要看穿它。 */
+  private class Plain {
+    val closes = AtomicInteger(0)
+
+    fun close() {
+      closes.incrementAndGet()
+    }
+  }
+
+  /** JS 侧丢掉的 Java 对象，销毁时只对实现了 `AutoCloseable` 的调一次 `close()`；同名方法没实现接口的必须是 0。 */
+  @Suppress("UNCHECKED_CAST")
+  @Test(timeout = 60_000)
+  fun runtimeDestroyClosesAutoCloseablesOnly() {
+    val counted = Counted()
+    val plain = Plain()
+    val ctx = QuickJS()
+    runBlocking {
+      // 只当实参传一次：jsCallImpl 的 finally 归还这张票
+      val fn = ctx.evaluate("(function(x) { return x; })", "<probe>") as JSFunction
+      fn.use {
+        it.invoke(counted)
+        it.invoke(plain)
+      }
+      // 关 runtime 后 finalizer 逐个跑一遍
+      ctx.close()
+    }
+    assertEquals(
+      1,
+      counted.closes.get(),
+      "the finalizer should call close once for JS when the runtime is destroyed, got ${counted.closes.get()} call(s)",
+    )
+    assertEquals(
+      0,
+      plain.closes.get(),
+      "a close() method without the AutoCloseable interface must be left alone, " +
+        "got ${plain.closes.get()} call(s) -- the finalizer is duck-typing",
+    )
   }
 }

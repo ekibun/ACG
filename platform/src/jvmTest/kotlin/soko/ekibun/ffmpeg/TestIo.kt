@@ -1,24 +1,17 @@
 package soko.ekibun.ffmpeg
 
-import java.util.concurrent.atomic.AtomicBoolean
-
-/**
- * 内存字节源假 IO：read / seek 契约同 FileIO、HttpIO，`abort()` 之后读与 seek 立刻失效。
- */
-class TestIo(
+/** 内存字节源：EOF 给 `AVERROR_EOF`，越界 seek 给 -1。 */
+class TestIO(
   private val bytes: ByteArray,
-) : AvIO.Handler {
-  private val aborted = AtomicBoolean(false)
-
+) : AvIO.Handler() {
   override fun open(url: String): AvIO =
     object : AvIO {
       private var offset = 0L
 
-      override fun read(
+      override suspend fun runSuspend(
         buf: ByteArray,
         len: Int,
       ): Int {
-        if (aborted.get()) return AvFormat.AVERROR_EOF
         if (offset >= bytes.size) return AvFormat.AVERROR_EOF
         val n = minOf(len.toLong(), bytes.size - offset).toInt()
         bytes.copyInto(buf, 0, offset.toInt(), offset.toInt() + n)
@@ -30,7 +23,6 @@ class TestIo(
         offset: Int,
         whence: Int,
       ): Int {
-        if (aborted.get()) return -1
         if (whence == AvFormat.AVSEEK_SIZE) return bytes.size
         val position =
           when (whence) {
@@ -45,8 +37,19 @@ class TestIo(
 
       override fun close() {}
     }
+}
 
-  override fun abort() {
-    aborted.set(true)
-  }
+/** 恒失败的 `AvIO`：`read` / `seek` 一律 -1，让 `avformat_open_input` 自己失败。 */
+internal object FailingAvIO : AvIO {
+  override suspend fun runSuspend(
+    buf: ByteArray,
+    len: Int,
+  ): Int = -1
+
+  override fun seek(
+    offset: Int,
+    whence: Int,
+  ): Int = -1
+
+  override fun close() {}
 }

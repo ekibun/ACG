@@ -6,31 +6,26 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/** [SettingsStore] 的落盘行为：空读、写盘、`null` 删键。 */
+/** [SettingsStore] 的落盘链路：空读 → 写盘 → 落到磁盘 → `null` 删键 → 删空。 */
 class SettingsStoreTest {
-  @Test
-  fun readsEmptyBeforeAnyWrite() =
-    runBlocking {
-      assertEquals(
-        emptyMap(),
-        tempStore().read(),
-        "reading a file that does not exist yet yields an empty map, not an error",
-      )
-    }
-
-  @Test
-  fun writesToDiskAndDeletesOnNull() =
+  @Test(timeout = 60000)
+  fun roundTripLandsOnDiskAndDeletesOnNull() =
     runBlocking {
       val dataDir = Files.createTempDirectory("acg-settings").resolve("nested")
       val path = dataDir.resolve("settings.preferences_pb")
       assertTrue(!Files.exists(dataDir), "precondition: the parent directory does not exist yet")
       val store = createSettingsStore(path.toString())
 
-      store.write(mapOf("bgm.client_id" to "client-1", "bgm.client_secret" to "s3cret"))
+      // 还没写过：空 map，不是异常
       assertEquals(
-        mapOf("bgm.client_id" to "client-1", "bgm.client_secret" to "s3cret"),
+        emptyMap(),
         store.read(),
+        "reading a file that does not exist yet yields an empty map, not an error",
       )
+
+      val settings = mapOf("bgm.client_id" to "client-1", "bgm.client_secret" to "s3cret")
+      store.write(settings)
+      assertEquals(settings, store.read())
       assertTrue(
         Files.size(path) > 0,
         "the write must land on disk -- DataStore creates the parent directory itself on a first run",
@@ -42,9 +37,4 @@ class SettingsStoreTest {
       store.write(mapOf("bgm.client_secret" to null))
       assertEquals(emptyMap(), store.read())
     }
-
-  private fun tempStore(): SettingsStore {
-    val path = Files.createTempDirectory("acg-settings").resolve("settings.preferences_pb")
-    return createSettingsStore(path.toString())
-  }
 }

@@ -5,15 +5,15 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.StandardCopyOption
 
-/** 随源码入库的测试媒体（`src/jvmTest/resources/media/`）：取真实路径，拿不到才复制成临时文件。 */
+/** 随源码入库的测试媒体（仓库根的 `test-media/`，两个模块的 jvmTest 共用）：取真实路径，拿不到才复制成临时文件。 */
 internal object TestMedia {
   /**
    * h264 High 640×360 25fps 12s + AAC 44.1kHz 立体声，moov 在头部（faststart），443 KB。
    */
-  const val BBB_640X360_12S_FASTSTART = "media/bbb-640x360-12s-faststart.mp4"
+  const val BBB_640X360_12S_FASTSTART = "bbb-640x360-12s-faststart.mp4"
 
-  /** 夹广告的 HLS（12s 主片 + 5.1s 广告 + 12s 主片），见 `media/README.md`。 */
-  const val HLS_AD_PLAYLIST = "media/hls-ad/playlist.m3u8"
+  /** 夹广告的 HLS（12s 主片 + 5.1s 广告 + 12s 主片），见 `test-media/README.md`。 */
+  const val HLS_AD_PLAYLIST = "hls-ad/playlist.m3u8"
 
   /** 取素材的真实路径：能解析出文件就用文件，否则复制成临时文件。 */
   fun path(name: String): Path = resourcePath(name) ?: copyToTemp(name)

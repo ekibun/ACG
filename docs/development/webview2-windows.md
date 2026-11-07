@@ -105,7 +105,7 @@ WebView2 支持两种方式，且会**合并**：环境变量 / 注册表的值�
 - **DO**：任何参数结论都必须在真宿主里复测，那里才有已知可用的基线（例如 `about:blank` 能成功）。
 - **DO**：始终保留一个健康检查用例，导航一个极简页面并断言脚本结果 —— 这样"引擎死了"会被报成一次 skip，而不是 N 个超时。
   判据要落在 **skipped 计数**上：`println` + 早退在 XML 里是 passed，等于"全绿"与"一条都没验"分不开。实现用
-  `skipUnlessHostIsAvailable`（抛 JUnit4 的 `TestAbortedException`），见 `WebviewHostHealth.kt` 与 `HostSkip.kt`。
+  `TestEnv.skipUnlessHostAvailable()`（抛 JUnit4 的 `AssumptionViolatedException`），见各模块的 `TestEnv.kt`。
 
 ---
 
@@ -351,7 +351,7 @@ AWT/Compose 做不了逐像素点击穿透；唯一办法是在覆盖层 HWND �
 
 **fix（DO/DON'T）**：
 - **DON'T**：别写「命中 → 再放行」这种时序 —— 它在真引擎里不可达。
-- **DO**：要验「放行」就一次都别命中——接了回调、每次都返回 `null`、只记录不复议，页面照样跑完（回调在每次请求上都被调不止一次，这本身也是「放行不影响加载」的证据）。回归在 `WebViewHostTest.releasingEveryRequestLetsPageFinish`。
+- **DO**：要验「放行」就一次都别命中——接了回调、每次都返回 `null`、只记录不复议，页面照样跑完（回调在每次请求上都被调不止一次，这本身也是「放行不影响加载」的证据）。回归在 `JsEngineTest.releasingEveryRequestLetsPageFinish`。
 - **DO**：写这类时序断言前先问——真实现里这条时序存在吗？别把桩（桩里的手攥 `CompletableDeferred` 有那道闸门，真实现没有对应物）的时序翻译成真引擎版。
 
 ---

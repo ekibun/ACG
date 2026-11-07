@@ -16,7 +16,7 @@
 
 ⇒ 数据没到就一直等，不能返回 0 让上层重试；返回 0 在 aviobuf 的 bypass 分支里是原地死循环。
 
-⇒ 阻塞只允许出现在 `BaseIO.read` 一处（`runBlocking`）：`AvIO.read` 要同步签名，而建会话 / 等数据 /
+⇒ 阻塞只允许出现在 `AvIO.read` 一处（`runBlocking`）：它要同步签名，而建会话 / 等数据 /
 推游标整条链路都是 `suspend`。`HttpIO` / `FileIO` 各自只写挂起主体 `runSuspend`。
 
 ### 1.2 叫醒阻塞读的手段是取消协程
@@ -87,7 +87,7 @@
 
 ## 二、本地文件的 `AvIO`（`player/FileIO.kt`）
 
-⇒ 读同样走 `BaseIO.read`（`runBlocking` + 作废时返回 `len`）：本地读不等网络，但收场语义必须与 HTTP
+⇒ 读同样走 `AvIO.read`（`runBlocking` + 作废时返回 `len`）：本地读不等网络，但收场语义必须与 HTTP
 一致，否则 `AvFormat.resetChannel` 的作废对两种实现是两套行为。`FileIO` 只有 `runSuspend` 是自己写的。
 
 ⇒ EOF 必须翻成 `AvFormat.AVERROR_EOF`，不能返回 0：aviobuf 只把 `AVERROR_EOF` / 负数当终止，返回 0 是
@@ -175,6 +175,10 @@ peer 与父子关系都不动。表单内容、滚动位置、登录进度都留
 这条比「省资源」重要得多：**摘组合 = 销毁 AWT peer = WebView2 的原生窗口被系统一并销毁**，
 再挂回去是给一个可能已经不存在的窗口 `SetParent`。收成 0 高就绕开了整条链路。
 
+**手工验法**（没有对应用例：它要真 WebView2 宿主，量的是平台行为而不是我们的代码）：
+`./gradlew :shared:debugCode` → 填「示例：后台」→ 点 `Run>` → 右下角出现胶囊后点开切前台，
+页面应保留原状态；再点胶囊收回去，来回几次都不该白屏或丢内容。
+
 ⇒ **脚本返回 null 表示「还没到位」**，等下一次 `PageFinished` 再跑。少了这一条，登录页刚加载完
 就触发 `PageFinished`，脚本一看「还在登录页」返回 null，任务当场就结束了，用户根本没机会输密码。
 `null` / `"null"` / 空串都算没结果；`false` 之类是真值，照收。用户在前台手动过验证码后，
@@ -195,9 +199,9 @@ peer 与父子关系都不动。表单内容、滚动位置、登录进度都留
 ⇒ **重新挂载点在 `addNotify()`**。`componentShown` / `componentResized` 也会把 `attach` 带出来，
 但那是顺便：尺寸没变时 resize 不来，复用的组件也不会再走一次 show。addNotify 是唯一必然发生的点。
 
-⇒ 这条链有回归测试：`platform/src/jvmTest/.../WebviewCanvasRemountTest.kt` 用真实 AWT 宿主走一遍
-「挂上 → 摘掉 → 再挂上」，靠页面里的 `innerWidth` 判定窗口是否还活着且已重贴尺寸（窗口没了
-`evaluate` 直接返回 null，没重贴则是 1）。
+⇒ 这条链**没有自动回归**（原来的 `WebviewCanvasRemountTest` 随 jvmTest 精简删掉了，它要真开 AWT 窗口）：
+手工验法是 `debugWeb` 里把 WebView 组件挂上、摘掉、再挂回同一个 `Container`，看页面里的
+`innerWidth` 是否仍是窗口宽度（窗口没了 `evaluate` 直接返回 null，没重贴则是 1）。
 
 ⇒ 任务列表由引擎登记（`WebviewTasks`），界面只读：这样「请求先到、界面后组合」也能追上。
 
@@ -215,6 +219,10 @@ peer 与父子关系都不动。表单内容、滚动位置、登录进度都留
 
 ⇒ **覆盖层的点击拦截不必自己写**：`WebViewPane` 是 `Surface`，本身占住命中区域；后台任务面板
 高度为 0，点击自然落到页面上。外层再叠一层 `background` + 吞事件的 `pointerInput` 是重复的。
+
+这条**没有自动用例**：它量的是 Compose 的命中测试（兄弟布局 + `Surface` 占位），不是本工程的代码。
+手工验：`debugCode` 里后台时点页面该有反应，切前台后点顶栏该没反应（原来那条 `ImageComposeScene`
+用例只是把这个框架行为钉了一遍，删掉不丢判据）。
 
 ⇒ 工具栏只用 `←` `→` 与中文标签，不引图标库：`⟳` 这类符号在 Android 系统字体里不一定有，
 会渲染成方块。按钮可点区域靠 `clickable` + `padding` 撑开，命中范围不随字形宽度缩水。

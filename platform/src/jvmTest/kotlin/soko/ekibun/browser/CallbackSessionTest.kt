@@ -21,31 +21,24 @@ class CallbackSessionTest {
   /** 会话的路径段（带前导斜杠），浏览器要打的就是它。 */
   private fun CallbackSession.path(): String = "/" + callbackUrl.substringAfterLast('/')
 
-  @Test
-  fun callbackUrlIsLoopbackSessionAddress() {
-    val session = createCallbackSession()
-    try {
-      val uri = URI(session.callbackUrl)
-      assertEquals("http", uri.scheme, session.callbackUrl)
-      assertEquals("127.0.0.1", uri.host, "loopback only: nobody else on the network may complete the login")
-      assertTrue(uri.port in 1..65535, "the port is assigned by the OS: ${session.callbackUrl}")
-      assertTrue(
-        uri.path.removePrefix("/").matches(Regex("[0-9a-f]{24}")),
-        "the path segment should be a hex session id: ${session.callbackUrl}",
-      )
-      // 无 query、无尾斜杠
-      assertNull(uri.query, session.callbackUrl)
-      assertFalse(session.callbackUrl.endsWith("/"), session.callbackUrl)
-    } finally {
-      session.close()
-    }
-  }
-
-  @Test
-  fun sessionsShareThePortAndDifferByPath() {
+  /** 地址形状：只绑回环、端口由系统给、路径段是十六进制会话号，且会话之间只靠路径区分。 */
+  @Test(timeout = 60000)
+  fun callbackUrlIsALoopbackSessionAddress() {
     val first = createCallbackSession()
     val second = createCallbackSession()
     try {
+      val uri = URI(first.callbackUrl)
+      assertEquals("http", uri.scheme, first.callbackUrl)
+      assertEquals("127.0.0.1", uri.host, "loopback only: nobody else on the network may complete the login")
+      assertTrue(uri.port in 1..65535, "the port is assigned by the OS: ${first.callbackUrl}")
+      assertTrue(
+        uri.path.removePrefix("/").matches(Regex("[0-9a-f]{24}")),
+        "the path segment should be a hex session id: ${first.callbackUrl}",
+      )
+      // 无 query、无尾斜杠
+      assertNull(uri.query, first.callbackUrl)
+      assertFalse(first.callbackUrl.endsWith("/"), first.callbackUrl)
+
       assertEquals(
         first.origin(),
         second.origin(),
@@ -58,54 +51,41 @@ class CallbackSessionTest {
     }
   }
 
-  @Test
-  fun deliversRawRequestTargetAndIgnoresOtherPaths() =
-    runBlocking {
-      val session = createCallbackSession()
-      try {
-        // 非会话路径：回 404，且会话不被带走。
-        assertEquals(404, request(session.origin(), "/favicon.ico").status)
-
-        val target = session.path() + "?code=4808dfb7&state=probe%2B1&x=%E4%B8%AD"
-        val response = request(session.origin(), target)
-        assertEquals(200, response.status)
-        assertTrue(response.body.isNotEmpty(), "the callback page should have a body: ${response.body}")
-
-        assertEquals(
-          "${session.origin()}$target",
-          session.awaitCallback(),
-          "the delivered value must be the verbatim request-target -- decoding is the plugin's job, segment by segment",
-        )
-      } finally {
-        session.close()
-      }
-    }
-
-  @Test
-  fun hittingOneSessionLeavesTheOtherPending(): Unit =
+  /** 路由只看路径：别的路径 404、撤掉的打不通；交付出去的是原样 request-target。 */
+  @Test(timeout = 60000)
+  fun routesOnlyToTheAddressedSessionAndDeliversRawTarget() =
     runBlocking {
       val first = createCallbackSession()
       val second = createCallbackSession()
       try {
-        assertEquals(200, request(second.origin(), second.path() + "?code=second").status)
-        assertEquals("${second.origin()}${second.path()}?code=second", second.awaitCallback())
+        // 非会话路径：回 404，且不带走任何会话
+        assertEquals(404, request(second.origin(), "/favicon.ico").status)
+
+        val target = second.path() + "?code=4808dfb7&state=probe%2B1&x=%E4%B8%AD"
+        val response = request(second.origin(), target)
+        assertEquals(200, response.status)
+        assertTrue(response.body.isNotEmpty(), "the callback page should have a body: ${response.body}")
+        assertEquals(
+          "${second.origin()}$target",
+          second.awaitCallback(),
+          "the delivered value must be the verbatim request-target -- decoding is the plugin's job, segment by segment",
+        )
+
+        // 命中第二条不影响第一条
         assertFailsWith<TimeoutCancellationException>("the first session must not be fulfilled by the second") {
           withTimeout(500) { first.awaitCallback() }
         }
+
+        // 撤掉的会话再也兑现不了
+        val origin = first.origin()
+        val afterClose = first.path() + "?code=after-close"
+        first.close()
+        assertEquals(404, request(origin, afterClose).status, "a closed session must not be fulfillable anymore")
       } finally {
         first.close()
         second.close()
       }
     }
-
-  @Test
-  fun closedSessionIsNotFound() {
-    val session = createCallbackSession()
-    val origin = session.origin()
-    val target = session.path() + "?code=after-close"
-    session.close()
-    assertEquals(404, request(origin, target).status, "a closed session must not be fulfillable anymore")
-  }
 
   private data class Response(
     val status: Int,

@@ -60,7 +60,7 @@
 - **为什么缓做**：近期无脚本需要增量读 —— 内置 JS 只有 init.js 与 crypto.js，现有套路全是  
   整包消费；播放链路不走 JS（`HttpIO` 直连 Kotlin 契约）；全员收益只有「治 fetch 卡死」  
   一项（低频故障）。E8 的「JS 数据源契约」是可预见的消费方，随它一起落地。
-- **完成判据**：定点测试 `JsEngineDispatchTest` 加两条 —— ① 渐进读：服务端 3 片写、片间  
+- **完成判据**：定点测试 `JsEngineTest` 加两条 —— ① 渐进读：服务端 3 片写、片间  
   sleep 250ms，断言「fetch 返回 → 读完」的时间差 ≥ 150ms（整包缓冲版 ≈0 会红）、聚合总数  
   == 发出总数、reads ≥ 2（64KB cap 保证，TCP 合片也不误判）、close 后 read 为 null；② 跨  
   chunk 多字节 UTF-8："a中" 的字节拆两片写，`text()` == "a中"；既有 `fetchBranchIsReachable`  
@@ -99,7 +99,7 @@
     `ID3D11VideoProcessor` 把硬解纹理转成 RGBA 写进 NT 共享纹理环，Skia 的 D3D12 设备
     `OpenSharedHandle` 打开同一块显存，`BackendRenderTarget` → blit → 快照 → `drawImageRect`。
     像素全程不落 CPU，也没有每帧的 `Image.makeRaster` 分配。判据与四个坑见
-    `docs/development/hardware-decoding.md` §五，用例 `DesktopZeroCopyTest`。
+    `docs/development/hardware-decoding.md` §五，用例 `DesktopSurfaceContextTest`。
   - **回退仍在**：Skiko 不是 Direct3D 后端、设备不可共享、或没有硬解时，
     `DesktopSurfaceContext.isHardwareVideo = false`，退回原来的 `makeRaster` 逐帧拷贝
     （native `videoBuffer` → 复用 JVM `buf` → Skia Image → GPU 上传）。
@@ -214,7 +214,7 @@
   - 窗口满 + 解码器输出槽压着一帧时，`send` 恒 EAGAIN、`receive` 恒空数组，两个入口都不会自己
     前进；播放轮靠 playJobs 当场消费帧自己解开，步进轮会空转到轮次结束。**不能靠「轮次结束就
     丢包」来解**——`stepForward` 不 seek，丢一个包下一次步进就跳帧
-    （`FFPlayerSeekFrameSequenceTest` 会红）。
+    （`FFPlayerTest` 会红）。
 - **上一版实现**：`git stash list` 的 `帧窗口/逐帧回调重构（未完成，下一轮再说）`（另存了一份
   `/tmp/wt-window-refactor.patch`）。含 `AvCodec.sendPacket(packet, isAlive, onFrame)`、native 收帧改
   一帧一取、native 记账（`videoOutputHasRoom` + `FrameSlots`）的引入与删除、闸门改按视频队列、四个

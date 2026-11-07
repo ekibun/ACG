@@ -96,6 +96,7 @@ object DevStrip {
       }
     }
     strip.pack()
+    println("[dev] control strip attached to \"${(owner as? java.awt.Frame)?.title ?: owner.name}\"")
 
     fun follow() {
       strip.pack()

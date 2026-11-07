@@ -122,5 +122,5 @@ const token = await fetch(tokenEndpoint, {
 | 验什么 | 在哪 |
 | --- | --- |
 | 回环服务器本身（地址形状、按路径区分、原样交付、撤掉即 404、请求并行不串扰） | `platform/src/jvmTest/kotlin/soko/ekibun/browser/CallbackSessionTest.kt` |
-| `openBrowserAsync` 的编排（占位符换成什么、返回什么形状；`launch` 注入，不真开浏览器） | `shared/src/jvmTest/kotlin/soko/ekibun/acg/engine/BrowserLoginTest.kt` |
-| JS 侧 `openBrowser` 的真派发（只走模板校验那一支 —— 真跑到底会弹浏览器） | `shared/src/jvmTest/kotlin/soko/ekibun/acg/engine/JsEngineDispatchTest.kt` |
+| `openBrowserAsync` 的编排（占位符换成什么、返回什么形状；`launch` 注入，不真开浏览器） | `JsEngineTest.openBrowserSubstitutesEncodedCallback`（原 `BrowserLoginTest` 已删） |
+| JS 侧 `openBrowser` 的真派发（只走模板校验那一支 —— 真跑到底会弹浏览器） | `shared/src/jvmTest/kotlin/soko/ekibun/acg/engine/JsEngineTest.kt` |

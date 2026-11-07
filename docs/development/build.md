@@ -8,25 +8,26 @@
   `cxx/` 跑 `build.jni.sh`，产物落在 `cxx/build/bin/`。
 - `:desktopApp:stageNativeLibs` 是「库从哪来」的唯一判定点，所有消费 native 库的任务都挂它：
   `:desktopApp:processResources`（IDE 直跑 MainKt 用）、`:desktopApp:syncNativeResources`（run 与
-  打包共用）、`:shared:jvmTestProcessResources` 与 `:platform:jvmTestProcessResources`。
+  打包共用）、`:shared:jvmTest` 与 `:platform:jvmTest`（这两个不拷库，只把 `cxx/build/bin` 当
+  目录型 classpath 条目挂进测试运行时）。
   它只在本地编译时挂 `buildJni`；从属 worktree 里不挂任何东西（库直接读主仓的），见下节。
 - `:desktopApp:clangCheck` / `:desktopApp:clangFormat` 走 `cxx/format.jni.sh`，范围是 `cxx/` 下三个顶层 C++ 文件。
-- `:shared:devToolsAgentJar` 从测试运行时类路径里只挑 `soko/ekibun/DevToolsAgent*` 打成 premain agent jar，
-  清单写 `Premain-Class`。
-- `:shared:debugPlay` 注入 `-javaagent` 与 `-Dacg.dev.*` 参数；`:desktopApp:hotRun` 跑正式应用，
-  不再挂 agent。
+- `:shared:debugPlay` 与其它 debug 任务同一份配置，不再注入 `-javaagent` / `-Dacg.dev.*`：
+  dev 服务器与 DEV 控制条由 `DebugPlayScreen.main` 自己拉起（`startDevServer()` + `DevStrip.attach()`）。
 
 ## dll 落位
 
-原生库（主仓的 `cxx/build/bin/`；从属 worktree 直接读它，不复制）出现在五个位置：
+原生库（主仓的 `cxx/build/bin/`；从属 worktree 直接读它，不复制）落到三个位置：
 
 | 位置 | 供谁用 |
 | --- | --- |
-| `shared/build/processedResources/jvm/test/` | `:shared:jvmTest` |
-| `platform/build/processedResources/jvm/test/` | `:platform:jvmTest` |
 | `desktopApp/build/resources/main/` | IDE 直跑 MainKt |
 | `desktopApp/build/compose/tmp/prepareAppResources/` | `run` 与打包 |
 | `<app-image>/app/resources/` | 打包态 |
+
+两个模块的 `jvmTest` 不落位也不拷贝：`cxx/build/bin` 作为**目录型 classpath 条目**挂进
+`jvmTestRuntimeClasspath`，`loadLibrary` 的第二条分支（`Binding.jvm.kt`）按资源 URL 直接 `System.load`。
+测试媒体 `test-media/` 同理。两个 `jvmTest` 任务显式 `dependsOn(":desktopApp:stageNativeLibs")` 保证库已产出。
 
 - `jar` 任务 `exclude("**/*.dll")`，原生库不进 jar。
 - `syncNativeResources` 用 `Sync`（不是 `Copy`）：目标目录是来源目录的镜像，来源里删掉的库跟着消失。
@@ -39,10 +40,10 @@ worktree 的约定是「只改 Kotlin、UI 哪都能测」，所以只用主仓�
 - 识别：`git rev-parse --git-common-dir` 落在主仓的 `.git`、而 `--show-toplevel` 是别处，就是从属
   工作树，主仓根取 common dir 的上一级。主仓自己、非 git 仓库都不触发。判定只在根
   `build.gradle.kts` 里一次，结果经 `acgNativeBinDir` 交给各模块。
-- 主仓 `<主仓根>/cxx/build/bin` 有 dll 就复用：根脚本把这个**目录**交给各模块，消费方
-  （`processResources`、`syncNativeResources`、两处 `jvmTestProcessResources`）从它 `from()` 进
-  各自的资源目录 —— worktree 里**不复制**一份 `cxx/build/bin`，`buildJni` 也不在任务图里。落位与
-  加载顺序不变；主仓重编 dll 后，这里下次构建自动拿到新的。
+- 主仓 `<主仓根>/cxx/build/bin` 有 dll 就复用：根脚本把 `cxx/build/bin` 的路径写成 `acgNativeBinDir`
+  交给各模块，消费方（`processResources`、`syncNativeResources`）从它 `from()` 进各自的资源目录，
+  两个 `jvmTest` 则直接把它当 classpath 目录 —— worktree 里**不复制**一份 `cxx/build/bin`，
+  `buildJni` 也不在任务图里。主仓重编 dll 后，这里下次构建自动拿到新的。
 - 主仓没编过桌面端时退回本地编译并告警（那种情况本来也编不动）。
 - 复用方照旧能 `:desktopApp:run`、`hotRun`、打包：只是库的来源不同。
 - Android：没有复用路径。worktree 里跑 `:androidApp:externalNativeBuildDebug` / `assembleDebug`
@@ -73,16 +74,15 @@ worktree 的约定是「只改 Kotlin、UI 哪都能测」，所以只用主仓�
   classpath 应用对应匿名模块，取值固定为 `ALL-UNNAMED`。
 - `-ea:soko.ekibun...`：打开本包（含子包）的 JVM 断言，用于 `Pointer.ptr` 的同线程断言等。
 - `-XX:ErrorFile=<build>/hs_err_pid%p.log`：测试进程崩溃时的现场报告落到 `build/` 下。
-- `-Dstdout.encoding=UTF-8` / `-Dstderr.encoding=UTF-8`：`devMediaServer` 的输出编码。
+- `-Dstdout.encoding=UTF-8` / `-Dstderr.encoding=UTF-8`：调试窗口与 dev 服务器的输出编码。
 - `MSYS2_BIN` 由 `tasks.withType<JavaExec>` 显式透传：`JavaExec` 继承的是 Gradle daemon 的环境。
-- 测试任务不注 `-Dacg.dataDir`，数据目录由各测试类的 `TestPaths` 注入。
+- 测试任务不注 `-Dacg.dataDir`，数据目录由各测试的 `TestEnv.ensurePaths()` 注入。
 
 ## dev 媒体服务器
 
-- `:shared:devMediaServer` 手动常驻启动（`DevServerKt`），工作目录为仓库根。
-- `debugPlay` 链路把 agent 挂到验证窗口进程，传 `-javaagent`、`-Dacg.dev.server.port`、
-  `-Dacg.dev.classpath`、`-Dacg.dev.pidfile`、`-Dacg.dev.logfile`、`-Dacg.dev.workdir`。
-  服务器随窗口进程起落，窗口一关就收场。
+- 唯一的入口是 `debugPlay` 窗口：它的 `main` 调 `startDevServer()`，服务器起在**同一进程**里，端口由
+  系统现给（bind 0），控制台打出 `serving at: http://127.0.0.1:<port>/media`。没有子进程、没有 PID /
+  端口文件，也没有跨会话的端口冲突；关窗口就随 JVM 一起没了。
 
 ## 检查范围
 

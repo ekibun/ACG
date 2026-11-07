@@ -265,9 +265,10 @@ classDiagram
 | --- | --- | --- |
 | `expect VideoSurface(onSurfaceContext, …)` | 建 `DesktopSurfaceContext`：Skia `makeRaster` 绘制 + `javax.sound.sampled` | 建 `AndroidSurfaceContext`：`Surface` 贴图 |
 
-树外接口是 `AvIO`（+ `AvIO.Handler`），实现落在 `:shared` 的 `player` 包：`BaseIO` 折平同步读，`HttpIO` /
-`FileIO` 只写挂起主体，`IOHandler` 持「叫醒当前读」的投递口并按 url 的 scheme 分发 —— native
-的 avio 回调从这里进来（见下文「播放链」）。它反过来：实现不持 native 句柄，只被 native 同步调用。
+树外接口是 `AvIO`（+ `AvIO.Handler`）：接口自己折平同步读，`Handler` 持「叫醒当前读」的投递口。
+实现在 `:shared` 的 `player` 包：`HttpIO` / `FileIO` 只写挂起主体 `runSuspend`，`IOHandler` 按 url 的
+scheme 分发 —— native 的 avio 回调从这里进来（见下文「播放链」）。它反过来：实现不持 native
+句柄，只被 native 同步调用。
 
 ### 业务层（`:shared`）—— 两族的调用方
 
@@ -289,9 +290,10 @@ classDiagram
 - **`engine`** —— `JsEngine`，全进程单例（`JsEngine.instance`）。持一个惰性建的 QuickJS runtime，
   把 JS 侧那一**份**能力桥 `_binding(method, args)` 落到 Kotlin 原语上；后台 WebView 驱动
   `webviewAsync` 也住在这个文件里。细节见下文「脚本插件链」。
-- **`player`** —— 播放链与网络 / 磁盘相接的唯一处：`BaseIO`（唯一一处 `runBlocking` + 作废投递口）、
-  `HttpIO`（range 会话 + 白读推进 + 闲置超时）、`FileIO`（本地文件）、`IOHandler`（native `io_open` 的
-  入口，按 scheme 分发到上面两者）。它们被 native 的 avio 回调**同步调用**。
+- **`player`** —— 播放链与网络 / 磁盘相接的唯一处：`HttpIO`（range 会话 + 白读推进 + 闲置超时）、
+  `FileIO`（本地文件）、`IOHandler`（native `io_open` 的入口，按 scheme 分发到上面两者）。它们被
+  native 的 avio 回调**同步调用**；同步读的折平（唯一一处 `runBlocking`）与作废投递口在 `:platform`
+  的 `AvIO` 里。
   `HttpIO` 之外还挂一层**进程级**的块缓存 `HttpCache`（512 块 ≈ 16 MiB、按 URL + 块号键、只当加速使，
   命中不了就退回网络那条路；约束见 `development/playback-invariants.md` §5.7）。
 
@@ -418,8 +420,8 @@ flowchart TD
   之间的帧（`resyncTo` 收敛，对应 ffplay 的 `frame_drops_early`）。两者缺一不可。
 - **送显与丢帧的先后**：同一轮内相邻两帧必须**先等上一帧送显完**，否则上一帧会显示成本帧的像素。
 - **暂停不停取包**：轮次判据不含 `pts.playing`，暂停期间照常解码入队 —— 这就是预读缓存。
-- **`BaseIO.read` 里存在唯一的 `runBlocking`**（native 回调要同步签名）；数据没到时在 IO 层阻塞
-  等，「作废」由 `IOHandler.abort()` 叫醒 —— 叫醒的手段是掀掉那条连接，那条会话跟着作废、下一条读重发。
+- **`AvIO.read` 里存在唯一的 `runBlocking`**（native 回调要同步签名）；数据没到时在 IO 层阻塞
+  等，「作废」由 `AvIO.Handler.abort()` 叫醒 —— 叫醒的手段是掀掉那条连接，那条会话跟着作废、下一条读重发。
 
 ## 跨层的三条约定
 
@@ -447,15 +449,16 @@ flowchart TD
 ## 开发面（不参与打包）
 
 `:shared:jvmTest` 里除了用例，还住着一套**调验证窗口时用的开发工具**（`:platform:jvmTest` 只有用例）：
-dev 媒体服务器（`DevServer` / `TestMediaServer`）、窗口内的 DEV 控制条（`DevStrip`，经
-`-Dacg.dev.classpath` 用子 ClassLoader 装载）、以及把它们挂到 `debugPlay` 窗口进程上的
-`DevToolsAgent`（premain agent）。服务器与窗口进程同生共死，生命周期归 agent ——
-Gradle 只传 `-javaagent` 与 `-D`。`hotRun` 跑的是正式应用，不挂 agent（应用里已无播放页）。
+dev 媒体服务器（`DevServer` / `TestServer`）与窗口内的 DEV 控制条（`DevStrip`）。两者都由
+`debugPlay` 的 `main` 自己拉起 —— `startDevServer()` 在**同一个进程里**起服务器（端口由系统现给），
+`DevStrip.attach()` 在窗口就绪后贴上去。所以既不需要 premain agent、`-javaagent`、`-Dacg.dev.classpath`，
+也不需要子进程、PID 文件或端口文件。`hotRun` 跑的是正式应用，不挂这些。
 
-两处 jvmTest 的资源都从 `cxx/build/bin` 取 native 库（`jvmTestProcessResources` 显式
-`dependsOn(":desktopApp:stageNativeLibs")`），保证「改了 `cxx/` 只跑测试」也不会静默用旧 dll。
+两处 jvmTest 把 `cxx/build/bin` 作为**目录型 classpath 条目**挂上（`jvmTest` 任务显式
+`dependsOn(":desktopApp:stageNativeLibs")`），不拷进 `build/` —— 改了 `cxx/` 只跑测试也不会静默用旧 dll。
 
-`debugPlay` 窗口默认指向 `http://127.0.0.1:8099/media/hls-ad/playlist.m3u8`（夹广告的 HLS 素材，
+`debugPlay` 窗口默认指向 dev 服务器（**端口由系统现给**，绑好之后回写 `shared/build/debug/dev-media-server.port`，
+窗口拿到它才拼 URL）上的 `media/hls-ad/playlist.m3u8`（夹广告的 HLS 素材，
 逐帧能看到烧录的时间码与分片序号；广告在声明 12 s 处，播到那里会被解复用器直接跳过，
 见 [design/hls-ad-skip.md](./design/hls-ad-skip.md)）。控制条能冻结 / 恢复 / 限速，用法见
 [development/debug-playback.md](./development/debug-playback.md)。

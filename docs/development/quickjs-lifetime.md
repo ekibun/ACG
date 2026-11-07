@@ -24,7 +24,7 @@
 - 关闭前必须清算：`collectLeaks()` **先记录、再归还**。记录是为了暴露泄漏（归还之后就无迹可寻），
   归还是为了让 `JS_FreeRuntime` 的 `gc_obj_list` 断言不命中 —— 那断言一触发就 `abort()`，整个进程死，
   测试连报告都发不出来。
-- 泄漏清单打到标准错误流，测试捕获它做断言（`QuickJSTest.unclosedValuesAreSweptOnClose`）。
+- 泄漏清单打到标准错误流，测试捕获它做断言（`QuickJSTest.unreturnedReferencesAreReportedOnClose`）。
 - 登记表按**对象身份**强引用（`IdentityMap`）：指针会被复用、条目也可能被 GC 清掉，只有身份强引用
   才能保证「还没 close 的对象一定在册」。键只有 `JSRef`（未覆写 `equals` / `hashCode`）。
 
@@ -57,7 +57,7 @@
 - 构造本身不切线程，所以在 JS 回调里再建 runtime 不死锁；但在回调里等它的结果就是自己等自己。
 - `initPtr` 推迟到**首次读句柄**：`JS_NewRuntime` / `JS_SetMaxStackSize` 要把调用线程的帧地址记成
   `stack_top`。挪回构造期则字段全为 `0` 且编译器不报错，`timeout = 0` 等于关掉死循环中断
-  （`PointerTest.initPtrSeesConstructionState` 钉着）。
+  （`BindingTest.lazyHandleResolvesOnceOnTheOwnerThread` 钉着）。
 - `stackSize` 必须**显著小于宿主线程栈**（JVM 默认约 1MB），否则深递归撞穿宿主栈、整个进程崩溃；
   默认 256KB 是留给 JNI / Java 帧的余量。
 - 归还 `JSRef` 跑在「已标记、未销毁」窗口里：**不走** `withPtrSync`（`isClosed` 门会把它挡掉），也

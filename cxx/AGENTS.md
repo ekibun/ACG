@@ -24,9 +24,9 @@ WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/de
   `:desktopApp:stageNativeLibs`（默认即 `buildJni`；从属 worktree 会自动改成同步主仓的桌面产物，
   见 [`docs/development/build.md`](../docs/development/build.md) 的「原生库复用」）
   （无 outputs 的 Exec，每次必跑，`cxx/` 一变就重编）—— `:desktopApp:run`（经 `prepareAppResources`）、
-  `hotRun`（`hotSnapshotMain`）、IDE 直跑 MainKt（`processResources`）、打包（`syncNativeResources`）、
-  `:shared:jvmTest` 与 `:platform:jvmTest`（各自 `jvmTestProcessResources` 显式 `dependsOn`）。落位五处：
-  `shared/build/processedResources/jvm/test/`、`platform/build/processedResources/jvm/test/`、
+  `hotRun`（`hotSnapshotMain`）、IDE 直跑 MainKt（`processResources`）、打包（`syncNativeResources`）。
+  两个模块的 `jvmTest` 不落位：`cxx/build/bin` 是**目录型 classpath 条目**（`jvmTest` 任务只显式
+  `dependsOn` 它，不拷进 build）。落位三处：
   `desktopApp/build/resources/main/`、
   `desktopApp/build/compose/tmp/prepareAppResources/`（run 与打包共用 `syncNativeResources` 喂料）、
   打包态 `<app-image>/app/resources/`。打包侧 `createDistributable` 已把 `nativeResources` 登记成显式
@@ -117,9 +117,10 @@ WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/de
   自定义 `AdditionalBrowserArguments` 和 CDP 访问；现成的 KMP WebView 封装把钩子挂在导航事件上，
   换过去这些能力全部丢失。自研宿主没有这个限制。
 - 子资源拦截：`add_WebResourceRequested` + `AddWebResourceRequestedFilter(L"*", ALL)`，
-  端到端用例 `WebViewHostTest.subResourcesAreVisibleToInterceptor`。
-- JNI 面的冒烟用例 `Webview2Test`（`:platform:jvmTest`）：建上下文 → 导航 → 归还，
-  只验「宿主起得来」，不锁行为细节 —— 行为细节归 `WebViewHostTest`。
+  端到端用例 `JsEngineTest.subresourceInterceptionCarriesTheRequestsOwnDetails` /
+  `JsEngineTest.releasingEveryRequestLetsPageFinish`。
+- JNI 面的冒烟用例 `Webview2ContextTest`（`:platform:jvmTest`）：建上下文 → 导航 → 归还，
+  只验「宿主起得来」，不锁行为细节 —— 行为细节归 `JsEngineTest` 的宿主端到端三条。
 - `WebView2.h` 在 MinGW 下能编，但 SDK 的 C++ 辅助类（如 `WebView2EnvironmentOptions.h`）
   依赖 MSVC 专有的 `Microsoft::WRL::RuntimeClass`，MinGW 的 WRL 只移植了 `ComPtr` —— 别去引那些头。
 - **页面脚本注入为零**：`initScript` 已整体删除，`put_IsWebMessageEnabled` 恒 `FALSE`。
@@ -158,6 +159,11 @@ WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/de
   而 `stack_top` 已落在 JNI 帧里，预算必须远低于宿主线程栈。
 - **模块 loader 返回 NULL 时必须先挂一个待处理异常**（`JS_ThrowReferenceError`），
   否则 `JS_LoadModuleInternal` 会去报运行期里残留的旧异常。
+- **`loadModule` / `handleJSInvokable` 调用之后的 Java 异常要就地清**：两者都是 native 回调
+  进 Kotlin，异常 pending 在 JNI 上，后面的调用会带着它跑（`handleJSInvokable` 抛了连返回值
+  都是 0，再 `*retPtr` 就是空指针）。清掉之后按 JS 侧的错误收场 —— 模块加载失败给
+  `JS_ThrowReferenceError`，调用失败给 `JS_ThrowInternalError`。Kotlin 侧现在都自己 catch 了，
+  这两处是兜底：新增回调时照抄，别假设对方不抛。
 - **析构回调绝不能往外抛**：它跑在 GC 时机上，没有调用者能接，异常只能就地清。
 - **`JS_NewArrayBufferCopy` 会复制字节**：返回前必须把 Java 数组那一票放掉。
 - **`TypeError` 一类异常必须就地清掉**：留着会让后面每个「返回 NULL 却不抛」的 API 都带着旧异常。
@@ -210,8 +216,9 @@ WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/de
 - 音频不一样：`AvSurfaceContext.audioFormat` 仍是平台**要求** native 输出什么采样格式，
   语义见 [../AGENTS.md](../AGENTS.md) §2.5。
 - 自定义 AVIO 下的 seek 能力由 `HttpIO.seek` 的模拟质量决定（`aviobuf.c` 会因 seek 回调非空
-  判为 `AVIO_SEEKABLE_NORMAL`）；语义有专属用例 `HttpSeekSemanticsTest` /
-  `SeekWindowSemanticsTest`，动这块必须让它们保持绿。
+  判为 `AVIO_SEEKABLE_NORMAL`）；语义有专属用例 `HttpIOTest`，动这块必须让它保持绿；
+  丢帧收敛本身没有纯函数用例（`SeekWindowSemanticsTest` 那种抄 ffplay 公式的空转已删），
+  由 `FFPlayerTest` 的跳转 / 步进链路守。
 - **avio 初始缓冲的 32768 是 `ffmpeg.cpp` 的 `io_open` 里直接写死的**，与 `IO_BUFFER_SIZE`
   （`cxx/ffmpeg/ffmpeg/libavformat/aviobuf.c:36`）对齐，不是随手取的整数。它**只管初始值**：
   MP4 源在 `mov_read_header` 末尾会被按索引换掉（`ff_configure_buffers_for_index`），实际大小
@@ -229,10 +236,12 @@ WebView2 的排查手册见 [../docs/development/webview2-windows.md](../docs/de
   （`:43`，默认 32768，mov 只会照索引往上抬）把近跳用 `fill_buffer` 吸收成顺序读，交到
   `HttpIO.seek` 的只能是长跳 ⇒ IO 层不设阈值（`HttpIO` 那个 `> 0` 判的是「还没取到的部分
   非零」，不是阈值），只负责「重开一条落在落点上的会话，服务端给不出就保留旧会话退回白读」。
-- **`AvIO.Handler.open` 不许抛异常**：它跑在 native 的 `io_open` 回调里，Kotlin 异常会
-  pending 在 JNI 上没人接，下一个 JNI 调用直接 abort 整个 JVM（hs_err 的 Problematic frame
-  在 `initNative`）。「打不开」要学 `FileIO`：返回句柄为 null 的 IO（read/seek 恒 -1），
-  让 `avformat_open_input` 自己以 I/O 错误收场 —— 失败清理路径照常走完。
+- **`AvIO` 的四个回调（`open` / `read` / `seek` / `close`）之后必须 `swallowJavaException`**：
+  它们从 native 进 Kotlin，异常 pending 在 JNI 上没人接，下一个 JNI 调用就拿着 null 句柄
+  abort 整个 JVM（hs_err 的 Problematic frame 在 `initNative`）。就地 `ExceptionDescribe` +
+  `ExceptionClear` 并折成 `AVERROR(EIO)`。「打不开」仍要学 `FileIO`：返回句柄为 null 的 IO
+  （read/seek 恒 -1），让 `avformat_open_input` 自己以 I/O 错误收场 —— 失败清理路径照常走完，
+  而且原因留在日志里而不是只剩一个 EIO。
 - **`io_open` 建的 pb 要记进账本、`io_close2` 必须先把 pb 销账再关**：账本
   `FormatOpaque::pbs` 是**活集合、不是单槽**，因为 HLS 一次 open 里会连续开
   master / variant / segment 多个 pb，而 CUSTOM_IO 下 ffmpeg 不替调用方关 pb。

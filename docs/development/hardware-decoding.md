@@ -67,7 +67,7 @@ Android MediaCodec 的 ByteBuffer 路线，落点在 `cxx/ffmpeg/ffmpeg.cpp` 的
 ⚠️ 窗口满 + 解码器输出槽还压着一帧时，两个入口都不会自己前进：播放轮靠 playJobs 当场消费帧
 自己解开，步进轮会先停消费。所以解码作业**不能**因为轮次结束就丢掉已经读出来的包 ——
 `stepForward` 不 seek，靠的正是「解复用器停在上一帧之后」，丢一个包下一次步进就跳帧
-（`FFPlayerSeekFrameSequenceTest` 会红）。现在只允许在片尾冲刷（`packet == null`）时提前退出。
+（`FFPlayerTest` 会红）。现在只允许在片尾冲刷（`packet == null`）时提前退出。
 
 ---
 
@@ -326,7 +326,7 @@ D3D11 解码纹理 ──VideoProcessorBlt──▶ RGBA 共享纹理(NT 句柄)
    帧形态看 `frameToMemory` 里 `hardware frame transfer failed` 有没有出现。
 3. **桌面零拷贝**：`video_output.windows.cpp` 建好环时打 `hw video: <w>x<h> shared ring ready`；
    不能共享时打 `hw video: Skiko's Direct3D device is not shareable, staying on the cpu path`。
-   用例 `DesktopZeroCopyTest`（`:shared:jvmTest`）锁两件事：帧真的进了共享纹理
+   用例 `DesktopSurfaceContextTest`（`:platform:jvmTest`）锁两件事：帧真的进了共享纹理
    （`present` 失败的帧会被丢掉，`DesktopSurfaceContext.frame` 就不走），以及共享纹理真的被画进
    Compose 画布（`isHardwareVideoDrawn`）。
 4. **Android**：`video decode: h264_mediacodec` 表示硬解选上了，帧按 NV12 拷回内存，

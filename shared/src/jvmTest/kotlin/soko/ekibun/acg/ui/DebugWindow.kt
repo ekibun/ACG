@@ -2,6 +2,7 @@ package soko.ekibun.acg.ui
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
@@ -10,24 +11,25 @@ import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import soko.ekibun.common.Paths
+import java.awt.Window
 import java.io.File
 
 /**
- * 手动验证窗口：`DebugPlayScreen` / `DebugWebScreen` / `DebugCodeScreen` 的 `main` 共用。
- *
- * 必须是真 AWT 窗口 —— `SwingPanel` 与 JAWT `SetParent` 要挂 Win32 子窗口，离屏场景
- * （`ImageComposeScene`）没有父窗口可挂。数据目录落 `build/debug`（`-Dacg.debug.dir` 可改），
- * 让设置与 WebView2 的 user data folder 在多次启动间保留。
+ * 手动验证窗口，三个 `main` 共用。必须是真 AWT 窗口（`SwingPanel` / JAWT 要挂 Win32 子窗口）；
+ * 数据目录落 `build/debug`，让设置与 WebView2 user data 跨启动保留。
  */
 internal fun debugApplication(
   title: String,
   size: DpSize = DpSize(1100.dp, 760.dp),
+  /** 窗口就绪后交出去一次（dev 控制条要贴在它上面）。 */
+  onWindow: (Window) -> Unit = {},
   content: @Composable () -> Unit,
 ) {
   initDebugPaths()
   application {
     val windowState = rememberWindowState(size = size, position = WindowPosition(Alignment.Center))
     Window(onCloseRequest = ::exitApplication, state = windowState, title = title) {
+      LaunchedEffect(Unit) { onWindow(window) }
       MaterialTheme { content() }
     }
   }

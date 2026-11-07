@@ -68,20 +68,19 @@ kotlin {
       implementation(libs.kotlin.test)
       // 引入 JUnit4，用于按 assumption 记为 skipped。
       implementation("junit:junit:4.13.2")
+      // 零拷贝送显用例要 Skiko 的原生库（Windows 下是 skiko-windows-x64.dll）。
+      implementation(compose.desktop.currentOs)
+      // 原生库与测试媒体都是目录型 classpath 条目：不复制、不进 build 产物。
+      runtimeOnly(files(rootProject.extra["acgNativeBinDir"] as File))
+      runtimeOnly(files(rootProject.file("test-media")))
     }
   }
 }
 
-// 把原生库打进测试资源，并让 jvmTestProcessResources 依赖 stageNativeLibs。
-// 目录由根脚本给出：从属 worktree 直接读主仓的 cxx/build/bin，不复制。
-tasks.named<ProcessResources>("jvmTestProcessResources") {
-  dependsOn(":desktopApp:stageNativeLibs")
-  from(rootProject.extra["acgNativeBinDir"] as File) {
-    include("*.dll", "*.so", "*.dylib")
-  }
-}
-
 tasks.named<Test>("jvmTest") {
+  // 原生库与测试媒体都是目录型 classpath 条目（`loadLibrary` / `getResource` 直接读文件），
+  // 所以只要保证 cxx/build/bin 已经产出即可，不用把它们拷进 build。
+  dependsOn(":desktopApp:stageNativeLibs")
   // 把 JVM 崩溃报告写到 build/hs_err_pid%p.log。
   jvmArgs("-XX:ErrorFile=${layout.buildDirectory.get().asFile.resolve("hs_err_pid%p.log")}")
   // 关闭 JDK 24+ 的 restricted-method 警告。
