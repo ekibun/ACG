@@ -96,6 +96,14 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_quickjs_QuickJS_initContext(
         auto retJava =
             (jstring)env->CallObjectMethod(opaque->thiz, load, javaStr);
         env->DeleteLocalRef(javaStr);
+        if (env->ExceptionCheck()) {
+          // 异常不能留在 JNI 上：转成 JS 侧的加载失败。
+          env->ExceptionDescribe();
+          env->ExceptionClear();
+          JS_ThrowReferenceError(ctx, "could not load module '%s'",
+                                 module_name);
+          return nullptr;
+        }
         if (retJava == nullptr) {
           // loader 返回 NULL 时必须挂一个待处理异常。
           JS_ThrowReferenceError(ctx, "could not load module '%s'",
@@ -506,6 +514,15 @@ Java_soko_ekibun_quickjs_QuickJS_jsNewCFunction(JNIEnv*, jclass, jlong ctx,
         auto retPtr = (JSValue*)env->CallLongMethod(opaque->thiz, invoke, obj,
                                                     argvHandles, thisHandle);
         env->DeleteLocalRef(argvHandles);
+        if (env->ExceptionCheck()) {
+          // 抛了就没有 retPtr：异常留在 JNI 上会让这次调用的返回值变成垃圾，
+          // 就地清掉，交给 JS 侧当内部错误。
+          env->ExceptionDescribe();
+          env->ExceptionClear();
+          return JS_ThrowInternalError(ctx, "handleJSInvokable threw");
+        }
+        if (retPtr == nullptr)
+          return JS_ThrowInternalError(ctx, "handleJSInvokable returned null");
         JSValue ret = *retPtr;
         delete retPtr;
         return ret;

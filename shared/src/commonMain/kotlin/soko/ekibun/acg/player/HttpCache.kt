@@ -14,7 +14,7 @@ import androidx.collection.lruCache
 internal object HttpCache {
   /**
    * 一块的字节数，与 avio 初始缓冲对齐（`ffmpeg.cpp` 的 `io_open` 写死 32768）。
-   * 也是 [BaseIO.read] 的交付上限：一次最多给一块，更大的 `len` 由后续读接着要。
+   * 也是 [soko.ekibun.ffmpeg.AvIO.read] 的交付上限：一次最多给一块，更大的 `len` 由后续读接着要。
    */
   const val BLOCK_BYTES: Int = 32 * 1024
 

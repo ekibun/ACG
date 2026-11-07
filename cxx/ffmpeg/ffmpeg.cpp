@@ -93,6 +93,17 @@ struct IoOpaque {
   jmethodID closeMid;  // close "()V"
 };
 
+// Kotlin 侧抛的异常到不了 C++ 上层：留着 pending exception，下一次 JNI 调用
+// 就会在空句柄上崩。所有进 Kotlin 的调用都在这里就地消化。
+static bool swallowJavaException(JNIEnv* env, const char* call) {
+  if (!env->ExceptionCheck()) return false;
+  av_log(nullptr, AV_LOG_ERROR, "AvIO %s threw; folding to an IO error\n",
+         call);
+  env->ExceptionDescribe();
+  env->ExceptionClear();
+  return true;
+}
+
 // 关闭一个 pb：调 Java 侧 close()、还 GlobalRef、释放缓冲与上下文本体。
 // io_close2 / destroyNative / 打开失败三处共用。
 static void closeIoContext(JNIEnv* env, AVIOContext* pb) {
@@ -101,10 +112,7 @@ static void closeIoContext(JNIEnv* env, AVIOContext* pb) {
   if (io) {
     if (io->closeMid) {
       env->CallVoidMethod(io->io, io->closeMid);
-      if (env->ExceptionCheck()) {
-        env->ExceptionDescribe();
-        env->ExceptionClear();
-      }
+      swallowJavaException(env, "close");
     }
     if (io->arr) env->DeleteGlobalRef(io->arr);
     if (io->io) env->DeleteGlobalRef(io->io);
@@ -152,6 +160,8 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
     jstring strUrl = env->NewStringUTF(url);
     jobject ioCtx = env->CallObjectMethod(io, method, strUrl);
     env->DeleteLocalRef(strUrl);
+    // open 抛了就在这返回错误：拿 null 句柄去 GetObjectClass 会在 native 里崩。
+    if (swallowJavaException(env, "open") || !ioCtx) return AVERROR(EIO);
     // 为这个 pb 建 IoOpaque，并缓存 read / seek / close 的 methodID。
     auto ioCtxCls = env->GetObjectClass(ioCtx);
     auto ctxOpaque = new IoOpaque{env->NewGlobalRef(ioCtx),
@@ -186,6 +196,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
           // 读取长度显式传入；返回值超过请求长度时截断到请求长度。
           int ret =
               env->CallIntMethod(io->io, io->readMid, io->arr, (jint)buf_size);
+          if (swallowJavaException(env, "read")) ret = AVERROR(EIO);
           if (ret > buf_size) {
             av_log(nullptr, AV_LOG_ERROR,
                    "AvIO read over-ran: ret=%d buf_size=%d\n", ret, buf_size);
@@ -203,8 +214,9 @@ extern "C" JNIEXPORT jlong JNICALL Java_soko_ekibun_ffmpeg_AvFormat_initNative(
           javaVm->GetEnv((void**)&env, JNI_VERSION_1_4);
           auto io = (IoOpaque*)opaque;
           // 两个参数收窄为 jint，对应 AvIO.seek 的 (II)I。
-          return env->CallIntMethod(io->io, io->seekMid, (jint)offset,
-                                    (jint)whence);
+          int64_t ret = env->CallIntMethod(io->io, io->seekMid, (jint)offset,
+                                           (jint)whence);
+          return swallowJavaException(env, "seek") ? AVERROR(EIO) : ret;
         });
     // 记进账本，交给 io_close2 销账或关闭路径兜底。
     if (*pb) self->pbs.push_back(*pb);

@@ -47,7 +47,7 @@ actual suspend fun openResponse(options: Map<Any, Any?>): Http.Response {
   val call = client.newCall(buildRequest(options))
   val rsp =
     try {
-      call.executeOnIo()
+      call.executeOnIO()
     } catch (e: SocketTimeoutException) {
       // 等响应头超时，按闲置超时处理
       throw Http.IdleTimeoutException()
@@ -56,7 +56,7 @@ actual suspend fun openResponse(options: Map<Any, Any?>): Http.Response {
 }
 
 /** 把阻塞的 [Call.execute] 搬到 IO 线程；协程取消时取消这次 call。 */
-private suspend fun Call.executeOnIo(): okhttp3.Response =
+private suspend fun Call.executeOnIO(): okhttp3.Response =
   withContext(Dispatchers.IO) {
     suspendCancellableCoroutine { cont ->
       cont.invokeOnCancellation { cancel() }
@@ -120,7 +120,7 @@ private class OkHttpResponse(
   ): Int {
     if (closed) throw IllegalStateException("Response already closed")
     val count =
-      onIo {
+      onIO {
         try {
           stream.read(buf, off, len)
         } catch (e: SocketTimeoutException) {
@@ -134,7 +134,7 @@ private class OkHttpResponse(
 
   override suspend fun readAll(): ByteArray =
     try {
-      onIo { stream.readBytes() }
+      onIO { stream.readBytes() }
     } finally {
       close()
     }
@@ -148,7 +148,7 @@ private class OkHttpResponse(
   }
 
   /** 把阻塞 I/O 搬到 IO 线程；协程取消时取消这次 call 并标记关闭。 */
-  private suspend fun <T> onIo(block: () -> T): T =
+  private suspend fun <T> onIO(block: () -> T): T =
     withContext(Dispatchers.IO) {
       suspendCancellableCoroutine { cont ->
         cont.invokeOnCancellation {

@@ -7,7 +7,7 @@ import soko.ekibun.ffmpeg.AvIO
 /** 本地文件的 [AvIO]：EOF 返回 [AvFormat.AVERROR_EOF]，出错返回 -1，只支持小于 2 GiB 的文件。 */
 class FileIO(
   path: String,
-) : BaseIO() {
+) : AvIO {
   /** 底层文件句柄；打开失败时为 null。 */
   private val file = File.open(path, "r")
 

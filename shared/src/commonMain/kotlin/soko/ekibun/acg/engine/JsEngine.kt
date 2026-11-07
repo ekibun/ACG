@@ -290,9 +290,9 @@ class JsEngine {
                 outcome.complete(null)
               } else {
                 CoroutineScope(Dispatchers.IO).launch {
-                  // 脚本返回值是 JSON 字符串；给出 null 表示「还没到位」，等下一次加载完成
+                  // 平台没给结果（null / 空串 / undefined 的 `"null"`）就等下一次加载完成
                   val json = runCatching { ctx.evaluate(script) }.getOrNull()
-                  if (!json.hasNoScriptResult()) outcome.complete(json)
+                  if (!json.isNullOrEmpty() && json != "null") outcome.complete(json)
                 }
               }
             }
@@ -365,12 +365,3 @@ class JsEngine {
       }
     }
 }
-
-/**
- * 脚本这次没给出结果：`null`、字符串 `"null"`、空串。
- *
- * 平台把返回值按 JSON 编码交回，所以脚本 `return null` 会变成 `"null"`，
- * `JSON.stringify(null)` 则是带引号的 `"\"null\""`，两种都算「还没到位」。
- */
-internal fun String?.hasNoScriptResult(): Boolean =
-  this == null || this == "null" || this == "\"null\"" || this == "\"\""

@@ -1,10 +1,8 @@
 package soko.ekibun.acg.player
 
-import kotlinx.coroutines.delay
 import soko.ekibun.common.Http
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvIO
-import kotlin.time.Duration.Companion.milliseconds
 
 /** HTTP 上的 [AvIO]：一条活着的会话，响应体边到边读，`abort` 从别的线程叫醒阻塞中的读。 */
 class HttpIO(
@@ -12,9 +10,9 @@ class HttpIO(
   private val url: String,
   /** 源的选项（`headers` 等，不含 `url`）。 */
   private val options: Map<String, Any>,
-  /** 创建本 IO 的 [IOHandler]，用于登记「本次读的投递口」。 */
-  handler: IOHandler,
-) : BaseIO(handler) {
+  /** 创建本 IO 的 [AvIO.Handler]，用于登记「本次读的投递口」。 */
+  override val handler: AvIO.Handler,
+) : AvIO {
   /** 交给 [Http.request] 的选项，`url` 在这里补上。 */
   private val requestOptions: Map<String, Any> = options + mapOf("url" to url)
 
@@ -91,7 +89,7 @@ class HttpIO(
     }
   }
 
-  /** 一次交付一块；作废与故障的收场在 [BaseIO.read]。 */
+  /** 一次交付一块；作废与故障的收场在 [AvIO.read]。 */
   override suspend fun runSuspend(
     buf: ByteArray,
     len: Int,
@@ -106,8 +104,8 @@ class HttpIO(
           val cache = HttpCache.chunk(url, index)
           (cache ?: cacheBuf) to (cache?.size ?: requestCurrentBlock())
         } catch (e: Http.IdleTimeoutException) {
-          // 闲置超时：丢掉这条会话，等一个超时间隔后整块重来，不限次数
-          delay(Http.SOCKET_TIMEOUT_MS.milliseconds)
+          // 闲置超时：丢掉会话，立刻整块重来。能走到这里就已白等一个完整超时（8 s / 连接 10 s），
+          // 不必再退避；真断网抛的是 ConnectException，不进这条分支。
           cachedRsp?.close()
           continue
         }
