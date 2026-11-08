@@ -13,7 +13,7 @@ import soko.ekibun.browser.launchExternalBrowser
 import soko.ekibun.common.Http
 import soko.ekibun.common.decodeBytesToText
 import soko.ekibun.common.encodeTextToBytes
-import soko.ekibun.common.settingsStore
+import soko.ekibun.common.pluginSettingsStore
 import soko.ekibun.quickjs.JSError
 import soko.ekibun.quickjs.JSFunction
 import soko.ekibun.quickjs.JSInvokable
@@ -38,7 +38,7 @@ class JsEngine {
 
   private var quickjsDelegate: QuickJS? = null
 
-/** 惰性创建 [QuickJS] 时用的互斥锁。 */
+  /** 惰性创建 [QuickJS] 时用的互斥锁。 */
   private val quickjsLock = Any()
 
   private val quickjs: QuickJS
@@ -139,16 +139,15 @@ class JsEngine {
                       openBrowserAsync(args[0] as String)
                     }
 
-                  // 读设置，交回 `Deferred<String?>`，没有该键即 null
+                  // 读设置，交回 `Deferred<String?>`
                   "Settings.get" ->
                     CoroutineScope(Dispatchers.IO).async {
-                      settingsStore.get(args[0] as String)
+                      pluginSettingsStore.get(args[0] as String)
                     }
 
-                  // 写设置，值为 null 即删该键
                   "Settings.set" ->
                     CoroutineScope(Dispatchers.IO).async {
-                      settingsStore.set(args[0] as String, args[1] as String?)
+                      pluginSettingsStore.set(args[0] as String, args[1] as String?)
                     }
 
                   else -> throw JSError("unknown method '${argv[0]}'")

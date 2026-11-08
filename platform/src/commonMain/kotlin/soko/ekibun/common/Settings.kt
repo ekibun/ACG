@@ -12,23 +12,25 @@ interface SettingsStore {
 
   suspend fun write(values: Map<String, String?>)
 
-  /** 读单个键；没有该键就是 `null`。 */
   suspend fun get(key: String): String? = read()[key]
 
-  /** 写单个键；[value] 为 `null` 即删键。 */
   suspend fun set(
     key: String,
     value: String?,
   ) = write(mapOf(key to value))
 }
 
-/** 进程内唯一的一份设置，落盘位置由 [Paths] 决定。 */
+/** App 自己的设置。 */
 val settingsStore: SettingsStore by lazy {
   createSettingsStore(Paths.dataDir + "/settings.preferences_pb")
 }
 
-/** 指定落盘文件的设置存储。 */
 fun createSettingsStore(path: String): SettingsStore = PreferencesSettingsStore(createDataStore(path))
+
+/** 插件写的设置：所有插件共用这一份，与 [settingsStore] 分开。 */
+val pluginSettingsStore: SettingsStore by lazy {
+  createSettingsStore(Paths.dataDir + "/plugins.preferences_pb")
+}
 
 /** 平台侧建 DataStore 的原语，[path] 需带 `.preferences_pb` 后缀。 */
 expect fun createDataStore(path: String): DataStore<Preferences>
@@ -47,7 +49,6 @@ private class PreferencesSettingsStore(
     preferences.edit { prefs ->
       for ((name, value) in values) {
         val key = stringPreferencesKey(name)
-        // 用 `-=` 而不是 `remove(key)`
         if (value == null) prefs -= key else prefs[key] = value
       }
     }
