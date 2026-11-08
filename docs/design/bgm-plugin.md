@@ -1,5 +1,8 @@
 # Bangumi 插件与收藏页的形态依据
 
+> **状态（2026-11）：** Kotlin 侧的实现（`BgmSource`、收藏页、`CollectionState`）已删除，重写时按本文的
+> 接口与分页结论来。插件脚本 `files/js/module/bgm.js` 仍在，下文描述的是它。
+
 第一个**真实的**插件：`files/js/module/bgm.js` + Kotlin 侧的 `BgmSource` + 收藏页。
 这份文档记的是分层裁定、键空间归属、OAuth 与 v0 接口的实测结论。改 `bgm.js` 的导出面、
 改 `BgmSource` 的常量或字段映射、改收藏页的前先读本文；源码里只留裸约束与指针。
