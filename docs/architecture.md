@@ -275,8 +275,8 @@ scheme 分发 —— native 的 avio 回调从这里进来（见下文「播放�
 `shared/src/commonMain/kotlin/soko/ekibun/acg/` 下四个包，都不进任何继承树，只把上面两族接起来
 （`Http` 已整体下沉到 `:platform`，本层只经 `soko.ekibun.common.Http` 调用）：
 
-- **`ui`** —— Compose 界面。`App.kt` 是两端共用入口，当前只挂第一个真业务页 `CollectionScreen`
-  （形态依据见 [design/bgm-plugin.md](./design/bgm-plugin.md)）。`ui/comp` 放可复用的小组件，播放器单独一窝
+- **`ui`** —— Compose 界面。`App.kt` 是两端共用入口：挂 `HomeScreen`（主页，管 tab 与账号面板）与
+  设置页，页面栈在 `ui/nav`，tab 内容在 `ui/screen/home/tab/`。`ui/comp` 放可复用的小组件，播放器单独一窝
   `ui/comp/player/`：状态持有者 `PlayerController`、画面 `PlayerSurface`、控制条 `PlayerControls`、
   滑轨 `PlayerSlider`（入参都只有 controller，参考 mediamp 的 `MediampPlayerSurface` 形状）；同层还有
   代码着色 `highlight`、网络图 `RemoteImage`、可见页与任务覆盖层 `webview/`。播放、浏览器、脚本控制台这三个**内核验证面
@@ -284,9 +284,10 @@ scheme 分发 —— native 的 avio 回调从这里进来（见下文「播放�
   `DebugCodeScreen`，与正式页面同包、`Debug` 前缀区分），每页一个 `main`，用
   `:shared:debugPlay` / `debugWeb` / `debugCode` 起真窗口（人工入口，不进测试任务）。
   业务四页里的详情 / 搜索 / 设置仍未落地。
-- **`source`** —— 数据源客户端。目前只有 `BgmSource`：把 JS 插件交回来的 `Map` 收成强类型
-  （`BgmUser` / `BgmCollectionItem` / …）。它自己**不发 HTTP**，网络出口全在插件里，
-  见下文「脚本插件链」。
+- **`data`** —— 数据层。目前只有 `AccountRepository`：当前账号与账号名单，`StateFlow` 出口。
+  收藏 / 详情 / 搜索要的数据源客户端（曾有一个 `BgmSource`，把插件交回的 `Map` 收成强类型）已随旧
+  收藏页一起删除，等对应页面真正做时再按 `XxxNetworkDataSource` 的形态重建；插件脚本
+  `files/js/module/bgm.js` 仍在，网络出口依旧在插件里，见下文「脚本插件链」。
 - **`engine`** —— `JsEngine`，全进程单例（`JsEngine.instance`）。持一个惰性建的 QuickJS runtime，
   把 JS 侧那一**份**能力桥 `_binding(method, args)` 落到 Kotlin 原语上；后台 WebView 驱动
   `webviewAsync` 也住在这个文件里。细节见下文「脚本插件链」。
