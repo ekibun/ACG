@@ -1,4 +1,4 @@
-package soko.ekibun.acg.ui.theme
+package soko.ekibun.acg.data
 
 import androidx.compose.ui.graphics.Color
 
@@ -14,11 +14,20 @@ enum class DarkMode {
 }
 
 /**
- * 主题的可调项。持有与持久化都在调用方，主题本身不读也不写设置。
+ * 主题的可调项。
  *
  * [seedColor] 只贡献色相与彩度，明度不参与 —— 每个槽位该用哪一档 tone 由配色算法决定。
  */
-data class AppThemeSettings(
+data class ThemeSettings(
   val seedColor: Color = AppSeedColor,
   val darkMode: DarkMode = DarkMode.Auto,
+)
+
+/**
+ * 应用自己的设置。插件读写的键值走 `pluginSettingsStore`，单独一份文件。
+ *
+ * 站点特化（图片质量、bbcode 之类）不进这里 —— 那属于数据源自己的配置。
+ */
+data class AppSettings(
+  val theme: ThemeSettings = ThemeSettings(),
 )

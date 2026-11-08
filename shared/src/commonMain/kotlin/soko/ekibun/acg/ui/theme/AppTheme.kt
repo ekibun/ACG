@@ -24,6 +24,8 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.materialkolor.PaletteStyle
 import com.materialkolor.dynamicColorScheme
+import soko.ekibun.acg.data.DarkMode
+import soko.ekibun.acg.data.ThemeSettings
 
 /**
  * 应用主题：种子色 → 整套 Material 3 配色，亮暗与纯黑在此收口。
@@ -35,7 +37,7 @@ import com.materialkolor.dynamicColorScheme
  */
 @Composable
 fun AppTheme(
-  settings: AppThemeSettings = AppThemeSettings(),
+  settings: ThemeSettings = ThemeSettings(),
   content: @Composable () -> Unit,
 ) {
   val isDark =
@@ -61,19 +63,19 @@ fun AppTheme(
 @Preview
 @Composable
 private fun ColorPreviewLight() {
-  AppTheme(AppThemeSettings(darkMode = DarkMode.Light)) { ColorPreview() }
+  AppTheme(ThemeSettings(darkMode = DarkMode.Light)) { ColorPreview() }
 }
 
 @Preview
 @Composable
 private fun ColorPreviewDark() {
-  AppTheme(AppThemeSettings(darkMode = DarkMode.Dark)) { ColorPreview() }
+  AppTheme(ThemeSettings(darkMode = DarkMode.Dark)) { ColorPreview() }
 }
 
 @Preview
 @Composable
 private fun ColorPreviewBlack() {
-  AppTheme(AppThemeSettings(darkMode = DarkMode.Black)) { ColorPreview() }
+  AppTheme(ThemeSettings(darkMode = DarkMode.Black)) { ColorPreview() }
 }
 
 /**

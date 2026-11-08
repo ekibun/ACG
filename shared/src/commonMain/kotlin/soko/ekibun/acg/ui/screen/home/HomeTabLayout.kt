@@ -35,10 +35,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import org.jetbrains.compose.resources.painterResource
+import soko.ekibun.acg.data.DarkMode
+import soko.ekibun.acg.data.ThemeSettings
 import soko.ekibun.acg.ui.comp.MonogramAvatar
 import soko.ekibun.acg.ui.theme.AppTheme
-import soko.ekibun.acg.ui.theme.AppThemeSettings
-import soko.ekibun.acg.ui.theme.DarkMode
 
 /** 侧栏与底栏的分界，M3 medium 的起点；HomeScreen 判面板里是否给「设置」时也用这个值。 */
 internal val RailBreakpoint = 600.dp
@@ -147,19 +147,19 @@ private fun SettingsItem(onClick: () -> Unit) {
 @Preview(name = "Compact 400dp", widthDp = 400, heightDp = 800)
 @Composable
 private fun TabCompactPreview() {
-  AppTheme(AppThemeSettings(darkMode = DarkMode.Light)) { TabPreview() }
+  AppTheme(ThemeSettings(darkMode = DarkMode.Light)) { TabPreview() }
 }
 
 @Preview(name = "Medium 800dp", widthDp = 800, heightDp = 800)
 @Composable
 private fun TabMediumPreview() {
-  AppTheme(AppThemeSettings(darkMode = DarkMode.Light)) { TabPreview() }
+  AppTheme(ThemeSettings(darkMode = DarkMode.Light)) { TabPreview() }
 }
 
 @Preview(name = "Expanded 1280dp", widthDp = 1280, heightDp = 800)
 @Composable
 private fun TabExpandedPreview() {
-  AppTheme(AppThemeSettings(darkMode = DarkMode.Light)) { TabPreview() }
+  AppTheme(ThemeSettings(darkMode = DarkMode.Light)) { TabPreview() }
 }
 
 @Composable

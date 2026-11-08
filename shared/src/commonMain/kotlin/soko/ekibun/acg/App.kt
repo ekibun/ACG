@@ -7,10 +7,13 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import soko.ekibun.acg.data.SettingsRepository
 import soko.ekibun.acg.ui.comp.webview.WebviewTaskHost
 import soko.ekibun.acg.ui.nav.AppNavigator
 import soko.ekibun.acg.ui.nav.AppRoute
@@ -23,7 +26,9 @@ import soko.ekibun.acg.ui.theme.AppTheme
 @Composable
 @Preview
 fun App() {
-  AppTheme {
+  // 设置已在两端入口预读过，这里的初值就是磁盘上那份，不会先闪一下默认主题
+  val settings by SettingsRepository.settings.collectAsState()
+  AppTheme(settings = settings.theme) {
     // Surface 铺满整窗，让系统栏背后的底色跟着主题走；不加它那两条会是窗口默认白底。
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
       // 导航挂在窗口根上：栈空是主页，非空是替换成压在上面的独立页面。主页只管自己的 tab。
