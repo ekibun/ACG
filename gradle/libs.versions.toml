@@ -20,6 +20,7 @@ kotlin = "2.4.10"
 kotlinx-coroutines = "1.11.0"
 ktlintPlugin = "14.2.0"
 material3 = "1.9.0"
+materialkolor = "4.0.5"
 okhttp = "5.3.2"
 okio = "3.9.1"
 
@@ -45,6 +46,7 @@ compose-material3 = { module = "org.jetbrains.compose.material3:material3", vers
 compose-ui = { module = "org.jetbrains.compose.ui:ui", version.ref = "composeMultiplatform" }
 compose-components-resources = { module = "org.jetbrains.compose.components:components-resources", version.ref = "composeMultiplatform" }
 compose-uiToolingPreview = { module = "org.jetbrains.compose.ui:ui-tooling-preview", version.ref = "composeMultiplatform" }
+materialkolor = { module = "com.materialkolor:material-kolor", version.ref = "materialkolor" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
 kotlinx-coroutinesSwing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", version.ref = "kotlinx-coroutines" }
 okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }

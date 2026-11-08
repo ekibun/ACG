@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- 深色下的窗口底色：纯黑，和亮色的纯白对称。 -->
+  <style name="Theme.Acg" parent="@android:style/Theme.Material.NoActionBar">
+    <item name="android:windowBackground">#FF000000</item>
+  </style>
+</resources>

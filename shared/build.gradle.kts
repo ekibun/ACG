@@ -37,6 +37,8 @@ kotlin {
       implementation(libs.compose.runtime)
       implementation(libs.compose.foundation)
       implementation(libs.compose.material3)
+      // 种子色 → M3 配色：官方算法（HCT/CAM16）的 KMP 实现，MIT。
+      implementation(libs.materialkolor)
       implementation(libs.compose.ui)
       implementation(libs.compose.components.resources)
       implementation(libs.compose.uiToolingPreview)

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- 窗口底色只管启动到首帧那一下。配色是种子色算出来的、还要跟着用户选的明暗走，
+       这里猜不准，索性纯白／纯黑，任何主题下都只是闪一下常见的底色。 -->
+  <style name="Theme.Acg" parent="@android:style/Theme.Material.Light.NoActionBar">
+    <item name="android:windowBackground">#FFFFFFFF</item>
+  </style>
+</resources>
