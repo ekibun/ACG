@@ -154,9 +154,10 @@ okio `Path`，那个 `Path` 只出现在 `:platform` 内部的建表函数与懒
 | `interface FileHandle` | `jvmShared` 的 `RandomAccessFileHandle` | 同左（`jvmShared`） |
 
 数据目录不在上面这张表里：`soko.ekibun.common.Paths` 是 `commonMain` 的普通 `object`，
-由**入口层**在首次使用前 `init` 一次；平台层只读它（`Settings` 取 `dataDir` 下的
+由**入口层**在首次使用前 `init`；平台层只读它（`Settings` 取 `dataDir` 下的
 `settings.preferences_pb`，`Webview2Context` 取 `dataDir/webview2`），不自己猜目录。
-测试各自注入临时目录。
+进程内只认第一份值：Android 的 Activity 因配置变更会重建、`onCreate` 会再调一次，同值重复调用必须
+放行，不同值当场抛。测试各自注入临时目录。
 
 ### QuickJS 族（`soko.ekibun.quickjs` + `soko.ekibun.web`）
 
@@ -276,7 +277,8 @@ scheme 分发 —— native 的 avio 回调从这里进来（见下文「播放�
 （`Http` 已整体下沉到 `:platform`，本层只经 `soko.ekibun.common.Http` 调用）：
 
 - **`ui`** —— Compose 界面。`App.kt` 是两端共用入口：挂 `HomeScreen`（主页，管 tab 与账号面板）与
-  设置页，页面栈在 `ui/nav`，tab 内容在 `ui/screen/home/tab/`。`ui/comp` 放可复用的小组件，播放器单独一窝
+  设置页，页面栈在 `ui/nav`（系统返回的分层见 [shared-layer §5.7](./development/shared-layer.md)），
+  tab 内容在 `ui/screen/home/tab/`。`ui/comp` 放可复用的小组件，播放器单独一窝
   `ui/comp/player/`：状态持有者 `PlayerController`、画面 `PlayerSurface`、控制条 `PlayerControls`、
   滑轨 `PlayerSlider`（入参都只有 controller，参考 mediamp 的 `MediampPlayerSurface` 形状）；同层还有
   代码着色 `highlight`、网络图 `RemoteImage`、可见页与任务覆盖层 `webview/`。播放、浏览器、脚本控制台这三个**内核验证面

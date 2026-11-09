@@ -40,6 +40,8 @@ kotlin {
       // 种子色 → M3 配色：官方算法（HCT/CAM16）的 KMP 实现，MIT。
       implementation(libs.materialkolor)
       implementation(libs.compose.ui)
+      // 系统返回（Android 返回键/手势、桌面 Esc）的公共事件分发，两端 Compose 已接好。
+      implementation(libs.androidx.navigationevent.compose)
       implementation(libs.compose.components.resources)
       implementation(libs.compose.uiToolingPreview)
       implementation(libs.androidx.lifecycle.viewmodelCompose)

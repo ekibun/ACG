@@ -328,3 +328,41 @@ QuickJS 桥按内部标签分派 JS 数字（`JS_TAG_INT` → `Long`、`JS_TAG_F
 基于 AWT 的窗口里，细节见 [webview2-windows.md](./webview2-windows.md)。
 
 ⇒ 页面与插件脚本的后台 WebView 共用同一套 cookie ⇒ 这里登录过的站点，脚本那边也是登录态。
+
+### 5.7 返回的分层（`ui/nav/BackHandler.kt`）
+
+Android 的返回键 / 手势与桌面端的 Esc 是同一个事件：`navigationevent` 的 dispatcher，两端已由
+Compose 接好（桌面见 `ComposeSceneMediator` 的 `BackNavigationEventInput`，只认 `Key.Escape`；
+Android 见 `ComponentActivity` 的 ViewTree owner）。所以只写一份，不分平台。
+
+⇒ **后组合的先收到**（dispatcher 按加入顺序倒着找），所以 `HomeScreen` 那条排在 `App` 的路由栈之前，
+最后才是平台默认。两处都靠 `enabled` 开关而不是 `if` 掉调用 —— 组合顺序一变，谁先收到就跟着变。
+
+⇒ **主页那条一次判两件事**：账号面板开着就先关面板，否则不在收藏就回收藏。两件都在宿主这层判，
+不压新的栈、也不进导航；tab 的正文状态按 tab 存在 saveable holder 里，切回来输入词之类都还在。
+
+⇒ **弹层里不许放 handler**：Android 的 `Popup` 是独立窗口（`TYPE_APPLICATION_SUB_PANEL`），而返回
+事件的 owner 是挂在 Activity 的 `decorView` 上的 ViewTree tag（`ComponentActivity` 的
+`setViewTreeNavigationEventDispatcherOwner`）—— 弹层那棵树走不到，`LocalNavigationEventDispatcherOwner`
+为 null，`NavigationBackHandler` 的 `checkNotNull` 当场抛。桌面端的弹层是同一份组合下的 scene layer，
+反而取得到，所以这个错**只在 Android 炸**。判据一律留在宿主。
+
+⇒ **栈空 / 已在收藏时不拦**：交给平台默认 —— Android 退到桌面（`OnBackPressedDispatcher` 的 fallback），
+桌面无动作。
+
+### 5.8 页面状态的 key（`ui/nav/AppRoute.key`）
+
+`rememberSaveableStateHolder` 的 key 必须能进 Bundle：Android 的 `SaveableStateHolderImpl` 在
+`SaveableStateProvider` 里先 `require(canBeSaved(key))`，对象 / 数据类当场抛
+
+```
+IllegalArgumentException: Type of the key Settings is not supported.
+On Android you can only use types which can be stored inside the Bundle.
+```
+
+桌面没有这一层，所以又是**只有 Android 炸**。
+
+⇒ 路由因此带 `key: String`；带参数的页面把参数拼进来（`"player/<id>"`），同一页面不同参数各有各的
+状态，而不是共用一个槽。
+
+⇒ 枚举当 key 能过（`Serializable`），但那是侥幸 —— 新 key 一律用 String。

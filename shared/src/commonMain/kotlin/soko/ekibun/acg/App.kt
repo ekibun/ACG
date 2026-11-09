@@ -17,6 +17,7 @@ import soko.ekibun.acg.data.SettingsRepository
 import soko.ekibun.acg.ui.comp.webview.WebviewTaskHost
 import soko.ekibun.acg.ui.nav.AppNavigator
 import soko.ekibun.acg.ui.nav.AppRoute
+import soko.ekibun.acg.ui.nav.BackHandler
 import soko.ekibun.acg.ui.screen.home.HomeScreen
 import soko.ekibun.acg.ui.screen.settings.SettingsScreen
 import soko.ekibun.acg.ui.theme.AppTheme
@@ -33,6 +34,8 @@ fun App() {
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
       // 导航挂在窗口根上：栈空是主页，非空是替换成压在上面的独立页面。主页只管自己的 tab。
       val navigator = remember { AppNavigator() }
+      // 返回先给页面（tab、弹层），再给这里，最后是平台默认；主页的 handler 后组合，排在前面。
+      BackHandler(enabled = navigator.current != null) { navigator.back() }
       // 同一时刻只组合一个页面，被换下去的那个靠 saveable 状态原地复活 —— 从设置返回时 tab 不回到默认
       val pages = rememberSaveableStateHolder()
       when (val route = navigator.current) {
@@ -42,7 +45,7 @@ fun App() {
           }
 
         AppRoute.Settings ->
-          pages.SaveableStateProvider(route) {
+          pages.SaveableStateProvider(route.key) {
             SettingsScreen(onBack = { navigator.back() })
           }
       }

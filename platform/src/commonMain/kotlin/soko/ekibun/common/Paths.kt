@@ -19,10 +19,14 @@ data class Paths(
     /** 同 [Paths.cacheDir]。 */
     val cacheDir: String get() = instance?.cacheDir ?: error("Paths.init() not called")
 
-    /** 只能成功一次。 */
+    /** 进程内只认第一份值：Android 的 Activity 重建会再调一次，值相同就放行，不同当场抛。 */
     fun init(paths: Paths) {
-      check(instance == null) { "Paths.init() must be called exactly once" }
-      instance = paths
+      val current = instance
+      if (current == null) {
+        instance = paths
+        return
+      }
+      check(current == paths) { "Paths.init() got two different roots: $current vs $paths" }
     }
   }
 }

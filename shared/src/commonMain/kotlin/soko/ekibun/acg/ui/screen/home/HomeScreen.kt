@@ -39,6 +39,7 @@ import androidx.compose.ui.window.PopupProperties
 import org.jetbrains.compose.resources.painterResource
 import soko.ekibun.acg.data.AccountRepository
 import soko.ekibun.acg.ui.comp.MonogramAvatar
+import soko.ekibun.acg.ui.nav.BackHandler
 import soko.ekibun.acg.ui.screen.home.tab.CollectionScreen
 import soko.ekibun.acg.ui.screen.home.tab.CommunityScreen
 import soko.ekibun.acg.ui.screen.home.tab.SearchScreen
@@ -59,6 +60,11 @@ fun HomeScreen(
   var accountOpen by remember { mutableStateOf(false) }
   val users by AccountRepository.all.collectAsState()
   val currentUser by AccountRepository.current.collectAsState()
+
+  // 返回：面板开着先关面板，否则从别的 tab 回收藏。面板里不能放 handler（见 shared-layer §5.7）。
+  BackHandler(enabled = accountOpen || tab != HomeTab.Collection) {
+    if (accountOpen) accountOpen = false else tab = HomeTab.Collection
+  }
 
   BoxWithConstraints(modifier.fillMaxSize()) {
     HomeTabLayout(
