@@ -75,8 +75,8 @@ internal fun parseSetCookie(
       .associate {
         it.substringBefore('=').trim().lowercase(Locale.ROOT) to it.substringAfter('=', "").trim()
       }
-  // 域 / 路径缺省按 url 推；域去掉前导点
-  val domain = attributes["domain"]?.removePrefix(".") ?: URI(url).host ?: return null
+  // 域 / 路径缺省按 url 推；域属性保留前导点，否则退化成 host-only，匹配不到子域。
+  val domain = attributes["domain"] ?: URI(url).host ?: return null
   // 默认 LAX；NONE 需要同时置 Secure
   val sameSite =
     when (attributes["samesite"]?.lowercase(Locale.ROOT)) {

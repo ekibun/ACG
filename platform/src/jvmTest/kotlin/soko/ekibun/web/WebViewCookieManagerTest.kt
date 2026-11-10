@@ -86,7 +86,7 @@ class WebViewCookieManagerTest {
     nowEpochSeconds: Long = 1_000_000,
   ) = assertNotNull(parseSetCookie(parseUrl, rawCookie, nowEpochSeconds), "this string should parse: $rawCookie")
 
-  /** 缺省值与属性名大小写：`Domain` 少去前导点、`Path` 回落根、无过期即会话 cookie。 */
+  /** 缺省值与属性名大小写：`Domain` 保留前导点、`Path` 回落根、无过期即会话 cookie。 */
   @Test(timeout = 120000)
   fun defaultsAndAttributeCase() {
     val plain = parse("sid=abc")
@@ -101,9 +101,9 @@ class WebViewCookieManagerTest {
 
     val cookie = parse("sid=abc; DOMAIN=.Example.COM; pAtH=/x; sEcUrE; hTtPoNlY")
     assertEquals(
-      "Example.COM",
+      ".Example.COM",
       cookie.domain,
-      "a leading dot must be removed -- WebView2 rejects the .example.com form",
+      "a domain cookie keeps its leading dot -- stripping it makes a host-only cookie",
     )
     assertEquals("/x", cookie.path)
     assertTrue(cookie.secure)
