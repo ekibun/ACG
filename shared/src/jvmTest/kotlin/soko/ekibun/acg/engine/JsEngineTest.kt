@@ -29,7 +29,7 @@ private data class SeenRequest(
 )
 
 /**
- * 能力桥的真派发（走真 `JsEngine`）：`args` 形状与返回值、`openBrowser` 的回调编排、
+ * 能力桥的真派发（走真 `JsEngine`）：`args` 形状与返回值、`oauth` 的回调编排、
  * 以及 WebView2 宿主的端到端。判据见 `docs/design/quickjs-ability-bridge.md`。
  */
 class JsEngineTest {
@@ -145,12 +145,12 @@ class JsEngineTest {
     val intercepted =
       evalAsync(
         """
-        // args[1] 是**本次导航的额外请求头**（不是全局 UA，那条走 setUserAgent）；
-        // 用自定义头当探针，免得和 UA 通道混在一起
+        // 自定义头当探针：headers 只作用于本次导航，全局 UA 走 options.userAgent
         const seen = [];
-        const req = await webview('${url("/page.html")}', { "X-Probe": "dispatch-test" },
-          "JSON.stringify(window.__subLoaded === true)",
-          (request) => {
+        const req = await webview('${url("/page.html")}', {
+          headers: { "X-Probe": "dispatch-test" },
+          script: "JSON.stringify(window.__subLoaded === true)",
+          onInterceptRequest: (request) => {
             if (request.isForMainFrame) {
               const headers = request.headers || {};
               const key = Object.keys(headers).find((n) => n.toLowerCase() === "x-probe");
@@ -159,7 +159,8 @@ class JsEngineTest {
             return request.url.endsWith("/sub.js")
               ? { url: request.url, headers: { "Range": "bytes=0-" } }
               : null;
-          });
+          },
+        });
         const hs = Object.keys(req.headers || {});
         return [req.url, seen[0] || "no-main-frame",
           hs.length > 0 ? "headers-ok" : "no-headers",
@@ -182,12 +183,31 @@ class JsEngineTest {
     val scriptless =
       evalAsync(
         """
-        const r = await webview('${url("/page.html")}', {}, null, null);
+        const r = await webview('${url("/page.html")}');
         return r === undefined ? "undefined" : "unexpected:" + String(r);
         """.trimIndent(),
         timeoutMs = 60_000,
       )
     assertEquals("undefined", scriptless, "webview should yield undefined when no script is passed")
+  }
+
+  /** 两个同步回调都抛异常：不能穿过 native 回调，页面照常加载完。 */
+  @Test(timeout = 120000)
+  fun webviewCallbacksThatThrowDoNotBreakThePage() {
+    TestEnv.skipUnlessHostAvailable()
+
+    val result =
+      evalAsync(
+        """
+        const r = await webview('${url("/page.html")}', {
+          onInterceptRequest: () => { throw new Error("intercept boom"); },
+          onNavigate: () => { throw new Error("navigate boom"); },
+        });
+        return r === undefined ? "undefined" : "unexpected:" + String(r);
+        """.trimIndent(),
+        timeoutMs = 60_000,
+      )
+    assertEquals("undefined", result, "a throwing callback must not break navigation")
   }
 
   /** 导航失败：必须 reject，不回空值。 */
@@ -198,7 +218,7 @@ class JsEngineTest {
     val failed =
       evalAsync(
         """
-        try { await webview('http://127.0.0.1:1/', {}, null, null); return "no throw"; }
+        try { await webview('http://127.0.0.1:1/'); return "no throw"; }
         catch (e) { return "caught"; }
         """.trimIndent(),
         timeoutMs = 60_000,
@@ -208,13 +228,13 @@ class JsEngineTest {
 
   /** 模板里没占位符：必须 reject，且 `args[0]` 原样到达 Kotlin 侧。 */
   @Test(timeout = 120000)
-  fun openBrowserRejectsTemplateWithoutPlaceholder() =
+  fun oauthRejectsTemplateWithoutPlaceholder() =
     runBlocking {
       assertEquals(
         "placeholder-mentioned",
         evalAsync(
           """
-          try { await openBrowser('https://example.com/auth?x=1'); return "no throw"; }
+          try { await oauth('https://example.com/auth?x=1'); return "no throw"; }
           catch (e) { return String(e.message).includes("{{callback}}") ? "placeholder-mentioned" : String(e.message); }
           """.trimIndent(),
         ),
@@ -224,12 +244,12 @@ class JsEngineTest {
 
   /** 占位符换成编码后的回调地址，插件拿到浏览器原样请求的 URL；双重解码会让 `state` 露馅。 */
   @Test(timeout = 120000)
-  fun openBrowserSubstitutesEncodedCallback() =
+  fun oauthSubstitutesEncodedCallback() =
     runBlocking {
       val launched = CompletableDeferred<String>()
       val login =
         async {
-          JsEngine.instance.openBrowserAsync(TEMPLATE) { launched.complete(it) }
+          JsEngine.instance.oauthAsync(TEMPLATE) { launched.complete(it) }
         }
 
       val authorizeUrl = launched.await()

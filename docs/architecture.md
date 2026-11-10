@@ -107,7 +107,7 @@ Gradle 四个模块，外加一个不进 Gradle 工程的原生层目录（规�
 只负责把它们接起来。
 
 另有两组**平台原语**（不进任何继承树、没有 native 面）：`soko.ekibun.browser` 一族是外部浏览器
-登录的回调会话与「用系统默认浏览器打开」，只被脚本插件链的 `openBrowser` 能力用到，形态依据见
+登录的回调会话与「用系统默认浏览器打开」，只被脚本插件链的 `openBrowser` / `oauth` 能力用到，形态依据见
 [design/browser-login.md](./design/browser-login.md)；`soko.ekibun.common.Settings` 是扁平的
 字符串设置表（DataStore Preferences），只被 `Settings` 能力用到。两者都**不开在自己的抽象层上**：
 `Settings` 的契约面（`SettingsStore`）不暴露 okio 类型 —— DataStore 的 `createWithPath` 只吃
@@ -351,7 +351,7 @@ flowchart LR
 
 数据源插件的执行环境。`init.js` 从 Compose 资源里读出来（`files/js/init.js`），在 QuickJS 里求值
 一次，往 JS 全局注入 `fetch` / `Response` / `Request` / `FormData` / `TextEncoder` / `TextDecoder` /
-`Cookies` / `console` / `webview` / `openBrowser` / `Settings` / `encodeURI…`；
+`Cookies` / `console` / `webview` / `openBrowser` / `oauth` / `Settings` / `encodeURI…`；
 **执行期间注入的那一份 `_binding` 就是全部能力**，Kotlin 侧用一个 `when` 直接派发到各能力
 （不按名字反射查找 —— 判据见 [design/quickjs-ability-bridge.md](./design/quickjs-ability-bridge.md)）。
 
@@ -392,7 +392,7 @@ sequenceDiagram
 `Paths.dataDir/webview2` 决定，与设置文件同根；Android 共用系统 `CookieManager`）。契约层的裁定见
 [design/webview-context-redesign.md](./design/webview-context-redesign.md)。
 
-**登录走的是外部浏览器，不是上面这个 WebView**（`openBrowser`）：插件给一个带 `{{callback}}`
+**登录走的是外部浏览器，不是上面这个 WebView**（`oauth`）：插件给一个带 `{{callback}}`
 占位符的授权地址，引擎在进程内建的回环服务器上开一个会话、把会话地址换进去，再用系统浏览器打开
 （Android = Custom Tabs，桌面 = `Desktop.browse`）；浏览器打中会话地址时，把**它实际请求的那串完整
 URL** 交回插件，token 交换归插件自己。契约与取舍见 [design/browser-login.md](./design/browser-login.md)。

@@ -458,6 +458,7 @@ class WebviewContext
   std::mutex mu_;
   jobject ctx_ = nullptr;
   jmethodID onWebResourceRequested;
+  jmethodID onNavigationStarting;
   jmethodID onEvent;
   HWND hwnd_ = nullptr;
   HWND parent_;
@@ -503,6 +504,8 @@ class WebviewContext
           "(Ljava/lang/String;Ljava/lang/String;Z[Ljava/lang/String;)Z");
       onEvent = env->GetMethodID(cls, "onEvent",
                                  "(Ljava/lang/String;Ljava/lang/String;)V");
+      onNavigationStarting = env->GetMethodID(cls, "onNavigationStarting",
+                                              "(Ljava/lang/String;)Z");
       env->DeleteLocalRef(cls);
     }
     post_([this](ICoreWebView2Environment* env) {
@@ -773,9 +776,24 @@ class WebviewContext
   HRESULT STDMETHODCALLTYPE
   Invoke(ICoreWebView2* sender,
          ICoreWebView2NavigationStartingEventArgs* args) override {
-    // 导航开始时取地址。
+    // 导航开始前判定；命中则取消，地址交给宿主处置。
     const std::wstring uri =
         takeString([&](LPWSTR* out) { return args->get_Uri(out); });
+    const bool cancel =
+        WebviewEnviorment::instance().callJava([&, uri](JNIEnv* env) {
+          jobject ctx = getCtx(env);
+          if (!ctx) return false;
+          jstring jUri = fromWide(env, uri);
+          const bool ret =
+              env->CallBooleanMethod(ctx, onNavigationStarting, jUri);
+          env->DeleteLocalRef(jUri);
+          env->DeleteLocalRef(ctx);
+          return ret;
+        });
+    if (cancel) {
+      args->put_Cancel(TRUE);
+      return S_OK;
+    }
     callOnEvent(L"urlChanged", uri);
     callOnEvent(L"navigationStarting", L"");
     return S_OK;
@@ -1188,8 +1206,11 @@ Java_soko_ekibun_web_Webview2Context_setUserAgent(JNIEnv* env, jclass,
     ctx->post([ua_](WebviewContext* ctx) {
       auto webview = ctx->webview();
       if (!webview) return;
+      ComPtr<ICoreWebView2Settings> settings;
+      if (FAILED(webview->get_Settings(settings.GetAddressOf())) || !settings)
+        return;
       ComPtr<ICoreWebView2Settings2> settings2;
-      if (SUCCEEDED(webview->QueryInterface(
+      if (SUCCEEDED(settings->QueryInterface(
               IID_ICoreWebView2Settings2,
               reinterpret_cast<void**>(settings2.GetAddressOf()))) &&
           settings2) {

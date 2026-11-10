@@ -29,6 +29,8 @@ class Webview2Context(
   override var onInterceptor:
     ((url: String, headers: Map<String, String>, method: String, isForMainFrame: Boolean) -> Boolean)? = null
 
+  override var onNavigate: ((url: String) -> Boolean)? = null
+
   override suspend fun setUserAgent(ua: String) {
     withPtr { ptr -> setUserAgent(ptr, ua) }
   }
@@ -210,7 +212,22 @@ class Webview2Context(
     method: String,
     isForMainFrame: Boolean,
     headers: Array<String>,
-  ): Boolean = onInterceptor?.invoke(url, headers.toHeaderMap(), method, isForMainFrame) == true
+  ): Boolean =
+    try {
+      onInterceptor?.invoke(url, headers.toHeaderMap(), method, isForMainFrame) == true
+    } catch (e: Throwable) {
+      e.printStackTrace()
+      false
+    }
+
+  @Keep
+  private fun onNavigationStarting(url: String): Boolean =
+    try {
+      onNavigate?.invoke(url) == true
+    } catch (e: Throwable) {
+      e.printStackTrace()
+      false
+    }
 
   /** `ExecuteScript` 的结果收件人。 */
   abstract class ScriptCallback {

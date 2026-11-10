@@ -89,26 +89,21 @@ private const val SAMPLE_BACKGROUND = """// 后台跑：任务缩成右下角一
 // 页面每次加载完成都执行一次脚本，返回非 null 就把结果交回来；任务结束后胶囊自己消失。
 // 这里是求值，不能写顶层 await，所以包一层 async IIFE。
 (async () => {
-  const page = await webview(
-    "https://bgm.tv/",
-    {},
-    "JSON.stringify({ title: document.title, links: document.querySelectorAll('a').length })"
-  );
+  const page = await webview("https://bgm.tv/", {
+    script: "JSON.stringify({ title: document.title, links: document.querySelectorAll('a').length })"
+  });
   return page;
 })()"""
 
 /** 直接铺到前台：适合登录、人机验证这类要人盯着点的页面。 */
-private const val SAMPLE_FOREGROUND = """// 第五个参数为 true：创建即前台，整块界面换成这个页面。
+private const val SAMPLE_FOREGROUND = """// show: true 表示创建即前台，整块界面换成这个页面。
 // 没登录时停在登录页（脚本返回 null 就继续等），登录跳转后再跑一遍脚本才收工。
-// 顶部「后台」= 收起并开始 30 秒倒计时，到点强制关闭；「关闭」= 立刻结束。
+// 标题栏带后退 / 前进；「关闭」= 立刻结束。
 (async () => {
-  const page = await webview(
-    "https://bgm.tv/login",
-    {},
-    "JSON.stringify(document.querySelector('input[name=password]') ? null : { url: location.href })",
-    null,
-    true
-  );
+  const page = await webview("https://bgm.tv/login", {
+    script: "JSON.stringify(document.querySelector('input[name=password]') ? null : { url: location.href })",
+    show: true
+  });
   return page;
 })()"""
 

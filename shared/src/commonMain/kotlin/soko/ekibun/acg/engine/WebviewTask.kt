@@ -23,9 +23,11 @@ data class WebviewPage(
   val url: String,
   val title: String? = null,
   val progress: Float = 1f,
+  val canGoBack: Boolean = false,
+  val canGoForward: Boolean = false,
 )
 
-/** 事件 → 页面状态。只认标题栏要显示的三样，其余事件原样返回。 */
+/** 事件 → 页面状态；其余事件原样返回。 */
 internal fun WebviewPage.reduce(event: WebViewEvent): WebviewPage =
   when (event) {
     WebViewEvent.PageStarted -> copy(progress = 0f)
@@ -43,10 +45,7 @@ internal fun WebviewPage.reduce(event: WebViewEvent): WebviewPage =
  */
 class WebviewTask internal constructor(
   val url: String,
-  /**
-   * 创建时就铺到前台上（`webview(..., show = true)`）：没有「后台」这个动作——
-   * 调用方正 `await` 着它，收起来改变不了「没人操作就等不到结果」，只有关闭（即失败）。
-   */
+  /** 用户页面：创建即前台，无后台态，关闭兑现 null。 */
   val foregroundOnly: Boolean = false,
 ) {
   /** 上下文创建后填入；还没建好的任务不能切前台。 */
@@ -106,21 +105,22 @@ object WebviewTasks {
     _all.value = _all.value - task
   }
 
-  /** 提到前台：取消后台倒计时，允许加载图片。 */
-  fun toForeground(task: WebviewTask) {
-    if (task.done) return
+  /** 提到前台；被已有用户页面挡住时返回 false，调用方按失败处理。 */
+  fun toForeground(task: WebviewTask): Boolean {
+    if (task.done) return false
     val current = _foreground.value
     // 前台任务在显示期间独占：它正等着用户当场操作，不能被后来者顶掉
-    if (current != null && current !== task && current.foregroundOnly) return
+    if (current != null && current !== task && current.foregroundOnly) return false
     task.expiry?.cancel()
     task.expiry = null
     // 先把上一个按回后台，前台只留一个
     current?.takeIf { it !== task }?.let(::toBackground)
     _foreground.value = task
     scope.launch { runCatching { task.controller?.setVisible(true) } }
+    return true
   }
 
-  /** 按回后台：开始 30 秒倒计时，到点强制关闭。前台任务没有这个动作。 */
+  /** 按回后台：开始 30 秒倒计时，到点强制关闭。前台任务（含用户页面）没这个动作。 */
   fun toBackground(task: WebviewTask) {
     if (task.foregroundOnly) return
     if (_foreground.value === task) _foreground.value = null
@@ -138,8 +138,23 @@ object WebviewTasks {
     scope.launch { runCatching { task.controller?.reload() } }
   }
 
-  /** 用户点关闭。 */
+  /** 用户点关闭：Promise 正常兑现成 null，不是失败。 */
   fun close(task: WebviewTask) {
-    task.fail("webview task closed")
+    unregister(task)
+    task.outcome.complete(null)
+    scope.launch { runCatching { task.controller?.close() } }
+  }
+
+  /** 页面内后退；没有历史返回 false，由调用方决定关掉还是交给平台。 */
+  fun back(task: WebviewTask): Boolean {
+    if (!task.page.value.canGoBack) return false
+    scope.launch { runCatching { task.controller?.goBack() } }
+    return true
+  }
+
+  /** 页面内前进。 */
+  fun forward(task: WebviewTask) {
+    if (!task.page.value.canGoForward) return
+    scope.launch { runCatching { task.controller?.goForward() } }
   }
 }

@@ -405,6 +405,8 @@ class QuickJS(
             vararg argv: Any?,
             thisVal: Any?,
           ) {
+            // 转交给等待者的引用要自己持一票，实参在回调返回后统一归还
+            argv[0].dupRecursive()
             ret.complete(argv[0])
           }
         },
@@ -446,7 +448,13 @@ class QuickJS(
         withPtrSync { ptr ->
           Array(argv.size) { jsToJava(ptr, argv[it]) } to jsToJava(ptr, thisVal)
         }
-      javaToJs(obj.invoke(*args, thisVal = thisJava))
+      var result: Any? = null
+      try {
+        result = obj.invoke(*args, thisVal = thisJava)
+        javaToJs(result)
+      } finally {
+        listOf(args, thisJava, result).freeRecursive()
+      }
     } catch (e: Throwable) {
       e.printStackTrace()
       withPtrSync { ptr -> jsThrowError(ptr, javaToJs(e)) }
@@ -521,7 +529,12 @@ class QuickJS(
         val reject = jsToJava(ptr, jsRej) as JSFunction
         submit {
           try {
-            resolve.invoke(obj.await())
+            val value = obj.await()
+            try {
+              resolve.invoke(value)
+            } finally {
+              value.freeRecursive()
+            }
           } catch (e: Throwable) {
             reject.invoke(e)
           } finally {

@@ -12,7 +12,7 @@ async (_binding) => { /* … */ }
 
 形如 `_binding(method, args)` —— **通用派发**，`args` 是那一份实参数组，按名字转发到各能力。桥名不点出宿主语言：现在是 KMP，两端的宿主未必是 JVM。
 
-> **DO:** `args` 是**一个数组**、作为 `_binding` 实参的**元素**整体过桥，不是摊平成位置参数。`console.log(a, b, c)` 送过去是 `_binding('console', ['log', [a, b, c]])`，第二层数组是 `console.log` 自己的实参数组。写成 `['log', a, b, c]` 会让 Kotlin 侧 `console(type, data: Array<Any?>)` 收错形状。各能力的实参一律打进 `args`：`webview` 的 4 个实参也是 `_binding("webview", [url, header, script, onInterceptRequest])`，不是位置参数。加分支时对着 `JsEngine` 的 `when` 逐个核下标。
+> **DO:** `args` 是**一个数组**、作为 `_binding` 实参的**元素**整体过桥，不是摊平成位置参数。`console.log(a, b, c)` 送过去是 `_binding('console', ['log', [a, b, c]])`，第二层数组是 `console.log` 自己的实参数组。写成 `['log', a, b, c]` 会让 Kotlin 侧 `console(type, data: Array<Any?>)` 收错形状。各能力的实参一律打进 `args`：`webview` 是 `_binding("webview", [url, options])`，`options` 为显式归一后的具名对象，宿主按 `args[1]["headers"]` 这样读取。加分支时对着 `JsEngine` 的 `when` 逐个核形状。
 
 > **DO:** 把「桥本身的形状」当真正的静默风险来查，而不是下标错位——下标错位实测是**响**的（相邻下标类型对不上就 `ClassCastException`），真正静默的是 `args` 被多包一层时 `argv[1]` 只是越界/类型不符、而桩测试全绿。
 
@@ -116,8 +116,9 @@ val candidates = objWrap.javaClass.methods.filter { it.name == methodName && …
 | `fetch(input, init)` | 返回 `Response`；`text()` / `json()` / `arrayBuffer()` 取内容 |
 | `Request` / `Response` / `FormData` / `Headers` / `Cookies` / `console` | 浏览器同名 API 的子集 |
 | `TextEncoder` / `TextDecoder` | `encode(data)` / `decode(data)` 经 `_binding` 的 `encode` / `decode` 同步桥 |
-| `webview(url, header, script, onInterceptRequest)` | 返回 Promise，见下 |
-| `openBrowser(url)` | 返回 Promise，结果为回调完整 URL |
+| `webview(url, options)` | 返回 Promise；可选项 `headers` / `script` / `onInterceptRequest` / `show` / `onNavigate` / `userAgent` |
+| `openBrowser(url)` | 返回 Promise，用系统浏览器打开任意地址，不等回调 |
+| `oauth(url)` | 返回 Promise，结果为回跳的完整 URL；`url` 须含 `{{callback}}` |
 | `Settings.get` / `Settings.set` | 异步的扁平字符串键值；值传 `null` 即删键 |
 | `encodeURI` / `encodeURIComponent` | 按字节做 `%XX` 编码，可指定编码名 |
 | `URL` / `URLSearchParams` | WHATWG 常用子集，纯 JS 自实现；只支持 `scheme://`，不做 IDN |
@@ -127,6 +128,8 @@ val candidates = objWrap.javaClass.methods.filter { it.name == methodName && …
 定时器表放在 JS 侧，宿主只暴露 `delay` 一条异步桥。回调与实参留在 JS 闭包里，不跨桥借 `JSFunction`，因此没有引用要还；`reset()` 时随 runtime 一起回收。形态对齐 `quickjs-libc.c` 的 `os.setTimeout`（挂节点 / 按 id 摘节点 / 到期先摘再调回调），只是链表挪到了脚本里。未到期的 `delay` 和其它悬挂 `Deferred` 一样会在 `collectLeaks` 里留一条，是异步桥的既有边界，不是定时器借票。
 
 `Headers` 用 `__items__` 存"小写头名 → 逐条值数组"，和 `FormData` 一样不把头名做成实例属性；它本身即可过桥，`fetch` 直接把 `request.headers.__items__` 交给宿主，`Http.buildRequest` 逐条 `add`。`__items__` 必须是 `Object.create(null)` 的普通对象：`{}` 上 `__proto__` 是 `Object.prototype` 的 legacy setter，赋值会改原型而不是建属性，`constructor` / `toString` 等合法头名还会命中继承属性；ES `Map` 也不行，条目在内部 slot，`jsGetOwnProperties` 只取自有属性，过桥成空对象。`get()` 与迭代按 Fetch Standard 用 `", "` 合并，`getSetCookie()` 返回逐条值。`Request` / `Response` 的 `headers` 都是 `Headers` 实例；`webview` 的请求头仍是普通对象，不走 `Headers`。
+
+`webview` 的可选项先由 `init.js` 显式归一成固定字段的对象（类型不对的回调一律收成 `null`），再作为 `args[1]` 整体过桥，宿主按具名键读取，不存在位置索引表。`options.onNavigate(url)` 是同步的导航前判定：返回真值就取消本次导航，地址交回插件处置（如调 `openBrowser(url)`）。options 里的函数值过桥各借一票 `JSFunction`。`QuickJS.handleJSInvokable` 在回调返回后把 `argv` 与 `thisVal` 统一 `freeRecursive()` 还票（契约见 `docs/development/quickjs-lifetime.md`），免得 `console` 这类只借不还的分支漏票；要把引用留到回调之外，先 `dupRecursive()` 自己持一票——`asyncReleasing` 的异步任务和 `wrapJSPromiseAsync` 转交给 `Deferred` 等待者的结果各是一例。`options.userAgent` 走 `WebviewContext.setUserAgent`，是创建期配置，必须在首屏导航之前。插件用 `webview(url, { show: true })` 调起用户页面，`onNavigate` 与 `userAgent` 都走同一份 options；前台任务带后退 / 前进按钮，用户关闭时 `webview()` 的 Promise 兑现成 `undefined`，不是失败。
 
 `encodeURI` / `encodeURIComponent` 的 `%XX` **必须两位补零**：`0x0a` 写成 `%0a`，`%a` 是错编码。
 
@@ -138,14 +141,14 @@ val candidates = objWrap.javaClass.methods.filter { it.name == methodName && …
 
 `FormData` 每项映射为 `{ name, value, filename, type }` 四个键，`type` 仅在带 `filename` 时给出，对应 `Http` 的 multipart part。
 
-`openBrowser` 把 `url` 中的 `{{callback}}` 占位符替换为 `http://127.0.0.1:<端口>/<会话id>`（百分号编码形式），返回浏览器实际请求的完整 URL；参数需逐段 `decodeURIComponent`，token 交换不在引擎内完成。
+`oauth` 把 `url` 中的 `{{callback}}` 占位符替换为 `http://127.0.0.1:<端口>/<会话id>`（百分号编码形式），返回浏览器实际请求的完整 URL；参数需逐段 `decodeURIComponent`，token 交换不在引擎内完成。
 
 `Settings` 只接受字符串值，`get` 缺键返回 `null`，`set` 传 `null` 表示删键；两者都是异步的，写也需 `await`。
 
 ## 检查清单
 
 1. 加新能力：在 `JsEngine` 里加 `private` 方法 + 在 `when` 加一个分支，**不要**加反射。
-2. `args` 是数组，按下标取；`console` 的实参数组整体作为**一个元素**送达；`webview` 的 4 个实参也打进 `args`，不是位置参数。
+2. `args` 是数组，按下标取；`console` 的实参数组整体作为**一个元素**送达；`webview` 的第二个元素是具名 `options` 对象，宿主按键读取。实参里的 `JSRef` 由 `QuickJS.handleJSInvokable` 统一归还，跨异步留用或转交 `Deferred` 的地方自己 `dup`。
 3. `JSInvokable { }` 的 lambda **只能一个值参数** `{ argv -> … }`；写 `{ argv, _ -> }` 编译不过。`argv` 是实参数组本体（`Array<out Any?>`），**不要**在 companion 里再包一层。
 4. 引导函数**只收一个形参**——加第二个桥收益只是「少一个 `when` 分支」，不值。这条**由代码评审把关，不进测试套件**。
 5. **别再写桩测试**——`InitJsTest` / `WebviewJsTest` 已删除。桩用 `getOrNull` + 静默默认值，形状错了不响，且它验的是「自己喂进去的东西」，正文改了它不知道。宿主能力的派发跑 `JsEngineTest`，引导脚本的浏览器兼容层跑 `InitJsPolyfillTest`；两者都零桩、走真 `JsEngine`，只断言规范可判定的行为，不验内部结构、宿主输出格式或实现相关的时序。真引擎给不了的（宿主平台约定的取值、非法宿主值、回调触发时机的 gate）**先想清楚是不是真实能力**；是的话用 WebView2 自己的加载过程当时钟，不是自己攥 `Deferred`。

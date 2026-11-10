@@ -48,11 +48,14 @@ open class JSRef internal constructor(
 
 /** 对任意值递归操作：穿透 Array / Iterable / Map，遇到 [JSRef] 就执行 [action]。 */
 private fun Any?.walkRefs(
-  seen: MutableSet<Any>,
+  seen: MutableList<Any>,
   action: (JSRef) -> Unit,
 ) {
   if (this == null) return
-  if (!seen.add(this)) return
+  if (this !is JSRef && this !is Array<*> && this !is Iterable<*> && this !is Map<*, *>) return
+  // 按对象身份去重：普通 Set 的 hashCode 会在自引用对象上无限递归
+  if (seen.any { it === this }) return
+  seen.add(this)
   when (this) {
     is JSRef -> action(this)
     is Array<*> -> forEach { it.walkRefs(seen, action) }
@@ -62,7 +65,7 @@ private fun Any?.walkRefs(
 }
 
 /** 递归加票：`listOf(obj).dupRecursive()` 的简写入口。 */
-fun Any?.dupRecursive(): Unit = walkRefs(mutableSetOf()) { it.dup() }
+fun Any?.dupRecursive(): Unit = walkRefs(mutableListOf()) { it.dup() }
 
 /** 递归释放：`listOf(obj).freeRecursive()` 的简写入口。 */
-fun Any?.freeRecursive(): Unit = walkRefs(mutableSetOf()) { it.free() }
+fun Any?.freeRecursive(): Unit = walkRefs(mutableListOf()) { it.free() }

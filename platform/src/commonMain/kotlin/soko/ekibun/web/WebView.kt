@@ -104,6 +104,9 @@ interface WebviewContext : AutoCloseable {
   var onInterceptor:
     ((url: String, headers: Map<String, String>, method: String, isForMainFrame: Boolean) -> Boolean)?
 
+  /** 主框架导航前同步判定：返回 true 即取消，地址交调用方处置。 */
+  var onNavigate: ((url: String) -> Boolean)?
+
   /** 设置自定义 User-Agent。 */
   suspend fun setUserAgent(ua: String)
 

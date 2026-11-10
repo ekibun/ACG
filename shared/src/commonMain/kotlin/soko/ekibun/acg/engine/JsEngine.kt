@@ -18,13 +18,14 @@ import soko.ekibun.common.pluginSettingsStore
 import soko.ekibun.quickjs.JSError
 import soko.ekibun.quickjs.JSFunction
 import soko.ekibun.quickjs.JSInvokable
-import soko.ekibun.quickjs.JSRef
 import soko.ekibun.quickjs.QuickJS
+import soko.ekibun.quickjs.dupRecursive
+import soko.ekibun.quickjs.freeRecursive
 import soko.ekibun.web.WebViewEvent
 import soko.ekibun.web.createWebviewContext
 import soko.ekibun.web.getWebviewCookieManager
 
-/** 授权链接里标出回调地址位置的占位符，见 [JsEngine.openBrowserAsync]。 */
+/** 授权链接里标出回调地址位置的占位符，见 [JsEngine.oauthAsync]。 */
 private const val CALLBACK_PLACEHOLDER = "{{callback}}"
 
 /** 百分号编码时不转义的字符（`encodeURIComponent` 的保留集）。 */
@@ -103,38 +104,51 @@ class JsEngine {
                     CoroutineScope(Dispatchers.IO).async {
                       getWebviewCookieManager().set(args[0] as String, args[1] as String)
                     }
-                  // webview 的实参打进 args：args[3] 是拦截回调，args[4] 是「创建即前台」
-                  "webview" ->
-                    CoroutineScope(Dispatchers.IO).asyncReleasing(args[3] as JSFunction?) {
+
+                  "webview" -> {
+                    val options = args[1] as Map<*, *>
+                    CoroutineScope(Dispatchers.IO).asyncReleasing(args) {
                       webviewAsync(
                         args[0] as String,
-                        args[1] as Map<Any, Any?>?,
-                        args[2] as String?,
-                        (args[3] as JSFunction?)?.let { fn ->
+                        options["headers"] as Map<Any, Any?>?,
+                        options["script"] as String?,
+                        (options["onInterceptRequest"] as JSFunction?)?.let { fn ->
                           { url, headers, method, isForMainFrame ->
+                            fn.invoke(
+                              mapOf(
+                                "url" to url,
+                                "headers" to headers,
+                                "method" to method,
+                                "isForMainFrame" to isForMainFrame,
+                              ),
+                            )
+                          }
+                        },
+                        options["show"] == true,
+                        (options["onNavigate"] as JSFunction?)?.let { fn ->
+                          { url ->
+                            val result = fn.invoke(url)
                             try {
-                              fn.invoke(
-                                mapOf(
-                                  "url" to url,
-                                  "headers" to headers,
-                                  "method" to method,
-                                  "isForMainFrame" to isForMainFrame,
-                                ),
-                              )
-                            } catch (e: Throwable) {
-                              e.printStackTrace()
-                              false
+                              result == true
+                            } finally {
+                              result.freeRecursive()
                             }
                           }
                         },
-                        args[4] == true,
+                        options["userAgent"] as String?,
                       )
                     }
+                  }
 
-                  // openBrowser 的实参：带 `{{callback}}` 占位符的授权链接
                   "openBrowser" ->
                     CoroutineScope(Dispatchers.IO).async {
-                      openBrowserAsync(args[0] as String)
+                      launchExternalBrowser(args[0] as String)
+                      null
+                    }
+
+                  "oauth" ->
+                    CoroutineScope(Dispatchers.IO).async {
+                      oauthAsync(args[0] as String)
                     }
 
                   // 读设置，交回 `Deferred<String?>`
@@ -230,13 +244,14 @@ class JsEngine {
     from: String?,
   ): String = decodeBytesToText(input, from ?: "utf-8")
 
-  /** 起一个 [Deferred]，收场时关闭 [values] 里的 JS 引用。 */
+  /** 异步期间持有 [values] 里的 JS 引用：先加一票，收场时还一票。 */
   private fun <T> CoroutineScope.asyncReleasing(
-    vararg values: JSRef?,
+    vararg values: Any?,
     block: suspend CoroutineScope.() -> T,
   ): Deferred<T> {
+    values.dupRecursive()
     val job = async(block = block)
-    job.invokeOnCompletion { values.forEach { it?.close() } }
+    job.invokeOnCompletion { values.freeRecursive() }
     return job
   }
 
@@ -252,6 +267,8 @@ class JsEngine {
     script: String?,
     interceptor: ((url: String, headers: Map<String, String>, method: String, isForMainFrame: Boolean) -> Any?)?,
     show: Boolean = false,
+    onNavigate: ((url: String) -> Boolean)? = null,
+    userAgent: String? = null,
   ): Any? {
     // header 展开成纯数据 Map，并补齐后台加载默认带的 Referer
     val normalized =
@@ -273,13 +290,21 @@ class JsEngine {
 
     val task = WebviewTask(url, foregroundOnly = show)
     task.controller = ctx
+    ctx.onNavigate = onNavigate
     WebviewTasks.register(task)
     // 默认后台：开始倒计时；要前台的立刻转正，倒计时随之取消
     WebviewTasks.toBackground(task)
-    if (show) WebviewTasks.toForeground(task)
+    if (show && !WebviewTasks.toForeground(task)) {
+      // 前台已有页面时直接失败，不开看不见的窗口
+      WebviewTasks.unregister(task)
+      ctx.close()
+      throw JSError("webview: a foreground page is already open, close it first")
+    }
     val outcome = task.outcome
 
     try {
+      // 创建期配置，必须在首屏导航之前
+      userAgent?.let { ctx.setUserAgent(it) }
       ctx.onEvent = { event ->
         // 标题栏要的地址/标题/进度，与终止判定无关，先喂给任务
         task.onEvent(event)
@@ -325,12 +350,12 @@ class JsEngine {
   }
 
   /** 外部浏览器桥：把 [templateUrl] 的 `{{callback}}` 换成编码后的回调地址，打开浏览器并等回调。 */
-  internal suspend fun openBrowserAsync(
+  internal suspend fun oauthAsync(
     templateUrl: String,
     launch: suspend (String) -> Unit = ::launchExternalBrowser,
   ): String {
     if (!templateUrl.contains(CALLBACK_PLACEHOLDER)) {
-      throw JSError("openBrowser template has no $CALLBACK_PLACEHOLDER placeholder: $templateUrl")
+      throw JSError("oauth template has no $CALLBACK_PLACEHOLDER placeholder: $templateUrl")
     }
     val session = createCallbackSession()
     try {

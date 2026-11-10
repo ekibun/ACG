@@ -60,4 +60,33 @@ class Webview2ContextTest {
         ctx.close()
       }
     }
+
+  /** 导航前回调命中时取消本次导航，页面仍停在原地址。 */
+  @Test(timeout = 120000)
+  fun onNavigateCancelsThePendingNavigation() =
+    runBlocking {
+      TestEnv.skipUnlessHostAvailable()
+
+      val ctx = Webview2Context()
+      val loaded = CompletableDeferred<Unit>()
+      ctx.onEvent = { event -> if (event is WebViewEvent.PageFinished) loaded.complete(Unit) }
+      try {
+        ctx.setBounds(800, 600)
+        ctx.navigate(url("/page.html"))
+        guarded { loaded.await() }
+        val before = ctx.evaluate("location.href")
+        assertTrue(before?.contains("page.html") == true, "the first page must load: $before")
+
+        val decided = CompletableDeferred<String>()
+        ctx.onNavigate = { target ->
+          decided.complete(target)
+          true
+        }
+        ctx.navigate(url("/other.html"))
+        assertEquals(url("/other.html"), guarded { decided.await() }, "the hook sees the pending url")
+        assertEquals(before, ctx.evaluate("location.href"), "a cancelled navigation leaves the document alone")
+      } finally {
+        ctx.close()
+      }
+    }
 }

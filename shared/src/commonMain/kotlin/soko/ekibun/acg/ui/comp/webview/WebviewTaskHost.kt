@@ -30,6 +30,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import soko.ekibun.acg.engine.WebviewTask
 import soko.ekibun.acg.engine.WebviewTasks
+import soko.ekibun.acg.ui.nav.BackHandler
 import soko.ekibun.web.WebViewHost
 
 /** 进行中的 WebView 任务：没有前台任务时缩成右下角一个胶囊，点开是完整列表。 */
@@ -39,6 +40,12 @@ fun WebviewTaskHost(modifier: Modifier = Modifier) {
   val foreground by WebviewTasks.foreground.collectAsState()
 
   if (tasks.isEmpty()) return
+
+  // 后组合保证返回先交给前台页面；页面退不动就关掉它。
+  BackHandler(enabled = foreground != null) {
+    val task = foreground ?: return@BackHandler
+    if (!WebviewTasks.back(task)) WebviewTasks.close(task)
+  }
 
   Column(modifier.fillMaxSize()) {
     // 每个任务一个常驻宿主，`key(task)` 钉住位置：切前台只改高度。摘出组合会销毁 AWT peer，
@@ -61,7 +68,7 @@ fun WebviewTaskHost(modifier: Modifier = Modifier) {
   }
 }
 
-/** 一个任务的面板：与「浏览器」验证窗口共用 [WebViewPane]，只是不给后退 / 前进。 */
+/** 一个任务的面板：与「浏览器」验证窗口共用 [WebViewPane]，前台任务带后退 / 前进。 */
 @Composable
 private fun WebviewTaskPane(task: WebviewTask) {
   val page by task.page.collectAsState()
@@ -69,10 +76,13 @@ private fun WebviewTaskPane(task: WebviewTask) {
   WebViewPane(
     title = page.title ?: page.url,
     progress = page.progress,
-    history = false,
+    history = task.foregroundOnly,
+    canGoBack = page.canGoBack,
+    canGoForward = page.canGoForward,
+    onBack = { WebviewTasks.back(task) },
+    onForward = { WebviewTasks.forward(task) },
     onReload = { WebviewTasks.reload(task) },
     trailing = {
-      // 前台任务没有「后台」：调用方正等着它，收起来也改变不了结果，只有关闭（即失败）
       if (!task.foregroundOnly) {
         TextButton(onClick = { WebviewTasks.toBackground(task) }) { Text("后台") }
       }

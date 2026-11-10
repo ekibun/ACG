@@ -2,12 +2,10 @@ package soko.ekibun.acg.engine
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
-import soko.ekibun.quickjs.JSError
 import soko.ekibun.web.WebViewEvent
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -71,13 +69,30 @@ class WebviewTaskTest {
     assertSame(login, WebviewTasks.foreground.value, "a foreground-only task has no background to go to")
     assertNull(login.expiry, "and it must not get the 30s countdown either")
 
-    WebviewTasks.toForeground(other)
+    assertTrue(!WebviewTasks.toForeground(other), "a foreground task cannot be displaced")
     assertSame(login, WebviewTasks.foreground.value, "the user is right in the middle of the login page")
   }
 
-  /** 关掉任务不能让等结果的插件脚本看起来像成功。 */
+  /** 前台独占任务：收不起来；关闭是正常收尾，不是失败。 */
   @Test(timeout = 60000)
-  fun closingFailsTheWaitingCaller() {
+  fun pageTasksStayForegroundAndCloseQuietly() {
+    val page = WebviewTask("https://site.example/", foregroundOnly = true).also { created += it }
+    WebviewTasks.register(page)
+    WebviewTasks.toForeground(page)
+
+    WebviewTasks.toBackground(page)
+    assertSame(page, WebviewTasks.foreground.value, "a user page has no background to go to")
+    assertNull(page.expiry, "…and no 30s countdown either")
+    assertTrue(!WebviewTasks.back(page), "no history yet, the caller should close it instead")
+
+    WebviewTasks.close(page)
+    assertEquals(emptyList(), WebviewTasks.all.value, "closing a page removes it")
+    assertTrue(page.outcome.isCompleted && !page.outcome.isCancelled, "closing a page is not a failure")
+  }
+
+  /** 用户关掉页面：Promise 正常兑现成 null，不是失败。 */
+  @Test(timeout = 60000)
+  fun closingResolvesTheWaitingCallerWithNull() {
     runBlocking {
       val only = task("https://a.example")
       WebviewTasks.register(only)
@@ -85,7 +100,9 @@ class WebviewTaskTest {
 
       WebviewTasks.close(only)
 
-      assertIs<JSError>(waiting.await().exceptionOrNull(), "closing must not look like success")
+      val result = waiting.await()
+      assertTrue(result.isSuccess, "closing must not fail the caller")
+      assertNull(result.getOrNull(), "closing resolves with null")
     }
   }
 

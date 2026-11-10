@@ -24,7 +24,7 @@
 - 关闭前必须清算：`collectLeaks()` **先记录、再归还**。记录是为了暴露泄漏（归还之后就无迹可寻），
   归还是为了让 `JS_FreeRuntime` 的 `gc_obj_list` 断言不命中 —— 那断言一触发就 `abort()`，整个进程死，
   测试连报告都发不出来。
-- 泄漏清单打到标准错误流，测试捕获它做断言（`QuickJSTest.unreturnedReferencesAreReportedOnClose`）。
+- 泄漏清单用 `println` 打到标准输出流，测试捕获它做断言（`QuickJSTest.unreturnedReferencesAreReportedOnClose`）。
 - 登记表按**对象身份**强引用（`IdentityMap`）：指针会被复用、条目也可能被 GC 清掉，只有身份强引用
   才能保证「还没 close 的对象一定在册」。键只有 `JSRef`（未覆写 `equals` / `hashCode`）。
 
@@ -41,6 +41,11 @@
   探针（一次过界拿字节）；Java 来路的对象还原成原实例（没有票、不进 cache）；可调用对象不展开
   （dup 出的新票归拿到它的人）；`JSError` 是纯数据，与 JS 侧脱钩；promise 不展开，转成 `Deferred`；
   普通对象整图展开成 `LinkedHashMap`（键的插入序即属性序）。
+- JS → Java 桥（`JSInvokable`）回调返回后，`argv` 与 `thisVal` 的票由 `handleJSInvokable` 统一归还；
+  要把引用留给异步任务或转交给 `Deferred` 等待者，那一侧先 `dupRecursive()` 自己持一票。
+- 交回 JS 之后，Kotlin 值里的 `JSRef` 包装票由平台层归还：`handleJSInvokable` 在 `finally` 里把桥返回值
+  与实参一并 `freeRecursive()`，回调抛异常走同一处；`javaToJs` 的 Deferred 分支在 `resolve.invoke` 之后
+  还 `await` 结果；不回 JS 的结果（同步判定后丢弃）由调用点自己 `freeRecursive()`。
 
 ### `javaToJs` —— Java → JS
 
@@ -70,3 +75,6 @@
 common 里没有按 `===` 比对的表：哈希一律给常数 0，查找退化成线性扫，但比的是 `===`，不会把内容
 相等的两个对象合并。常数哈希是刻意的 —— `identityHashCode` 在 common 里不存在，而规模只有一次遍历
 内的几十个容器。只实现 `get` / `set`，不实现 `MutableMap`。
+
+`dupRecursive` / `freeRecursive` 的遍历去重同理按对象身份线性比对：普通 `Set` 会在自引用 Map 的
+`hashCode()` 上无限递归（`QuickJSTest.objectsExpandToPlainData` 的循环引用会直接超时）。

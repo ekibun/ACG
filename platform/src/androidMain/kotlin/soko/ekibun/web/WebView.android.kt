@@ -70,6 +70,8 @@ internal class AndroidWebviewContext(
   override var onInterceptor:
     ((url: String, headers: Map<String, String>, method: String, isForMainFrame: Boolean) -> Boolean)? = null
 
+  override var onNavigate: ((url: String) -> Boolean)? = null
+
   init {
     view.settings.apply {
       javaScriptEnabled = true
@@ -125,11 +127,21 @@ internal class AndroidWebviewContext(
           onEvent?.invoke(WebViewEvent.LoadFailed(error?.description?.toString() ?: "加载失败"))
         }
 
-        /** 后台页拦截非 http 跳转。 */
+        /** 后台页拦截非 http 跳转；主框架导航交给宿主决定。 */
         override fun shouldOverrideUrlLoading(
           view: WebView,
           request: WebResourceRequest,
-        ): Boolean = headless && !request.url.toString().startsWith("http")
+        ): Boolean {
+          val url = request.url.toString()
+          if (headless && !url.startsWith("http")) return true
+          if (!request.isForMainFrame) return false
+          return try {
+            onNavigate?.invoke(url) == true
+          } catch (e: Throwable) {
+            e.printStackTrace()
+            false
+          }
+        }
 
         override fun shouldInterceptRequest(
           view: WebView,
@@ -138,12 +150,16 @@ internal class AndroidWebviewContext(
           val callback = onInterceptor
           if (callback != null) {
             // 把请求交给拦截回调，本处照常放行
-            callback(
-              request.url.toString(),
-              headersWithCookie(request),
-              request.method,
-              request.isForMainFrame,
-            )
+            try {
+              callback(
+                request.url.toString(),
+                headersWithCookie(request),
+                request.method,
+                request.isForMainFrame,
+              )
+            } catch (e: Throwable) {
+              e.printStackTrace()
+            }
           }
           return super.shouldInterceptRequest(view, request)
         }

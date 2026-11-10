@@ -1,14 +1,16 @@
-# 外部浏览器登录（`openBrowser`）的形态依据
+# 外部浏览器登录（`oauth`）的形态依据
 
 插件要拿用户的授权（OAuth 之类）就得让用户在**真浏览器**里登录 —— 内置 WebView 里登录会被服务商
 判成不安全的客户端，而且用户拿不到自己的密码管理器与已登录的会话。这份文档记的是这条链路的契约
-与裁定：回调地址从哪来、返回什么形状、哪些事引擎不做。改 `JsEngine.openBrowserAsync` 的返回形状、
+与裁定：回调地址从哪来、返回什么形状、哪些事引擎不做。改 `JsEngine.oauthAsync` 的返回形状、
 改 `soko.ekibun.browser` 的契约、或插件写登录流程之前先读本文；代码里只留裸约束。
 
 ## 一、契约
 
+`openBrowser(url)` 打开任意地址、不等回调；需要回跳拿授权码时用 `oauth(templateUrl)`。
+
 ```js
-const callbackUrl = await openBrowser(templateUrl);
+const callbackUrl = await oauth(templateUrl);
 ```
 
 - **`templateUrl`** 是授权地址，回调地址的位置由占位符 `{{callback}}` 标出。引擎把它换成
@@ -30,7 +32,7 @@ const callbackUrl = await openBrowser(templateUrl);
 const form = (fields) =>
   Object.keys(fields).map((k) => encodeURIComponent(k) + "=" + encodeURIComponent(fields[k])).join("&");
 
-const cb = await openBrowser(authorizeUrl);
+const cb = await oauth(authorizeUrl);
 const params = Object.fromEntries(cb.split("?")[1].split("&").map((p) => {
   const [k, v] = p.split("=");
   return [decodeURIComponent(k), decodeURIComponent(v)];   // 逐段解
@@ -98,7 +100,7 @@ const token = await fetch(tokenEndpoint, {
   而 fragment **不会发给服务器**（RFC 3986 §3.5，fragment 不属于 request-target）—— 回环服务器
   物理上收不到。真要收得让回调页面自己读 `location.hash` 再回传，为一个照样会过期的 token 加一个
   活动件不值。
-- **不做刷新**：token 过期/失效后的重新授权就是再调一次 `openBrowser`。
+- **不做刷新**：token 过期/失效后的重新授权就是再调一次 `oauth`。
 
 ## 六、平台差异
 
@@ -112,7 +114,7 @@ const token = await fetch(tokenEndpoint, {
 
 ## 七、已知取舍
 
-- **弃掉的登录会留一个常驻会话条目**，直到 `close()`（`openBrowserAsync` 的 `finally` 调）——
+- **弃掉的登录会留一个常驻会话条目**，直到 `close()`（`oauthAsync` 的 `finally` 调）——
   如果插件扔下 Promise 不管、协程也不取消，那条会话就一直等着。这是"不超时"的直接代价：
   换掉它就得给插件一个能主动取消的 handle，而那会把返回形状从"resolve 时给值"改成"先给句柄"。
 - **同一个模板连续调两次**会起两个并行会话，两条都等着；没有"同一个授权只允许一次"的约束。
@@ -122,5 +124,5 @@ const token = await fetch(tokenEndpoint, {
 | 验什么 | 在哪 |
 | --- | --- |
 | 回环服务器本身（地址形状、按路径区分、原样交付、撤掉即 404、请求并行不串扰） | `platform/src/jvmTest/kotlin/soko/ekibun/browser/CallbackSessionTest.kt` |
-| `openBrowserAsync` 的编排（占位符换成什么、返回什么形状；`launch` 注入，不真开浏览器） | `JsEngineTest.openBrowserSubstitutesEncodedCallback`（原 `BrowserLoginTest` 已删） |
-| JS 侧 `openBrowser` 的真派发（只走模板校验那一支 —— 真跑到底会弹浏览器） | `shared/src/jvmTest/kotlin/soko/ekibun/acg/engine/JsEngineTest.kt` |
+| `oauthAsync` 的编排（占位符换成什么、返回什么形状；`launch` 注入，不真开浏览器） | `JsEngineTest.oauthSubstitutesEncodedCallback`（原 `BrowserLoginTest` 已删） |
+| JS 侧 `oauth` 的真派发（只走模板校验那一支 —— 真跑到底会弹浏览器） | `shared/src/jvmTest/kotlin/soko/ekibun/acg/engine/JsEngineTest.kt` |

@@ -234,41 +234,34 @@ async (_binding) => {
     .map(v => "%" + v.toString(16).padStart(2, "0"))
     .join("").toUpperCase();
 
-  /**
-   * 后台 WebView：按 url 打开页面，可带请求头、注入并执行脚本、拦截请求，返回 Promise。
-   *
-   * 参数依次为 url、请求头、脚本、拦截回调：
-   *
-   *   // 1) 拦一个请求：回调返回真值即中止加载，并把被拦下请求的 url+headers 交回脚本
-   *   const req = await webview(url, { "User-Agent": ua }, null,
-   *     (request) => !!request.headers.Range);
-   *   const buf = await (await fetch(req.url, { headers: req.headers })).arrayBuffer();
-   *
-   *   // 2) 跑页面 JS 取值：script 的返回值（JSON）解析后交回
-   *   const data = await webview(url, {}, "JSON.stringify(window.__NUXT__)");
-   */
-  const webview = async (url, header, script, onInterceptRequest, show) => {
+  // options 归一后整体过桥；契约见 docs/design/quickjs-ability-bridge.md §七。
+  const webview = async (url, options = {}) => {
+    const source = options || {};
     const ret = await _binding("webview", [
       "" + (url || ""),
-      header || {},
-      script == null ? null : "" + script,
-      typeof onInterceptRequest === "function" ? onInterceptRequest : null,
-      !!show
+      {
+        headers: source.headers || {},
+        script: source.script == null ? null : "" + source.script,
+        onInterceptRequest:
+          typeof source.onInterceptRequest === "function" ? source.onInterceptRequest : null,
+        show: !!source.show,
+        onNavigate: typeof source.onNavigate === "function" ? source.onNavigate : null,
+        userAgent: typeof source.userAgent === "string" ? source.userAgent : null
+      }
     ]);
-    // 按返回值类型解析：null 为无脚本 / 脚本无返回值，字符串为脚本返回值（JSON），对象为命中的拦截。
-    if (ret == null) return undefined;            // 无脚本 / 脚本无返回值
-    if (typeof ret === "string") {               // 脚本返回值（JSON 字符串）
+    if (ret == null) return undefined;
+    if (typeof ret === "string") {
       if (ret === "") return undefined;
       return JSON.parse(ret);
     }
-    if (typeof ret === "object") return ret;      // 命中拦截，{url, headers} 原样
+    if (typeof ret === "object") return ret;
     return undefined;
   };
 
   // base64 字母表；QuickJS 没有 atob / btoa，cheerio 这类库在缺 atob 时会走 Node 的 Buffer
   const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-  /** 二进制字符串（每字符一个字节）→ base64。 */
+  // 二进制字符串（每字符一个字节）→ base64。
   const _btoa = (value) => {
     const text = `${value}`;
     const bytes = [];
@@ -284,7 +277,7 @@ async (_binding) => {
     return out;
   };
 
-  /** base64 → 二进制字符串。非法字符丢掉，等价于浏览器的宽松做法。 */
+  // base64 → 二进制字符串；非法字符丢掉，等价于浏览器的宽松做法。
   const _atob = (value) => {
     const text = `${value}`;
     let clean = "";
@@ -673,26 +666,11 @@ async (_binding) => {
       return new Response(response);
     },
     webview,
-    /**
-     * 打开系统浏览器做登录：`url` 为授权地址，回调地址处用占位符 `{{callback}}` 标出，替换为
-     * `http://127.0.0.1:<端口>/<会话id>`（百分号编码形式，直接放在 redirect_uri 上）：
-     *
-     *   const cb = await openBrowser("https://bgm.tv/oauth/authorize?client_id=…&redirect_uri={{callback}}");
-     *   // cb = "http://127.0.0.1:51987/9f3a4b…?code=4808dfb7…&state=probe123"
-     *
-     * 返回浏览器实际请求的完整 URL（含查询串、原样未解码）；参数逐段 `decodeURIComponent`，
-     * 换 token 的 redirect_uri 回传 `cb.split("?")[0]`。
-     */
+    // 用系统浏览器打开任意 URL；不等回调。
     openBrowser: (url) => _binding("openBrowser", ["" + (url || "")]),
-    /**
-     * 扁平的字符串设置，落盘在平台的设置文件里：
-     *
-     *   await Settings.get("bgm.client_id");      // 没有该键则 null
-     *   await Settings.set("bgm.client_id", "…"); // 写
-     *   await Settings.set("bgm.session", null);  // 值为 null 即删键
-     *
-     * 只接受字符串，值传 null 表示删键；两个方法都是异步的，写也需 await。
-     */
+    // {{callback}} 换成本机会话地址，等回跳返回完整 URL；见 docs/design/browser-login.md。
+    oauth: (url) => _binding("oauth", ["" + (url || "")]),
+    // 扁平字符串键值，值为 null 即删键；读写均需 await。
     Settings: {
       get: (key) => _binding("Settings.get", [key]),
       set: (key, value) => _binding("Settings.set", [key, value])
