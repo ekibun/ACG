@@ -21,7 +21,7 @@ class Webview2Context(
   WebviewContext {
   init {
     // 后台页固定 1×1 视口
-    if (isHeadless) submit { setBounds(ptr, 1, 1) }
+    if (isHeadless) submitIfAlive { ptr -> setBounds(ptr, 1, 1) }
   }
 
   override var onEvent: ((WebViewEvent) -> Unit)? = null
@@ -130,29 +130,38 @@ class Webview2Context(
 
   // ---- 桌面私有能力：不上接口、不挂起 ----
 
+  /**
+   * AWT 回调可能晚于 `close()` 才落地：那时句柄已归还给 native，再拿它做窗口操作会直接崩进程。
+   * 判断放在归属线程上做，`close()` 同步置位 [isClosed]，执行先后由 dispatcher 队列保证。
+   */
+  private fun submitIfAlive(block: (Long) -> Unit) {
+    submit { if (!isClosed) block(ptr) }
+  }
+
   fun attach(view: Component) {
-    submit { attach(ptr, view) }
+    submitIfAlive { ptr -> attach(ptr, view) }
   }
 
   /**
    * 摘窗口（异步投递），调用点只有 AWT 的 `removeNotify`：任务注销与窗口关闭，晚到都无所谓。
    *
-   * 若哪天改成「卸载宿主再挂回来」，必须换回同步——父窗口一销毁会连带销毁子窗口，
+   * 任务注销时 `close` 往往已经落地，这条会被 [submitIfAlive] 跳过——上下文都要销毁了，
+   * 不需要再摘窗口。若哪天改成「卸载宿主再挂回来」，必须换回同步——父窗口一销毁会连带销毁子窗口，
    * 之后再 `attach` 只能对着死句柄 `SetParent`。
    */
   fun detach() {
-    submit { detach(ptr) }
+    submitIfAlive { ptr -> detach(ptr) }
   }
 
   fun fitToParent() {
-    submit { fitToParent(ptr) }
+    submitIfAlive { ptr -> fitToParent(ptr) }
   }
 
   fun setBounds(
     width: Int,
     height: Int,
   ) {
-    submit { setBounds(ptr, width, height) }
+    submitIfAlive { ptr -> setBounds(ptr, width, height) }
   }
 
   // ---- native 回调入口，由宿主线程直接调用 ----
