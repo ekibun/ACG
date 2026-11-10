@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import soko.ekibun.browser.createCallbackSession
@@ -46,12 +47,7 @@ class JsEngine {
       synchronized(quickjsLock) {
         quickjsDelegate ?: run {
           val moduleHandler = { module: String ->
-            val modulePath =
-              if (module == "@init") {
-                "files/js/init.js"
-              } else {
-                "files/js/module/" + module.replaceFirst(".js$".toRegex(), "") + ".js"
-              }
+            val modulePath = "files/js/module/" + module.replaceFirst(".js$".toRegex(), "") + ".js"
             runBlocking {
               try {
                 Res.readBytes(modulePath).decodeToString()
@@ -63,9 +59,11 @@ class JsEngine {
           val ctx1 = QuickJS(moduleHandler = moduleHandler)
           quickjsDelegate = ctx1
           // init 是工厂函数，取回后调用一次并归还
-          val init =
-            runBlocking { ctx1.evaluate(moduleHandler("@init")!!, "<init>") } as JSFunction
-          try {
+          (
+            runBlocking {
+              ctx1.evaluate(Res.readBytes("files/js/init.js").decodeToString(), "<init>")
+            } as JSFunction
+          ).use { init ->
             init(
               // `_binding(method, args)` 的实现：按方法名分派到各能力，
               // 见 `docs/design/quickjs-ability-bridge.md`
@@ -150,12 +148,16 @@ class JsEngine {
                       pluginSettingsStore.set(args[0] as String, args[1] as String?)
                     }
 
+                  "delay" ->
+                    CoroutineScope(Dispatchers.IO).async {
+                      delay((args[0] as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L)
+                      null
+                    }
+
                   else -> throw JSError("unknown method '${argv[0]}'")
                 }
               },
             )
-          } finally {
-            init.close()
           }
           ctx1
         }

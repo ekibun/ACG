@@ -47,12 +47,13 @@ val candidates = objWrap.javaClass.methods.filter { it.name == methodName && …
 
 ## 三、`init` 工厂函数的引用计数
 
+`init.js` 由宿主直接求值，不经过 `moduleHandler`（后者只映射 `files/js/module/<名字>.js`），所以插件 `import()` 拿不到引导脚本及其挂的全局能力。
+
 ```kotlin
-val init = runBlocking { ctx1.evaluate(moduleHandler("@init")!!, "<init>") } as JSFunction
-try {
+(runBlocking {
+  ctx1.evaluate(Res.readBytes("files/js/init.js").decodeToString(), "<init>")
+} as JSFunction).use { init ->
   init(JSInvokable { … })
-} finally {
-  init.close()
 }
 ```
 
@@ -60,13 +61,13 @@ try {
 
 `init` 是**工厂函数**：JS 侧没有别的引用持有它（native 的 `jsToJava` 对函数分支 `JS_DupValue` 出一票交给调用方），**调用完归还即安全**。
 
-> **DON'T:** 把它改成 `use { }`。`use` 的契约是「拿这个对象去调一个方法」，而 `init` 是**借用一次就还的工厂函数**，`use` 块里的 `it` 只会绑到 `init` 自己，语义反而更费解；`try/finally` 明确标出那一次借用的生命周期边界。
+> **DO:** 用 `use { init -> … }` 归还这一票。`AutoCloseable.use` 就是 `try { block(this) } finally { close() }`，作用域边界比手写 `try/finally` 清楚；给接收者显式命名后，调用形态与普通函数一致。要紧的只有「拿到 `JSFunction`、用完还一票」，关闭写法本身不影响引用计数。
 
 ## 四、插件模块（`import()` + `callPlugin`）
 
 插件放在 `shared/src/commonMain/composeResources/files/js/module/<名字>.js`，是**不被 `init.js` 引用**的独立 ES 模块。`init.js` 是**宿主能力的表**（能力由宿主提供），插件是能力的**消费者**；把插件写进 `init.js` 会让「加一个插件」变成改宿主引导脚本。
 
-名字到文件的映射在 [JsEngine](../../shared/src/commonMain/kotlin/soko/ekibun/acg/engine/JsEngine.kt) 的 `moduleHandler` 里：`import("bgm")` 与 `import("bgm.js")` 都读 `files/js/module/bgm.js`（`replaceFirst(".js$".toRegex(), "")` 兜住后缀），字节走 Compose Resources（`Res.readBytes`），所以它被打进 jvm jar 的 `composeResources/acg.shared.generated.resources/files/js/module/` 下，桌面端跑的也是同一份。
+名字到文件的映射在 [JsEngine](../../shared/src/commonMain/kotlin/soko/ekibun/acg/engine/JsEngine.kt) 的 `moduleHandler` 里：`import("bgm")` 与 `import("bgm.js")` 都读 `files/js/module/bgm.js`（`replaceFirst(".js$".toRegex(), "")` 兜住后缀），字节走 Compose Resources（`Res.readBytes`），所以它被打进 jvm jar 的 `composeResources/acg.shared.generated.resources/files/js/module/` 下，桌面端跑的也是同一份。`init.js` 不走这张映射，见 §三。
 
 宿主调插件的唯一入口是 `JsEngine.callPlugin(module, function, *args)`，它求值的是这么一句：
 
@@ -76,7 +77,7 @@ try {
 
 > **DO:** 每次现 `import()`，不缓存模块对象。ES 模块的求值结果本来就由引擎的模块表按 specifier 缓存（同一个名字只求值一次），能缓存下来的只有「模块对象在 Kotlin 侧的句柄」，而持有它就要替它管引用计数 —— 换不来任何东西。名字里的引号与换行由 `jsStringLiteral` 转义，别手拼。
 
-> **DO:** 取到的导出**必须** `as JSFunction`（不是 `as JSInvokable`）并在 `finally` 里 `close()`。`jsToJava` 的函数分支 `JS_DupValue` 出一票，票归拿到它的人；漏掉就是每个引擎实例永久漏一票，`reset()` 的泄漏报告从此带一条噪音。这是 §三 那条约束的同一件事，只是对象从 `init` 换成了插件函数。
+> **DO:** 取到的导出**必须** `as JSFunction`（不是 `as JSInvokable`），用完 `close()`（`use { }` 或 `try/finally` 都行）。`jsToJava` 的函数分支 `JS_DupValue` 出一票，票归拿到它的人；漏掉就是每个引擎实例永久漏一票，`reset()` 的泄漏报告从此带一条噪音。这是 §三 那条约束的同一件事，只是对象从 `init` 换成了插件函数。
 
 > **DO:** 插件函数交回的 Promise 要 `await` 掉再回给调用方（`callPlugin` 里那个 `Deferred` 分支）。不 await 的话调用方拿到的是 `Deferred` 本身而不是结果（形状对不上），失败也无人接 —— 拒绝兑现的异常是从 `await()` 那个点抛出来的，类型是 [`JSError`](../../platform/src/commonMain/kotlin/soko/ekibun/quickjs/JSError.kt)（`wrapJSPromiseAsync` 的 reject 分支是 `argv[0] as? Throwable ?: JSError(...)`，而 JS 的 `Error` 过桥就是 `JSError`）。反方向同理：`when` 分支里 Kotlin 抛的异常由 `handleJSInvokable` 转成 JS 异常，插件那边 `catch` 得到。
 
@@ -113,12 +114,19 @@ try {
 | --- | --- |
 | `_binding(method, args)` | 唯一入口；`args` 为实参数组，按名字转发到各能力 |
 | `fetch(input, init)` | 返回 `Response`；`text()` / `json()` / `arrayBuffer()` 取内容 |
-| `Request` / `Response` / `FormData` / `Cookies` / `console` | 浏览器同名 API 的子集 |
+| `Request` / `Response` / `FormData` / `Headers` / `Cookies` / `console` | 浏览器同名 API 的子集 |
 | `TextEncoder` / `TextDecoder` | `encode(data)` / `decode(data)` 经 `_binding` 的 `encode` / `decode` 同步桥 |
 | `webview(url, header, script, onInterceptRequest)` | 返回 Promise，见下 |
 | `openBrowser(url)` | 返回 Promise，结果为回调完整 URL |
 | `Settings.get` / `Settings.set` | 异步的扁平字符串键值；值传 `null` 即删键 |
 | `encodeURI` / `encodeURIComponent` | 按字节做 `%XX` 编码，可指定编码名 |
+| `URL` / `URLSearchParams` | WHATWG 常用子集，纯 JS 自实现；只支持 `scheme://`，不做 IDN |
+| `atob` / `btoa` / `window` / `self` | base64 与浏览器向库的环境探测 |
+| `setTimeout` / `setInterval` / `clearTimeout` / `clearInterval` | 返回数字 id；宿主只给 `delay(ms)`，表与回调都在 `init.js` 内 |
+
+定时器表放在 JS 侧，宿主只暴露 `delay` 一条异步桥。回调与实参留在 JS 闭包里，不跨桥借 `JSFunction`，因此没有引用要还；`reset()` 时随 runtime 一起回收。形态对齐 `quickjs-libc.c` 的 `os.setTimeout`（挂节点 / 按 id 摘节点 / 到期先摘再调回调），只是链表挪到了脚本里。未到期的 `delay` 和其它悬挂 `Deferred` 一样会在 `collectLeaks` 里留一条，是异步桥的既有边界，不是定时器借票。
+
+`Headers` 用 `__items__` 存"小写头名 → 逐条值数组"，和 `FormData` 一样不把头名做成实例属性；它本身即可过桥，`fetch` 直接把 `request.headers.__items__` 交给宿主，`Http.buildRequest` 逐条 `add`。`__items__` 必须是 `Object.create(null)` 的普通对象：`{}` 上 `__proto__` 是 `Object.prototype` 的 legacy setter，赋值会改原型而不是建属性，`constructor` / `toString` 等合法头名还会命中继承属性；ES `Map` 也不行，条目在内部 slot，`jsGetOwnProperties` 只取自有属性，过桥成空对象。`get()` 与迭代按 Fetch Standard 用 `", "` 合并，`getSetCookie()` 返回逐条值。`Request` / `Response` 的 `headers` 都是 `Headers` 实例；`webview` 的请求头仍是普通对象，不走 `Headers`。
 
 `encodeURI` / `encodeURIComponent` 的 `%XX` **必须两位补零**：`0x0a` 写成 `%0a`，`%a` 是错编码。
 
@@ -140,9 +148,9 @@ try {
 2. `args` 是数组，按下标取；`console` 的实参数组整体作为**一个元素**送达；`webview` 的 4 个实参也打进 `args`，不是位置参数。
 3. `JSInvokable { }` 的 lambda **只能一个值参数** `{ argv -> … }`；写 `{ argv, _ -> }` 编译不过。`argv` 是实参数组本体（`Array<out Any?>`），**不要**在 companion 里再包一层。
 4. 引导函数**只收一个形参**——加第二个桥收益只是「少一个 `when` 分支」，不值。这条**由代码评审把关，不进测试套件**。
-5. **别再写桩测试**——`InitJsTest` / `WebviewJsTest` 已删除。桩用 `getOrNull` + 静默默认值，形状错了不响，且它验的是「自己喂进去的东西」，正文改了它不知道。改完派发跑 `JsEngineTest`（零桩、真 `JsEngine`）——那是唯一的哨兵。真引擎给不了的（宿主平台约定的取值、非法宿主值、回调触发时机的 gate）**先想清楚是不是真实能力**；是的话用 WebView2 自己的加载过程当时钟，不是自己攥 `Deferred`。
+5. **别再写桩测试**——`InitJsTest` / `WebviewJsTest` 已删除。桩用 `getOrNull` + 静默默认值，形状错了不响，且它验的是「自己喂进去的东西」，正文改了它不知道。宿主能力的派发跑 `JsEngineTest`，引导脚本的浏览器兼容层跑 `InitJsPolyfillTest`；两者都零桩、走真 `JsEngine`，只断言规范可判定的行为，不验内部结构、宿主输出格式或实现相关的时序。真引擎给不了的（宿主平台约定的取值、非法宿主值、回调触发时机的 gate）**先想清楚是不是真实能力**；是的话用 WebView2 自己的加载过程当时钟，不是自己攥 `Deferred`。
 6. 任何 `as JSInvokable` 用在需要 `close()` 的 `JSFunction` 上都是漏票。
 7. 跨语言的数据形状（`FormData` 的 `__js_proto__` / `__items__` / 每项的 `name` / `value` / `type` / `filename`）**键名要逐字对齐** `Http.kt` 那边。错一个字母的后果是**静默降级**（文件名送不到 multipart 头，HTTP 层面仍合法，不引起任何异常）。`JsEngineTest.formDataShapeIsReachable` 锁着这条。
-8. **别给「真破坏会自己响」的东西留测试，也别给「换个设计」判红。** 文本规则能换成行为断言就换掉，别让它与行为用例并存成双份。`JsEngineTest` 现在一条源码文本断言都没有（7 条全走真派发）；「唯一测试面」只对「行为」成立，文本层面没人守——这是有意的。
+8. **别给「真破坏会自己响」的东西留测试，也别给「换个设计」判红。** 文本规则能换成行为断言就换掉，别让它与行为用例并存成双份。两个测试类都没有源码文本断言，全部走真派发；「唯一测试面」只对「行为」成立，文本层面没人守——这是有意的。
 9. 加插件：`.js` 放 `files/js/module/`，宿主侧用 `callPlugin` 调；**不要**在 `init.js` 里注册（§四）。插件与宿主之间**共享的键名**（设置键、协议里的字段名）两边各写一份，改一处要改两处 —— 两边各写一份 —— 原来有一条跨界用例钉 `bgm.session`（`PluginHostTest`），已随 jvmTest 精简删掉，
 现在只能靠 `debugCode` 手工核对。
