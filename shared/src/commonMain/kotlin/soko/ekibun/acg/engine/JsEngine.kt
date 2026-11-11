@@ -257,6 +257,9 @@ class JsEngine {
    *
    * [onNavigate] 同步回调导航去向：布尔值就是判断（`true` 取消这次导航），JSON 字符串
    * （`init.js` 序列化过的返回值）是「这次导航就是要的结果」—— 取消导航并以它结算。
+   *
+   * 页面加载完成不是终态：没有 [script] 的任务只由 [onNavigate] / 命中拦截 / 加载失败 / 用户关闭
+   * 结束；无脚本的 webview 必须能自己收场，否则后台任务满 30 秒被强制关闭（见 shared-layer §5.9）。
    */
   internal suspend fun webviewAsync(
     url: String,
@@ -320,16 +323,12 @@ class JsEngine {
         task.onEvent(event)
         when (event) {
           is WebViewEvent.PageFinished ->
-            if (!outcome.isCompleted) {
-              if (script == null) {
-                // 无脚本：加载完即终态，结果 null
-                outcome.complete(null)
-              } else {
-                CoroutineScope(Dispatchers.IO).launch {
-                  // 平台没给结果（null / 空串 / undefined 的 `"null"`）就等下一次加载完成
-                  val json = runCatching { ctx.evaluate(script) }.getOrNull()
-                  if (!json.isNullOrEmpty() && json != "null") outcome.complete(json)
-                }
+            // 加载完成不是终态：没有脚本就什么也不结算（页面还要等人操作），有脚本且脚本给出了值才收工
+            if (!outcome.isCompleted && script != null) {
+              CoroutineScope(Dispatchers.IO).launch {
+                // 平台没给结果（null / 空串 / undefined 的 `"null"`）就等下一次加载完成
+                val json = runCatching { ctx.evaluate(script) }.getOrNull()
+                if (!json.isNullOrEmpty() && json != "null") outcome.complete(json)
               }
             }
 

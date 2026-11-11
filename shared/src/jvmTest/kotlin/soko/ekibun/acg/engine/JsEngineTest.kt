@@ -175,23 +175,7 @@ class JsEngineTest {
     )
   }
 
-  /** 不传 script：回 `undefined`，不是空串也不是 null。 */
-  @Test(timeout = 120000)
-  fun webviewWithoutScriptYieldsUndefined() {
-    TestEnv.skipUnlessHostAvailable()
-
-    val scriptless =
-      evalAsync(
-        """
-        const r = await webview('${url("/page.html")}');
-        return r === undefined ? "undefined" : "unexpected:" + String(r);
-        """.trimIndent(),
-        timeoutMs = 60_000,
-      )
-    assertEquals("undefined", scriptless, "webview should yield undefined when no script is passed")
-  }
-
-  /** 两个同步回调都抛异常：不能穿过 native 回调，页面照常加载完。 */
+  /** 两个同步回调都抛异常：不能穿过 native 回调，页面照常加载完并交出脚本结果。 */
   @Test(timeout = 120000)
   fun webviewCallbacksThatThrowDoNotBreakThePage() {
     TestEnv.skipUnlessHostAvailable()
@@ -200,14 +184,15 @@ class JsEngineTest {
       evalAsync(
         """
         const r = await webview('${url("/page.html")}', {
+          script: "JSON.stringify(window.__subLoaded === true)",
           onInterceptRequest: () => { throw new Error("intercept boom"); },
           onNavigate: () => { throw new Error("navigate boom"); },
         });
-        return r === undefined ? "undefined" : "unexpected:" + String(r);
+        return r === "true" ? "page-loaded" : "unexpected:" + String(r);
         """.trimIndent(),
         timeoutMs = 60_000,
       )
-    assertEquals("undefined", result, "a throwing callback must not break navigation")
+    assertEquals("page-loaded", result, "a throwing callback must not break navigation")
   }
 
   /** 导航前回调返回非布尔值：取消这次导航，并以它作为 `webview` 的结果提前收工。 */
@@ -479,7 +464,7 @@ class JsEngineTest {
         "&state=probe123&redirect_uri={{callback}}"
   }
 
-  // ---- WebView2 宿主端到端（原 WebViewHostTest）----
+  // ---- WebView2 宿主端到端 ----
 
   /** 35 s 护栏。 */
   private suspend fun <T> guarded(block: suspend () -> T): T = withTimeout(35_000) { block() }
