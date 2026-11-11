@@ -86,7 +86,7 @@ trigger: always_on
 
 - **DO：注释尽量简洁，只写不能直接推断的内容。** 讲当前设计、职责与约束，不写「不再…」「改为…」这类历程；不写代码复述（删掉这行不影响理解的就是在翻译代码）；只对齐技术目标，不对齐来源仓库；保留契约签名。带实测数据或推演「为什么」的段落搬进 `docs/` 下对应正本，源码只留裸约束 + 指针；用 `import` 不写全限定名；`.kt` / `.kts` 注释不用 emoji（`.md` 例外）。
 
-- **DO：注释里的「为什么」按模块去 `docs/` 找。** 引用计数与 JS ↔ Java 转换见 [`docs/development/quickjs-lifetime.md`](./docs/development/quickjs-lifetime.md)，`:shared` 的 IO / 引擎 / 界面约束见 [`docs/development/shared-layer.md`](./docs/development/shared-layer.md)，播放链见 [`docs/development/playback-invariants.md`](./docs/development/playback-invariants.md)，测试判据见 [`docs/development/testing.md`](./docs/development/testing.md)，构建见 [`docs/development/build.md`](./docs/development/build.md)。
+- **DO：注释里的「为什么」按模块去 `docs/` 找。** 引用计数与 JS ↔ Java 转换见 [`docs/development/quickjs-lifetime.md`](./docs/development/quickjs-lifetime.md)，`:shared` 的 IO / 引擎 / 界面约束见 [`docs/development/shared-layer.md`](./docs/development/shared-layer.md)，插件（`files/js/module/`）见 [`docs/design/bgm-plugin.md`](./docs/design/bgm-plugin.md)，播放链见 [`docs/development/playback-invariants.md`](./docs/development/playback-invariants.md)，测试判据见 [`docs/development/testing.md`](./docs/development/testing.md)，构建见 [`docs/development/build.md`](./docs/development/build.md)。
 
 - **DO：遇到"不报错只失效"的问题先查播放链路不变量，再走取证步骤。** 外部库（ffmpeg / kotlinx / OkHttp / skiko）的行为依据与判据在 [`docs/development/playback-invariants.md`](./docs/development/playback-invariants.md)，崩溃 / 挂死的取证步骤见 [`docs/development/debugging.md`](./docs/development/debugging.md)，症状路由表见 [`docs/development/troubleshooting.md`](./docs/development/troubleshooting.md)。
 

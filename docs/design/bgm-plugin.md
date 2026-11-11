@@ -1,5 +1,9 @@
 # Bangumi 插件与收藏页的形态依据
 
+> **状态（2026-11-09）：登录已改成站内网页登录** —— 插件自己用 `webview` 打开 `https://bgm.tv/login`，
+> 登完把 cookie 收成账号会话交回宿主；`bgm.js` 不再读 `Settings`，本文的 §二 键归属与 §三 OAuth
+> 都成了历史，现行做法见 [shared-layer §5.9](../development/shared-layer.md)。
+>
 > **状态（2026-11）：** Kotlin 侧的实现（`BgmSource`、收藏页、`CollectionState`）已删除，重写时按本文的
 > 接口与分页结论来。插件脚本 `files/js/module/bgm.js` 仍在，下文描述的是它。
 
@@ -72,12 +76,15 @@
 | 结论 | 证据 |
 | --- | --- |
 | **每个请求都必须带 UA**，格式 `<dev>/<app>/<version> (<url>)` | `ekibun/acg/0.1 (https://github.com/ekibun/ACG)` → 200；不带 → 403 `Please set a 'User-Agent'` |
+| **网页端按 UA 认会话**：WebView 与 fetch 必须是同一个 UA | 同一份 cookie（从 WebView2 的 Cookies 库里解出的 `chii_auth`）：WebView2 的 UA（Edge 157）→ 登录页，`class="avatar"` 命中；换成 Chrome 131 或 `ekibun/acg/…` → 只有登录/注册。所以**这个串由宿主统一兜底**（`DEFAULT_USER_AGENT`，`webview` 与 `fetch` 默认都是它），`bgm.js` 不再自带 UA —— 参考实现也是把 `HttpUtil.ua` 同时设给 `WebSettings.userAgentString` |
 | `/v0/me` 要 `Authorization: Bearer <token>` | 假 token → 401 |
 | 收藏接口对公开用户**不需要鉴权** | 裸 `GET /v0/users/{u}/collections` → 200（本插件仍带 token，它要读自己的收藏） |
 | `type` 是**整数 1..5**（想看/看过/在看/搁置/抛弃） | 不是 Bangumi 安卓客户端那套 `wish` / `do` 字符串 |
 | `subject_type` 是 **1/2/3/4/6**（书籍/动画/音乐/游戏/三次元），**没有 5** | 「人物」那档已废 |
 | 封面在图床 `lain.bgm.tv`，`images.grid` 是 `/r/100/` 那档（100px） | 直连 200、0 次跳转；列表里就是小图，取 `large` 白等一趟大文件 |
 | `limit` 上限 50 | 取满省往返 |
+| **数字 uid 能当网页路径段**，服务端 302 到用户名页 | `/user/1` → 302 `/user/sai`；`/anime/list/1/collect` → 302 `/anime/list/sai/collect`。别拿 `/v0/users/1` 反推 —— v0 只按 username 查，报的是 `can't find user with username "1"` |
+| **账号 id 取 username**，不存数字 uid | 用户名本身就是收藏地址的路径段（`/anime/list/<user>/collect`）；uid 只多一跳 302 归一，存下来没有用处 |
 
 收藏一项的形状是 `{subject: {…}, subject_id, type, rate, ep_status, …}`：条目的名字、封面、评分
 挂在 **`subject`** 里，而**用户自己的进度**（`ep_status`）在**外层** —— 两边都要读，
@@ -106,7 +113,7 @@
 
 ## 六、没做的
 
-- **不做 token 刷新**：7 天过期后要用户重新授权（再走一次 `openBrowser`）。做刷新要先有
+- **不做 token 刷新**：7 天过期后要用户重新授权（再走一次 `oauth`）。做刷新要先有
   定时/失败重试的位置，现在没有。
 - **不做收藏的增删改**：这一版只读。
 - **不做条目详情页**：列表点进去还没有地方可去。
@@ -118,9 +125,9 @@
 
 | 验什么 | 在哪 |
 | --- | --- |
-| 能力桥的真派发：`args` 形状与返回值、`Settings` 读写删、`fetch` 的请求侧（方法 / Content-Type / body）与响应侧、`FormData`、`openBrowser` 回调编排 | `shared/src/jvmTest/.../engine/JsEngineTest.kt` |
+| 能力桥的真派发：`args` 形状与返回值、`Settings` 读写删、`fetch` 的请求侧（方法 / Content-Type / body）与响应侧、`FormData`、`oauth` 模板校验与回跳编排 | `shared/src/jvmTest/.../engine/JsEngineTest.kt` |
 | WebView2 宿主端到端：拦截回调看得见子资源、脚本结果拿得回、cookie 跨任务共享 | `shared/src/jvmTest/.../engine/JsEngineTest.kt`（末尾三条） |
-| 任务注册表：前台互斥、后台倒计时、关闭让等待方失败、注销 | `shared/src/jvmTest/.../engine/WebviewTaskTest.kt` |
+| 任务注册表：前台互斥、后台倒计时、关闭兑现 null、注销 | `shared/src/jvmTest/.../engine/WebviewTaskTest.kt` |
 | 标题栏状态从平台事件折出来（`reduce`） | `shared/src/jvmTest/.../engine/WebviewTaskTest.kt` |
 | 应答 → 强类型（整数/浮点标签、缺字段、条目缺 `subject`） | `shared/src/jvmTest/.../source/BgmSourceTest.kt` |
 | 设置落盘本身（DataStore、父目录、删除） | `platform/src/jvmTest/.../common/SettingsStoreTest.kt` |
