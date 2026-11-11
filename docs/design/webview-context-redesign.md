@@ -7,7 +7,7 @@
 与 `docs/design/architecture-design.md` §4「前后台同实例两种可见态」的关系：那条不变，本文只规定
 它下面的平台契约层。
 
-## 契约要点（D1–D10 裁定）
+## 契约要点（D1–D11 裁定）
 
 | # | 决策点 | 裁定 |
 |---|---|---|
@@ -21,6 +21,7 @@
 | D8 | 接口函数形态 | 接口上的函数全部 `suspend`（`setUserAgent` / `setDevtoolsEnabled` / `navigate` / `evaluate` / `reload` / `stop` / `goBack` / `goForward` / `openDevTools` / `dispose`），无例外——每条命令落到归属线程并返回，`submit` 那种 fire-and-forget 报不出「已落实」 |
 | D9 | 两个回调槽的形态 | `var onEvent` / `var onInterceptor` 两个可变属性，不是 suspend 函数、也不是 setter（回调是「每次任务各一份」的槽位，赋值是纯字段写） |
 | D10 | 拦截回调签名 | `var onInterceptor: ((url: String, headers: Map<String, String>, method: String, isForMainFrame: Boolean) -> Boolean)?`（返回 `true` = 命中）；删除 `WebViewInterception` 与 `WebViewRequest`。`isRedirect`（Android 独有）不上接口；`method` / `isForMainFrame` 两端都给得到 |
+| D11 | `WebViewConfig.userAgent` | 删（无调用方改过值；页面 UA 由 `webviewAsync` 建上下文后、首屏导航前 `setUserAgent` —— 默认 `DEFAULT_USER_AGENT`，与 `fetch` 同一个串）。要按页面改 UA 就在调 `setUserAgent` 的地方加，不再从配置对象透传 |
 
 ## 接口形状（platform commonMain，`soko.ekibun.web`）
 

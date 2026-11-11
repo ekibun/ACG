@@ -82,9 +82,6 @@ sealed interface WebViewEvent {
 
 /** 可见 WebView 的创建期配置，只在视图创建时生效。 */
 class WebViewConfig {
-  /** 自定义 User-Agent；null 表示用默认值。 */
-  var userAgent: String? = null
-
   /** 是否允许开发者工具与右键菜单。 */
   var enableDevtools: Boolean = false
 }
@@ -303,7 +300,6 @@ fun WebView(
       try {
         createWebviewContext().also { ctx ->
           ctx.onEvent = state::onWebViewEvent
-          state.config.userAgent?.let { ctx.setUserAgent(it) }
           ctx.setDevtoolsEnabled(state.config.enableDevtools)
           state.controller = ctx
           // 创建完成后发起首屏导航

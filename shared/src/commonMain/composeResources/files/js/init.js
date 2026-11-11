@@ -262,6 +262,7 @@ async (_binding) => {
                 return JSON.stringify(decision);
               }
             : null,
+        // UA 默认由宿主注入（与 fetch 同一个串），这里只是显式覆盖的口子
         userAgent: typeof source.userAgent === "string" ? source.userAgent : null
       }
     ]);

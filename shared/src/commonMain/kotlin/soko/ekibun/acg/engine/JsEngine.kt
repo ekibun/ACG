@@ -9,6 +9,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import soko.ekibun.acg.common.DEFAULT_USER_AGENT
+import soko.ekibun.acg.common.requestWithDefaultUserAgent
 import soko.ekibun.browser.createCallbackSession
 import soko.ekibun.browser.launchExternalBrowser
 import soko.ekibun.common.Http
@@ -79,7 +81,7 @@ class JsEngine {
                   // 交出去的 `_opaque` 是 Response 本体。
                   "fetch" ->
                     CoroutineScope(Dispatchers.IO).async {
-                      val rsp = Http.request(args[0] as Map<Any, Any?>)
+                      val rsp = Http.requestWithDefaultUserAgent(args[0] as Map<Any, Any?>)
                       mapOf(
                         "url" to rsp.url,
                         "headers" to rsp.headers,
@@ -258,6 +260,9 @@ class JsEngine {
    * [onNavigate] 同步回调导航去向：布尔值就是判断（`true` 取消这次导航），JSON 字符串
    * （`init.js` 序列化过的返回值）是「这次导航就是要的结果」—— 取消导航并以它结算。
    *
+   * UA 取 [userAgent] → [header] 里的 `User-Agent` → [DEFAULT_USER_AGENT]；header 里那条会
+   * 摘掉再交给页面，否则同一个头会发两个值。
+   *
    * 页面加载完成不是终态：没有 [script] 的任务只由 [onNavigate] / 命中拦截 / 加载失败 / 用户关闭
    * 结束；无脚本的 webview 必须能自己收场，否则后台任务满 30 秒被强制关闭（见 shared-layer §5.9）。
    */
@@ -270,14 +275,14 @@ class JsEngine {
     onNavigate: ((url: String) -> Any?)? = null,
     userAgent: String? = null,
   ): Any? {
-    // header 展开成纯数据 Map，并补齐后台加载默认带的 Referer
+    // header 展开成纯数据 Map；UA 可以写在 header 里，那条单独取出来设到 WebView 上
     val normalized =
       header?.entries?.associate { it.key.toString() to it.value.toString() } ?: emptyMap()
+    val headerUserAgent = normalized.entries.firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
+    // 导航头里摘掉 UA（已经单独设到页面上，留着会发两个值）；Referer 没给就补成目标地址
     val baseHeaders =
-      if (normalized.keys.any { it.equals("Referer", ignoreCase = true) }) {
-        normalized
-      } else {
-        normalized + ("Referer" to url)
+      normalized.filterKeys { !it.equals("User-Agent", ignoreCase = true) }.let { headers ->
+        if (headers.keys.any { it.equals("Referer", ignoreCase = true) }) headers else headers + ("Referer" to url)
       }
 
     // 建 WebView 上下文：后台任务按 headless 建，创建后仍可切前台
@@ -316,8 +321,8 @@ class JsEngine {
     }
 
     try {
-      // 创建期配置，必须在首屏导航之前
-      userAgent?.let { ctx.setUserAgent(it) }
+      // 创建期配置，必须在首屏导航之前：没有显式 UA 就用全应用那份（与 fetch 同一个串）
+      ctx.setUserAgent(userAgent ?: headerUserAgent ?: DEFAULT_USER_AGENT)
       ctx.onEvent = { event ->
         // 标题栏要的地址/标题/进度，与终止判定无关，先喂给任务
         task.onEvent(event)

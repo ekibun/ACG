@@ -1,5 +1,6 @@
 package soko.ekibun.acg.player
 
+import soko.ekibun.acg.common.requestWithDefaultUserAgent
 import soko.ekibun.common.Http
 import soko.ekibun.ffmpeg.AvFormat
 import soko.ekibun.ffmpeg.AvIO
@@ -13,7 +14,7 @@ class HttpIO(
   /** 创建本 IO 的 [AvIO.Handler]，用于登记「本次读的投递口」。 */
   override val handler: AvIO.Handler,
 ) : AvIO {
-  /** 交给 [Http.request] 的选项，`url` 在这里补上。 */
+  /** 交给 [Http.requestWithDefaultUserAgent] 的选项，`url` 在这里补上。 */
   private val requestOptions: Map<String, Any> = options + mapOf("url" to url)
 
   private var offset = 0
@@ -25,7 +26,7 @@ class HttpIO(
   /** 打开一条从 [start] 起的 range 会话。 */
   private suspend fun getRange(start: Int): Http.Response {
     val rsp =
-      Http.request(
+      Http.requestWithDefaultUserAgent(
         requestOptions +
           mapOf(
             "headers" to

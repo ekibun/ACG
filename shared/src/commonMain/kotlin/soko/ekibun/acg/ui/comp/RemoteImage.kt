@@ -17,6 +17,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.decodeToImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import kotlinx.coroutines.CancellationException
+import soko.ekibun.acg.common.requestWithDefaultUserAgent
 import soko.ekibun.common.Http
 
 /** 已解码图片缓存的预算，按解码后字节（`宽 × 高 × 4`）计。 */
@@ -57,7 +58,7 @@ private suspend fun fetchImageBitmap(url: String): ImageBitmap? {
   val loaded =
     try {
       // 跟随重定向
-      Http.request(mapOf("url" to url, "redirect" to "follow")).use { response ->
+      Http.requestWithDefaultUserAgent(mapOf("url" to url, "redirect" to "follow")).use { response ->
         if (response.status !in 200..299) {
           null
         } else {

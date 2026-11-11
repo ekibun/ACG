@@ -99,6 +99,7 @@ internal class TestServer(
               method = exchange.requestMethod,
               contentType = exchange.requestHeaders.getFirst("Content-Type"),
               body = exchange.requestBody.readBytes().decodeToString(),
+              userAgent = exchange.requestHeaders.getFirst("User-Agent"),
             ),
           )
           exchange.respond("application/json; charset=utf-8", """{"title":"ok"}""".toByteArray())
@@ -108,11 +109,13 @@ internal class TestServer(
       start()
     }
 
-  /** `/echo` 收到的请求形状：方法、`Content-Type`、body。 */
+  /** `/echo` 收到的请求形状：方法、`Content-Type`、body、`User-Agent`。 */
   data class Echo(
     val method: String,
     val contentType: String?,
     val body: String,
+    /** 宿主默认注入的那条或调用方显式给的那条。 */
+    val userAgent: String?,
   )
 
   /** 最近一次打到 `/echo` 的请求；没开 [echoEndpoint] 时恒为 null。 */

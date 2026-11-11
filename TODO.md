@@ -112,6 +112,17 @@
 - **剩下**：macOS / Linux 桌面仍是逐帧拷贝（mediamp 在那边走 Metal / GLX，本仓库没做）；
   Android 的 10bit/HDR 仍拿不到 P010。
 
+### B27. `DEFAULT_USER_AGENT` 写死 Chrome 131，没有跟内核版本走的机制
+
+- **现状（2026-11-11）**：`shared/.../acg/common/Http.kt` 的 `DEFAULT_USER_AGENT` 是一个常量串，
+  `fetch` 与 `webviewAsync` 默认都带它（站点按 UA 认会话，两边必须同一个串，见
+  `docs/development/shared-layer.md` §5.9）。
+- **风险**：它和真实渲染内核（Windows 的 WebView2、Android 的 System WebView）会越漂越远。
+  差几代通常无害，但站点按 UA 分支下发页面（降级页 / 风控）的情况没有实测覆盖。
+- **可做**：启动时从宿主取真实 UA（桌面 `CoreWebView2Environment` 的浏览器 UA、Android
+  `WebSettings.getDefaultUserAgent()`），拿不到再退回这个常量。真正必须一致的是「同一端内
+  webview 与 fetch」，跨端本来就可以不同，所以换成宿主 UA 的前提成立；改完要重跑登录与取数。
+
 ## C. 事实未实测，文档里暂无据
 
 ### C2. 桌面安装包命令与产物路径

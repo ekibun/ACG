@@ -7,6 +7,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import soko.ekibun.TestServer
 import soko.ekibun.acg.TestEnv
+import soko.ekibun.acg.common.DEFAULT_USER_AGENT
 import java.net.Socket
 import java.net.URI
 import java.net.URLDecoder
@@ -132,11 +133,58 @@ class JsEngineTest {
       "an explicit Content-Type must not be overridden by the body's default type",
     )
     assertEquals("grant_type=authorization_code&code=probe", echo.body)
+    assertEquals(
+      "acg-test/0.1",
+      echo.userAgent,
+      "an explicit User-Agent must reach the wire unchanged instead of the host's default",
+    )
+  }
+
+  /** UA 由宿主默认注入：`fetch` 与 `webview` 是同一个串，调用方显式给的覆盖它。 */
+  @Test(timeout = 120000)
+  fun userAgentIsInjectedByDefaultAndOverridable() {
+    assertEquals(
+      200L,
+      evalAsync("""const rsp = await fetch('${url("/echo")}'); return rsp.status;"""),
+      "the default-UA request must still succeed",
+    )
+    assertEquals(
+      DEFAULT_USER_AGENT,
+      assertNotNull(pageServer.echo.get(), "the server never received the request").userAgent,
+      "fetch must carry the host's default User-Agent",
+    )
+
+    TestEnv.skipUnlessHostAvailable()
+    assertEquals(
+      DEFAULT_USER_AGENT,
+      evalAsync(
+        """
+        const ua = await webview('${url("/page.html")}', { script: "navigator.userAgent" });
+        return ua;
+        """.trimIndent(),
+        timeoutMs = 60_000,
+      ),
+      "the WebView must run with the host's default User-Agent",
+    )
+    assertEquals(
+      "acg-test/webview",
+      evalAsync(
+        """
+        const ua = await webview('${url("/page.html")}', {
+          headers: { "User-Agent": "acg-test/webview" },
+          script: "navigator.userAgent"
+        });
+        return ua;
+        """.trimIndent(),
+        timeoutMs = 60_000,
+      ),
+      "a User-Agent in the navigation headers must become the WebView's UA",
+    )
   }
 
   /**
    * `webview` 的四参数契约：url / header / script / onInterceptRequest，命中后返回对象整份被采纳。
-   * 守的是 `init.js` 给插件的 API —— 没有内置插件调它，UA 走 `fetch`。
+   * 守的是 `init.js` 给插件的 API。
    */
   @Test(timeout = 120000)
   fun webviewInterceptionAdoptsTheReturnedObject() {
