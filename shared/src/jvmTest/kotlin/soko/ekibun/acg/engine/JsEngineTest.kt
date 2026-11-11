@@ -210,6 +210,48 @@ class JsEngineTest {
     assertEquals("undefined", result, "a throwing callback must not break navigation")
   }
 
+  /** 导航前回调返回非布尔值：取消这次导航，并以它作为 `webview` 的结果提前收工。 */
+  @Test(timeout = 120000)
+  fun onNavigateReturningAValueEndsTheWebview() {
+    TestEnv.skipUnlessHostAvailable()
+
+    val landed =
+      evalAsync(
+        """
+        const r = await webview('${url("/page.html")}', {
+          script: "location.href = '/other.html'; null",
+          onNavigate: (target) => (target.endsWith('/other.html') ? { landed: target } : false),
+        });
+        return r && r.landed ? r.landed : "unexpected:" + JSON.stringify(r);
+        """.trimIndent(),
+        timeoutMs = 60_000,
+      )
+    assertEquals(url("/other.html"), landed, "a non-boolean return must end the task with that value")
+  }
+
+  /** 拦截命中：返回值经 JSON 过桥，`webview()` 兑现成插件给的那个值（对象和裸字符串都要能拿回）。 */
+  @Test(timeout = 120000)
+  fun interceptDecisionEndsTheWebviewAsADataValue() {
+    TestEnv.skipUnlessHostAvailable()
+
+    val out =
+      evalAsync(
+        """
+        const page = '${url("/page.html")}';
+        const hit = { onInterceptRequest: (request) => (request.url.endsWith('/sub.js') ? request.url : false) };
+        const object = await webview(page, { onInterceptRequest: (request) => (request.url.endsWith('/sub.js') ? { via: "plugin" } : false) });
+        const text = await webview(page, hit);
+        return JSON.stringify([object && object.via, text]);
+        """.trimIndent(),
+        timeoutMs = 60_000,
+      )
+    assertEquals(
+      """["plugin","${url("/sub.js")}"]""",
+      out,
+      "an interception hit must come back as the data the plugin returned, text included",
+    )
+  }
+
   /** 导航失败：必须 reject，不回空值。 */
   @Test(timeout = 120000)
   fun webviewRejectsWhenNavigationFails() {

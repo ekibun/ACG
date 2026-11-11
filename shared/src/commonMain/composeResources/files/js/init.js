@@ -242,10 +242,26 @@ async (_binding) => {
       {
         headers: source.headers || {},
         script: source.script == null ? null : "" + source.script,
+        // 假值放行；真值序列化后交给宿主，命中即中止本次加载并把它作为 webview() 的结果
         onInterceptRequest:
-          typeof source.onInterceptRequest === "function" ? source.onInterceptRequest : null,
+          typeof source.onInterceptRequest === "function"
+            ? (request) => {
+                const decision = source.onInterceptRequest(request);
+                if (decision == null || decision === false) return false;
+                return JSON.stringify(decision);
+              }
+            : null,
         show: !!source.show,
-        onNavigate: typeof source.onNavigate === "function" ? source.onNavigate : null,
+        // 布尔值就是「取消 / 继续」；其他返回值序列化后交给宿主，等于「这次导航就是要的结果」
+        onNavigate:
+          typeof source.onNavigate === "function"
+            ? (target) => {
+                const decision = source.onNavigate(target);
+                if (typeof decision === "boolean") return decision;
+                if (decision == null) return false;
+                return JSON.stringify(decision);
+              }
+            : null,
         userAgent: typeof source.userAgent === "string" ? source.userAgent : null
       }
     ]);

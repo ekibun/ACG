@@ -125,15 +125,9 @@ class JsEngine {
                           }
                         },
                         options["show"] == true,
+                        // 返回值归 webviewAsync 定夺，票也跟着走，这里不还
                         (options["onNavigate"] as JSFunction?)?.let { fn ->
-                          { url ->
-                            val result = fn.invoke(url)
-                            try {
-                              result == true
-                            } finally {
-                              result.freeRecursive()
-                            }
-                          }
+                          { url -> fn.invoke(url) }
                         },
                         options["userAgent"] as String?,
                       )
@@ -260,6 +254,9 @@ class JsEngine {
    *
    * 每次调用登记成一个 [WebviewTask]，默认后台跑、可提到前台（同一实例，不重建页面）；
    * [show] 为真时创建即前台。只对后台计时：放到后台满 30 秒强制关闭（[WebviewTasks.toBackground]）。
+   *
+   * [onNavigate] 同步回调导航去向：布尔值就是判断（`true` 取消这次导航），JSON 字符串
+   * （`init.js` 序列化过的返回值）是「这次导航就是要的结果」—— 取消导航并以它结算。
    */
   internal suspend fun webviewAsync(
     url: String,
@@ -267,7 +264,7 @@ class JsEngine {
     script: String?,
     interceptor: ((url: String, headers: Map<String, String>, method: String, isForMainFrame: Boolean) -> Any?)?,
     show: Boolean = false,
-    onNavigate: ((url: String) -> Boolean)? = null,
+    onNavigate: ((url: String) -> Any?)? = null,
     userAgent: String? = null,
   ): Any? {
     // header 展开成纯数据 Map，并补齐后台加载默认带的 Referer
@@ -290,7 +287,21 @@ class JsEngine {
 
     val task = WebviewTask(url, foregroundOnly = show)
     task.controller = ctx
-    ctx.onNavigate = onNavigate
+    val outcome = task.outcome
+    // 平台只认布尔：布尔就是判断；JSON 字符串是结束值（init.js 序列化过），先结算再取消导航
+    ctx.onNavigate =
+      onNavigate?.let { decide ->
+        { url ->
+          when (val decision = decide(url)) {
+            is Boolean -> decision
+            is String -> {
+              outcome.complete(decision)
+              true
+            }
+            else -> false
+          }
+        }
+      }
     WebviewTasks.register(task)
     // 默认后台：开始倒计时；要前台的立刻转正，倒计时随之取消
     WebviewTasks.toBackground(task)
@@ -300,7 +311,6 @@ class JsEngine {
       ctx.close()
       throw JSError("webview: a foreground page is already open, close it first")
     }
-    val outcome = task.outcome
 
     try {
       // 创建期配置，必须在首屏导航之前
@@ -330,6 +340,7 @@ class JsEngine {
         }
       }
       interceptor?.let { callback ->
+        // 命中即中止整轮加载，返回值（init.js 序列化过的字符串）直接当结果
         ctx.onInterceptor = { u, headers, method, isForMainFrame ->
           val ret = callback(u, headers, method, isForMainFrame)
           if (ret != null && ret != false && !outcome.isCompleted) {

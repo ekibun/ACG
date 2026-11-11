@@ -129,15 +129,15 @@ val candidates = objWrap.javaClass.methods.filter { it.name == methodName && …
 
 `Headers` 用 `__items__` 存"小写头名 → 逐条值数组"，和 `FormData` 一样不把头名做成实例属性；它本身即可过桥，`fetch` 直接把 `request.headers.__items__` 交给宿主，`Http.buildRequest` 逐条 `add`。`__items__` 必须是 `Object.create(null)` 的普通对象：`{}` 上 `__proto__` 是 `Object.prototype` 的 legacy setter，赋值会改原型而不是建属性，`constructor` / `toString` 等合法头名还会命中继承属性；ES `Map` 也不行，条目在内部 slot，`jsGetOwnProperties` 只取自有属性，过桥成空对象。`get()` 与迭代按 Fetch Standard 用 `", "` 合并，`getSetCookie()` 返回逐条值。`Request` / `Response` 的 `headers` 都是 `Headers` 实例；`webview` 的请求头仍是普通对象，不走 `Headers`。
 
-`webview` 的可选项先由 `init.js` 显式归一成固定字段的对象（类型不对的回调一律收成 `null`），再作为 `args[1]` 整体过桥，宿主按具名键读取，不存在位置索引表。`options.onNavigate(url)` 是同步的导航前判定：返回真值就取消本次导航，地址交回插件处置（如调 `openBrowser(url)`）。options 里的函数值过桥各借一票 `JSFunction`。`QuickJS.handleJSInvokable` 在回调返回后把 `argv` 与 `thisVal` 统一 `freeRecursive()` 还票（契约见 `docs/development/quickjs-lifetime.md`），免得 `console` 这类只借不还的分支漏票；要把引用留到回调之外，先 `dupRecursive()` 自己持一票——`asyncReleasing` 的异步任务和 `wrapJSPromiseAsync` 转交给 `Deferred` 等待者的结果各是一例。`options.userAgent` 走 `WebviewContext.setUserAgent`，是创建期配置，必须在首屏导航之前。插件用 `webview(url, { show: true })` 调起用户页面，`onNavigate` 与 `userAgent` 都走同一份 options；前台任务带后退 / 前进按钮，用户关闭时 `webview()` 的 Promise 兑现成 `undefined`，不是失败。
+`webview` 的可选项先由 `init.js` 显式归一成固定字段的对象（类型不对的回调一律收成 `null`），再作为 `args[1]` 整体过桥，宿主按具名键读取，不存在位置索引表。`options.onNavigate(url)` 是同步的导航前判定，三种返回值：`false` / `null` 继续加载；`true` 取消本次导航，页面停在原地址（外跳由插件自己调 `openBrowser(url)`）；其他值等于「这次导航就是要的结果」—— 取消导航、结束页面，并把它作为 `webview()` 的结果（`init.js` 先 `JSON.stringify`，回来时按字符串解回对象）。同步是硬约束：平台回调（Android `shouldOverrideUrlLoading`、WebView2 `NavigationStarting`）必须当场给出答案，所以判定里不能读 cookie —— `Cookies.get` 是异步的，而 WebView2 的 `NavigationStarting` 本就跑在 WebView2 的消息泵上，同步等 cookie 回调是自己等自己。要判「登没登成」，用返回值先收工，再异步验人（见 `shared-layer.md` §5.9）。`options.onInterceptRequest(request)` 同口径：假值放行，真值先 `JSON.stringify`，命中即中止本次加载并把它作为 `webview()` 的结果。两个回调都只放数据跨桥，回调里没有返回值的引用票要还。options 里的函数值过桥各借一票 `JSFunction`。`QuickJS.handleJSInvokable` 在回调返回后把 `argv` 与 `thisVal` 统一 `freeRecursive()` 还票（契约见 `docs/development/quickjs-lifetime.md`），免得 `console` 这类只借不还的分支漏票；要把引用留到回调之外，先 `dupRecursive()` 自己持一票——`asyncReleasing` 的异步任务和 `wrapJSPromiseAsync` 转交给 `Deferred` 等待者的结果各是一例。`options.userAgent` 走 `WebviewContext.setUserAgent`，是创建期配置，必须在首屏导航之前。插件用 `webview(url, { show: true })` 调起用户页面，`onNavigate` 与 `userAgent` 都走同一份 options；前台任务带后退 / 前进按钮，用户关闭时 `webview()` 的 Promise 兑现成 `undefined`，不是失败。
 
 `encodeURI` / `encodeURIComponent` 的 `%XX` **必须两位补零**：`0x0a` 写成 `%0a`，`%a` 是错编码。
 
 `_binding` 的分支返回值形状：
 
 - `Response.arrayBuffer` 的 Kotlin 侧返回 `Deferred<ByteArray>`，脚本里必须 `await` 才能拿到字节数组；`decode` 是同步桥，直接收 `ByteArray`。
-- `webview` 的 Kotlin 侧回原始值，脚本侧按类型分派：`null` 或空串 → `undefined`，字符串 → `JSON.parse`，对象 → 拦截得到的 `{url, headers}`。
-- 拦截回调返回真值即中止该轮加载，并把被拦下请求的 `url` 与 `headers` 交回脚本。
+- `webview` 的 Kotlin 侧回原始值，脚本侧按类型分派：`null` 或空串 → `undefined`，字符串 → `JSON.parse`（`onNavigate` 与 `onInterceptRequest` 的返回值都走这条），对象 → 原样（Kotlin 侧直接调 `webviewAsync` 时才可能出现）。
+- 拦截回调返回真值即中止该轮加载，并把该值（`init.js` 序列化过的字符串）交回脚本。
 
 `FormData` 每项映射为 `{ name, value, filename, type }` 四个键，`type` 仅在带 `filename` 时给出，对应 `Http` 的 multipart part。
 
