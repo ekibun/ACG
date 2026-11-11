@@ -663,12 +663,9 @@ async (_binding) => {
     Request,
     Response,
     Cookies: {
-      get: (url) => {
-        return _binding('Cookies.get', [url]);
-      },
-      set: (url, cookie) => {
-        _binding('Cookies.set', [url, cookie]);
-      }
+      get: (url) => _binding('Cookies.get', [url]),
+      // 兑现 = 写入命令已排进宿主线程队列（JNI 是 void + post），不是落盘完成；连写要 await 才有顺序
+      set: (url, cookie) => _binding('Cookies.set', [url, cookie])
     },
     FormData,
     console: consoleObject,

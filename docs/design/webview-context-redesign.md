@@ -81,8 +81,8 @@
 
 - WebView2 的 `ICoreWebView2CookieManager` 属于 profile，同 environment 下所有 webview 共享；写下的 cookie 对新建的独立 webview 同样可见。
 - `SameSite=None` 必须同时 `Secure`：`AddOrUpdateCookie` 没有返回值，缺 `Secure` 时 WebView2 静默拒收，症状是「调用全正常但永远读不到」。
-- 域要去掉前导点（`CreateCookie` 不认）；域 / 路径缺省时按 `url` 推，与 Android `CookieManager` 口径一致。
-- `Max-Age` 优先于 `Expires`；两者都没有即会话 cookie。
+- 域要**保留**前导点：`CreateCookie` 按 (name, domain, path) 定位，剥掉前导点就退化成 host-only，覆写不到站点的 domain cookie（bgm 的 `Set-Cookie` 全是 `domain=.bgm.tv`）。域 / 路径缺省时按 `url` 推，与 Android `CookieManager` 口径一致。
+- 正因为两种域写法是两条记录，写回时要固定带上站点用的那一份（bgm 是 `Domain=.bgm.tv`）：不带域属性写的是 host-only，覆写不到站点设的那条，症状是「换了账号还是旧人」。`Max-Age` 优先于 `Expires`；两者都没有即会话 cookie。
 - `Expires` 三种格式（RFC 1123 / RFC 850 / asctime）先剥时区后缀；星期前缀不能无条件先剥——非 asctime 格式缺星期几时剥掉的会是月份，整条 cookie 会降级成会话 cookie。
 - HTTP 层没有 cookie 仓库：要带登录态必须由 JS 侧读出 cookie 写进请求头。Android 后台页的 `shouldInterceptRequest` 用 `headersWithCookie` 把系统 `CookieManager` 的 cookie 折进回调 headers，否则脚本按 url 再 `fetch` 一次时登录态是断的。
 

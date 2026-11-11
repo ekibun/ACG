@@ -41,7 +41,7 @@ fun App() {
       when (val route = navigator.current) {
         null ->
           pages.SaveableStateProvider("home") {
-            HomeScreen(onOpenSettings = { navigator.open(AppRoute.Settings) })
+            HomeScreen(onNavigate = navigator::open)
           }
 
         AppRoute.Settings ->

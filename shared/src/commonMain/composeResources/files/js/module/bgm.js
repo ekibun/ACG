@@ -1,151 +1,100 @@
-// Bangumi（bgm.tv）的 OAuth 登录与收藏读取：端点、参数名与 OAuth 各步骤。
+// Bangumi（bgm.tv）插件：登录、验人、打开主页。
 //
-// 可用全局：fetch / Settings / openBrowser / FormData / console，以及动态 `import()`。
-//
-// 键空间归属见 docs/design/bgm-plugin.md：宿主写凭据，插件写登录态。下列三个键名与 `BgmSource`
-// 内的常量一致。
+// 分层与实测结论见 docs/design/bgm-plugin.md 和 docs/development/shared-layer.md §5.9。
+// 可用全局：fetch / Cookies / Settings / webview / FormData / console，以及同目录模块。
 
-const API_BASE = "https://api.bgm.tv";
-const OAUTH_BASE = "https://bgm.tv/oauth";
+import { load } from "cheerio";
 
-const CLIENT_ID_KEY = "bgm.client_id";
-const CLIENT_SECRET_KEY = "bgm.client_secret";
-const SESSION_KEY = "bgm.session";
+const BASE = "https://bgm.tv";
+const LOGIN = BASE + "/login";
 
-// 每个请求携带的 UA（<dev>/<app>/<version> (<url>)）。
-const USER_AGENT = "ekibun/acg/0.1 (https://github.com/ekibun/ACG)";
+// `Domain=` 要写的那一份：站点只有一个域，账号 cookie 全挂在它上面。
+const HOST = BASE.replace(/^https?:\/\//, "");
 
-/** `application/x-www-form-urlencoded` 的表单体。 */
-const formBody = (fields) =>
-  Object.keys(fields)
-    .map((key) => encodeURIComponent(key) + "=" + encodeURIComponent(fields[key]))
-    .join("&");
+// 登录流程自己的跳转：留在这几条里继续加载，跳出去才算「登完了」；站点新增登录子页要加进来
+const LOGIN_STAYS = ["/login", "/signup", "/FollowTheRabbit", "/reset_password", "/RedPill"];
+const staysOnLogin = (url) => LOGIN_STAYS.some((path) => url.startsWith(BASE + path));
 
-/**
- * 拆开 `openBrowser` 交回的回调 URL，逐段解码后返回普通对象。
- */
-export function parseCallback(callbackUrl) {
-  const query = callbackUrl.split("?")[1];
-  if (!query) throw new Error("oauth callback carries no query string: " + callbackUrl);
-  const params = {};
-  for (const pair of query.split("&")) {
-    const separator = pair.indexOf("=");
-    const key = separator < 0 ? pair : pair.slice(0, separator);
-    const value = separator < 0 ? "" : pair.slice(separator + 1);
-    params[decodeURIComponent(key)] = decodeURIComponent(value);
+/** 会话里的 `url → "n=v; …"` 表：形状是本插件自己定的 `{ cookies: { "<url>": "n=v; ..." } }`。 */
+const cookiesOf = (session) => JSON.parse(session).cookies || {};
+
+/** 写一条 cookie：域固定成 `.bgm.tv`，与站点 `Set-Cookie` 落进 jar 的那条一致（见 §5.9）。 */
+const setCookie = (url, cookie) => Cookies.set(url, cookie + "; Domain=." + HOST + "; Path=/");
+
+/** 让本站点已有的 cookie 全部过期：jar 只有一份，换人之前先腾干净，免得旧账号的残留混进来。 */
+const expireSiteCookies = async () => {
+  for (const pair of (await Cookies.get(BASE)).split(";")) {
+    const name = pair.split("=")[0].trim();
+    if (name) await setCookie(BASE, name + "=; Max-Age=0");
   }
-  return params;
-}
+};
 
-/**
- * 当前登录态（换回来的 token）；未登录或存档损坏时返回 `null`。
- */
-export async function session() {
-  const raw = await Settings.get(SESSION_KEY);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch (e) {
-    return null;
-  }
-}
-
-/** 退出登录：清掉登录态，保留凭据。 */
-export async function logout() {
-  await Settings.set(SESSION_KEY, null);
-}
-
-async function requestToken(fields) {
-  // 令牌端点按表单提交（application/x-www-form-urlencoded）。
-  const response = await fetch(OAUTH_BASE + "/access_token", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": USER_AGENT
-    },
-    body: formBody(fields)
-  });
-  const body = await response.text();
-  if (!response.ok) {
-    throw new Error("oauth token request failed (" + response.status + "): " + body);
-  }
-  return JSON.parse(body);
-}
-
-/**
- * 走一遍授权码流程，把换到的 token 存进 `bgm.session` 并返回它。
- *
- * `state` 是本次登录现生成的随机串，回调返回时比对。
- */
+/** 走一遍站点登录页（前台），离开登录页即收尾；成败交给 [me] 验。 */
 export async function login() {
-  const clientId = await Settings.get(CLIENT_ID_KEY);
-  const clientSecret = await Settings.get(CLIENT_SECRET_KEY);
-  if (!clientId || !clientSecret) {
-    throw new Error("bangumi client_id / client_secret are not set; fill them in the collect tab first");
-  }
-
-  const state = Date.now() + "-" + Math.random().toString(36).slice(2);
-  const callbackUrl = await openBrowser(
-    OAUTH_BASE +
-      "/authorize?client_id=" +
-      encodeURIComponent(clientId) +
-      "&response_type=code&state=" +
-      encodeURIComponent(state) +
-      "&redirect_uri={{callback}}"
-  );
-
-  const params = parseCallback(callbackUrl);
-  if (params.state !== state) throw new Error("oauth state mismatch; login aborted");
-  if (!params.code) throw new Error("oauth callback carries no code");
-
-  const token = await requestToken({
-    grant_type: "authorization_code",
-    client_id: clientId,
-    client_secret: clientSecret,
-    code: params.code,
-    // redirect_uri 取回调地址去掉查询串。
-    redirect_uri: callbackUrl.split("?")[0]
+  // jar 里还留着上一个账号的登录态时，登录页会直接认出那个人
+  await expireSiteCookies();
+  const landed = await webview(LOGIN, {
+    show: true,
+    onNavigate: (url) => (staysOnLogin(url) ? false : { url })
   });
-  await Settings.set(SESSION_KEY, JSON.stringify(token));
-  return token;
+  // 用户自己关了页面：宿主兑现 undefined
+  if (!landed) throw new Error("bangumi 登录页已关闭，登录取消");
+
+  const cookie = await Cookies.get(BASE);
+  if (!cookie) throw new Error("bangumi 登录页没有留下 cookie");
+  const session = JSON.stringify({ cookies: { [BASE]: cookie } });
+
+  // 以「站点认得出这个人」为准：拿不到用户就让登录失败，不建空号
+  const user = await me(session);
+  return { userId: user.userId, name: user.name, avatar: user.avatar, session };
 }
 
-async function authorizedJson(path) {
-  const current = await session();
-  if (!current || !current.access_token) throw new Error("not logged in to bangumi");
-  const response = await fetch(API_BASE + path, {
-    headers: {
-      "User-Agent": USER_AGENT,
-      Authorization: "Bearer " + current.access_token
+/** 打开站点主页：先把 jar 置成本账号的会话（页面一打开就认这个人），窗口留给用户自己关。 */
+export async function openHome(session) {
+  await expireSiteCookies();
+  for (const [url, raw] of Object.entries(cookiesOf(session))) {
+    for (const cookie of raw.split(";").map((value) => value.trim())) {
+      if (cookie) await setCookie(url, cookie);
     }
-  });
-  const body = await response.text();
-  if (!response.ok) {
-    throw new Error("bangumi api " + path + " failed (" + response.status + "): " + body);
   }
-  return JSON.parse(body);
-}
-
-/** 当前登录用户。 */
-export async function me() {
-  return await authorizedJson("/v0/me");
+  return webview(BASE, { show: true });
 }
 
 /**
- * 某个用户的收藏列表。`subjectType` 与 `type` 取 v0 的整数枚举（书籍/动画/音乐/游戏/三次元 =
- * 1/2/3/4/6；想看/看过/在看/搁置/抛弃 = 1..5）。
+ * 从主页 HTML 认当前用户：`.idBadgerNeue a.avatar` 在就是登着，用户名取其 href 的 `/user/([^/]*)`，
+ * 昵称取 `#header a`（站点已无这个 id，实际落回用户名）。判据与账号 id 的取法见 bgm-plugin §四。
  */
-export async function collections(username, subjectType, type, offset, limit) {
-  return await authorizedJson(
-    "/v0/users/" +
-      encodeURIComponent(username) +
-      "/collections?subject_type=" +
-      subjectType +
-      "&type=" +
-      type +
-      "&offset=" +
-      offset +
-      "&limit=" +
-      limit
-  );
+export function parseMe(html) {
+  const $ = load(html);
+  const avatarLink = $(".idBadgerNeue a.avatar").first();
+  if (!avatarLink.length) {
+    throw new Error("bangumi 未登录：页头只有登录/注册");
+  }
+
+  const username = (/\/user\/([^/]*)/.exec(avatarLink.attr("href") || "") || [])[1];
+  if (!username) throw new Error("bangumi 用户链接里没有用户名");
+  const nickname = $("#header a").first().text().trim();
+
+  const avatar = avatarLink.find("span.avatarNeue").first();
+  let avatarUrl =
+    avatar.attr("src") ||
+    avatar.attr("data-cfsrc") ||
+    (/background-image:url\('([^']*)'\)/.exec(avatar.attr("style") || "") || [])[1];
+  if (avatarUrl && avatarUrl.startsWith("//")) avatarUrl = "https:" + avatarUrl;
+  else if (avatarUrl && avatarUrl.startsWith("/")) avatarUrl = BASE + avatarUrl;
+
+  return {
+    userId: username,
+    name: nickname || username,
+    avatar: avatarUrl || null
+  };
+}
+
+/** 抓一次主页交给 [parseMe]；v0 要 OAuth token，这里只有网页登录的 cookie。 */
+export async function me(session) {
+  const response = await fetch(BASE + "/", {
+    headers: { Cookie: cookiesOf(session)[BASE] || "" }
+  });
+  if (!response.ok) throw new Error("bangumi home failed (" + response.status + ")");
+  return parseMe(await response.text());
 }

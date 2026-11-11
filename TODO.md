@@ -236,6 +236,17 @@
   ④ 文档里的口径与 `extra_hw_frames` 的实值一致；⑤ 送包的 `<0` 按轮次失败结束（不重试、不当收下），
   收帧侧的 `<0` 不再折叠成「没帧」。
 
+### E10. 插件返回的信封 + 全局快照（等收藏页一起做）
+
+- **现状**：约定已定稿在 [shared-layer §5.10](./docs/development/shared-layer.md)，代码一处没落。插件每次
+  调用交回 `{ user?, collections?, notify?, session? }`，宿主合并成一份全局快照，界面只读快照。
+  现在 `login()` 交的还是 `{ userId, name, avatar, session }`，`me()` 是插件内部函数，收藏页没有数据源。
+- **做的时候一起落**：`Snapshot` 类型 + `SnapshotStore`（`StateFlow`；只覆盖出现的字段；切账号整体
+  替换）→ `PluginAccountLogin` 折 `user` 子对象 → `bgm.js` 的
+  `collections({ session, user, status, type, page })`（watching 档打 `/`，顺带回 `user` / `notify`；
+  其它档打 `/anime/list/<user>/<status>`，只有 `collections`）→ 收藏页读快照。
+- **完成判据**：账号卡、收藏页、角标三处都由同一份快照驱动；`bgm.js` 里没有多余的认人请求。
+
 ---
 
 *建立于 2026-09-16。条目来源：`AGENTS.md` / `cxx/AGENTS.md` / `.agents/skills/*/references/` 里的  

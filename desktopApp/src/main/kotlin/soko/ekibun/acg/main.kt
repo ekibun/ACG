@@ -7,7 +7,7 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import kotlinx.coroutines.runBlocking
-import soko.ekibun.acg.data.SettingsRepository
+import soko.ekibun.acg.data.loadRepositories
 import soko.ekibun.common.Paths
 import java.awt.Dimension
 
@@ -36,8 +36,8 @@ fun main(args: Array<String>) {
       cacheDir = "$localAppData/ekibun/ACG",
     ),
   )
-  // 首帧之前把设置读出来：主题跟着磁盘走，不先渲染一次默认色再跳
-  runBlocking { SettingsRepository.load() }
+  // 首帧之前把设置与账号读出来：主题、头像都跟着磁盘走，不先渲染一次默认值再跳
+  runBlocking { loadRepositories() }
   application {
     Window(
       onCloseRequest = ::exitApplication,

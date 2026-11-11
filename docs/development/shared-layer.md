@@ -163,8 +163,8 @@
 
 ⇒ **`show = true` 的任务没有「后台」**（`WebviewTask.foregroundOnly`）。调用方正 `await` 着它，
 收进后台改变不了「没人操作就等不到结果」，只是把失败推迟 30 秒；所以界面上只给刷新与关闭，
-关闭即失败。这类任务显示期间独占前台，后来者进不来——用户正卡在登录页中间，不能被顶掉换成
-另一个页面。
+用户关掉它就是 `null` —— 和别的任务一样，关闭不是失败。这类任务显示期间独占前台，后来者进不来
+——用户正卡在登录页中间，不能被顶掉换成另一个页面，新开的那个直接报错。
 
 ⇒ **切前后台、切任务都不重建**：每个任务各有一个常驻 `WebViewHost`，用 `key(task)` 钉住它在
 `Column` 里的位置；前台那个是 `weight(1f)`，其余是 `height(0.dp)`。切前台只是改高度——
@@ -210,8 +210,8 @@ peer 与父子关系都不动。表单内容、滚动位置、登录进度都留
 （空白当没给，界面回退到地址）。进度条那行高度固定，否则每次开关都会带着 WebView 重新贴边、
 页面抖一下。
 
-⇒ **任务栏不给后退 / 前进**（`WebViewPane(history = false)`）：脚本发起的页面有明确目的（登录、
-抓一次数据），让用户在里面随便逛只会把流程带偏。← → 只出现在「浏览器」页签。
+⇒ **后退 / 前进只给前台任务**（`history = task.foregroundOnly`）：用户正自己操作那个页面，退回去是
+正常需求，返回键也走同一条路。后台任务的面板不画 —— 脚本自己在跑，让用户在里面随便逛只会把流程带偏。
 
 `WebScreen` 本身不可直接复用——它自己 `createWebviewContext()`，接待不了外部传进来的任务；
 共用的是 `WebViewPane`：工具栏 + 进度 + 承载面 + 后端起不来时的提示，参数只收普通状态，
@@ -232,7 +232,7 @@ WebView2 的 `NewWindowRequested`；不接管的话它会弹一个不受我们�
 WebView2 没有「只关掉菜单里那一项」的设置，`AreDefaultContextMenusEnabled(FALSE)` 会把整个右键
 菜单（复制、粘贴）一起废掉，所以接回调更划算。
 
-### 3.6 `openBrowserAsync` 的用法归插件
+### 3.6 `oauth` 的用法归插件
 
 ⇒ `{{callback}}` 换进去的值必须在查询串里百分号编码（`: / ? #` 都要编）。
 
@@ -245,7 +245,7 @@ WebView2 没有「只关掉菜单里那一项」的设置，`AreDefaultContextMe
 
 ---
 
-## 四、Bangumi 客户端（`source/BgmSource.kt`）
+## 四、Bangumi 客户端（`data/` 与 `files/js/module/bgm.js`）
 
 ### 4.1 数字要按两种标签读
 
@@ -260,10 +260,10 @@ QuickJS 桥按内部标签分派 JS 数字（`JS_TAG_INT` → `Long`、`JS_TAG_F
 
 ⇒ `score` / `rank` 为 0 表示没有，界面按「没有」画。
 
-### 4.3 设置键的归属
+### 4.3 登录态归账号，不归设置
 
-⇒ `bgm.client_id` / `bgm.client_secret` 由宿主写，`bgm.session` 由插件写；两个键名两边各有一份，
-改一处就得改两处。归属说明见 [bgm-plugin.md](../design/bgm-plugin.md)。
+⇒ 宿主持有账号表（`data/AccountRepository.kt`），每个账号一份会话；插件不写登录态，也不读
+`Settings` 里的键。会话的形状、清 cookie 的坑与切账号的做法见 §5.9。
 
 ### 4.4 收藏应答的两层
 
@@ -366,3 +366,91 @@ On Android you can only use types which can be stored inside the Bundle.
 状态，而不是共用一个槽。
 
 ⇒ 枚举当 key 能过（`Serializable`），但那是侥幸 —— 新 key 一律用 String。
+
+### 5.9 账号会话与网页登录
+
+登录就是「在站点自己的页面上登一次」，页面由**插件**用 `webview` 开：
+
+```js
+await webview(LOGIN, { show: true, onNavigate: (url) => (staysOnLogin(url) ? false : { url }) });
+```
+
+宿主不知道登录页长什么样，只调 `login()` 等一个账号回来。**离开登录页那一下就是收尾点**：
+`onNavigate` 返回非布尔值，平台层取消这次导航、`webview()` 立刻兑现那个值 —— 目标页不必再加载。
+登录成败交给异步的验人（`me()` 拉主页看页头用户块）：cookie 判据在 `onNavigate` 里做不了，
+`Cookies.get` 是异步的，而导航回调必须当场返回（`chii_auth` 也可能是 HttpOnly）。
+用户自己关掉页面则兑现 `undefined`，登录按取消处理。
+
+⇒ **「页面加载完成」不是收尾点**：登录页不传 `script`，加载完正是等人输账号的时刻。`webview()`
+只在五种情况下兑现 —— `script` 给出非空结果、`onNavigate` 给出结束值、命中拦截、加载失败、用户关闭。
+无脚本的任务必须能自己收场（登录靠 `onNavigate`，主页靠用户关闭），否则后台任务满 30 秒被强制关闭。
+
+⇒ **UA 由应用层统一注入**：`shared` 的 `soko.ekibun.acg.common.DEFAULT_USER_AGENT`
+（`shared/src/commonMain/.../acg/common/Http.kt`）同时是 `webview` 页面的 UA 和出站请求的 UA，
+插件不用写、也写不进两份不一致的串。出站请求走 `Http.requestWithDefaultUserAgent`（宿主
+`Http.request` 保持不认识业务默认值），脚本 `fetch`、播放器、图片因此天然是同一个串；webview
+页面在 `webviewAsync` 建上下文时设（首屏导航前）。站点按 UA
+认会话，同一份 cookie 换个 UA 就只剩登录/注册（实测见 `docs/design/bgm-plugin.md` §四）。
+插件仍可覆盖：`webview` 看 `options.userAgent` 或导航 header 里的 `User-Agent`，`fetch` 看
+`headers` 里的 `User-Agent`。
+
+⇒ **会话对宿主是不透明的串**：宿主只存与转交（`Account.session`），既不解析也不回放 —— 形状是
+插件的事，不一定是 cookie（也可以是 localStorage 里的东西或一个 token）。Bangumi 目前的形态是
+`{"cookies":{"https://bgm.tv":"chii_auth=…"}}`，由插件登完自己用 `Cookies.get` 收。
+
+⇒ **应用会话只在「打开页面」这一下发生，并且由插件做**：jar 只有一份，登录过别的账号之后里面未
+必还是这个人，所以插件开页面前把会话装进去。宿主一侧没有任何 cookie 代码 —— 它读不懂串，也就不
+该动 jar。纯 `fetch` 的插件根本不需要 jar，带着会话参数就能取数（`bgm.js` 的 `me()` 直接塞
+`Cookie` 头）。
+
+⇒ **装会话 = 先清本站点、再逐条写**（`bgm.js` 的 `openHome`）：先按 `Cookies.get` 的结果把本站点
+的 cookie 逐条写 `Max-Age=0`，再写会话里的每条，固定带 `Domain=.<站点域>`。域属性不能省：站点的
+`Set-Cookie` 全带域属性，jar 里存的就是这条；不带域属性写下去的是另一条 host-only 记录，覆写不
+到它（`CreateCookie` 按 name/domain/path 定位）—— 那就是「换了账号还是登录着」。先清一遍的残余
+风险是 `Path` 不在这条 URL 视野里的记录（`Cookies.get` 看不见），比留着旧账号的 cookie 干净。
+入口是账号面板里的「主页」条目 → `AccountRepository.openHome`（页面由插件开，面板等页面关掉再
+收起）。
+
+⇒ **同一个站点加第二个账号不用先退出**：`login()` 开头同样先清本站点的 cookie（见上），登录页不
+会直接认出上一个用户；账号按 id 去重，同一个人重登还是同一条。
+
+⇒ **登录失败不需要宿主补 jar**：宿主手上只有不透明串，装不回去；jar 里剩什么也不决定正确性 ——
+取数走会话参数，网页要等下一次打开时按上面的办法重新装过。所以取消与失败都直接上抛。
+
+⇒ **登出只删本地那条账号**（`AccountRepository.remove`）：这个人的 cookie 还留在 jar 里，直到下一次
+`login`（先清）或 `openHome`（先清再写）把它处理掉。宿主不碰 jar 就没有「顺便退站」这回事。
+
+⇒ **切账号只换内存里的当前账号**（`AccountRepository.select`）：不动 jar、不发请求，界面当场反映，
+jar 要到下一次打开页面才知道该是谁。它和 `remove` 一样是 `suspend`（改内存、落盘、返回），由**主页**
+在自己的 scope 里 `launch` —— 面板点完就收起，写挂不到它的 scope 上。
+
+### 5.10 插件返回的信封与全局快照
+
+插件每次调用交回同一个信封，这次解析到什么就放什么：
+
+```js
+{
+  user?:        { userId, name, avatar },
+  collections?: { items, hasMore },
+  notify?:      { message, count },
+  session?:     string            // 只有 login 有
+}
+```
+
+宿主把它们合并成**一份全局快照**（每个账号一份），界面只读快照：账号卡读 `user`、角标读
+`notify`、收藏页读 `collections`。`login()` 里那次 `/` 请求就是快照的第一次刷新 —— 它本来就要
+拉主页验人，顺带把首屏收藏与通知数一起交回。
+
+⇒ **字段缺席是「这次没解析」，不是「没有」**。合并只覆盖出现的字段。watching 之外的收藏档打的是
+`/anime/list/<user>/<status>`，那份页面没有用户块也没有通知数；把缺席当清空，来回切一次档
+账号名和角标就没了。
+
+⇒ **切账号是整体替换**，不走 overlay。快照里每一项都属于某个账号（收藏、通知数），叠加上去就是串号。
+
+⇒ **`collections` 单槽表示当前档**：换 `status` / `type` 直接覆盖，翻页由宿主追加（插件每次只返回
+一页与 `hasMore`）。要同时留多档就得 `Map<(status, type), …>`，而界面是一份 `CollectionState` +
+页签切换，用不上。
+
+⇒ **信封里只放有消费方的字段**。`login()` 不必带 `collections`（首屏要就一起带，反正同一次响应）；
+但像「上次请求时间」「翻页游标」这类宿主不读的东西不进信封 —— 契约每多一个字段，插件就多一处
+必须维护的形状。

@@ -1,7 +1,7 @@
 package soko.ekibun.acg.ui.screen.home
 
 import acg.shared.generated.resources.Res
-import acg.shared.generated.resources.ic_settings
+import acg.shared.generated.resources.ic_account_circle
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -11,8 +11,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarDefaults
@@ -35,28 +36,28 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import org.jetbrains.compose.resources.painterResource
+import soko.ekibun.acg.data.Account
 import soko.ekibun.acg.data.DarkMode
 import soko.ekibun.acg.data.ThemeSettings
-import soko.ekibun.acg.ui.comp.MonogramAvatar
+import soko.ekibun.acg.ui.comp.Avatar
 import soko.ekibun.acg.ui.theme.AppTheme
 
-/** 侧栏与底栏的分界，M3 medium 的起点；HomeScreen 判面板里是否给「设置」时也用这个值。 */
-internal val RailBreakpoint = 600.dp
+/** 侧栏与底栏的分界，M3 medium 的起点。 */
+private val RailBreakpoint = 600.dp
 
 /**
  * 导航条的两副面孔：<600dp 底栏、≥600dp 侧栏。
  *
- * 两档对「设置」的处理不同 —— 底栏塞不下第六个入口，所以设置留在账号面板里；
- * 侧栏是竖的，设置就单独给一个按钮压在账号上方，面板里不再重复。
- * 两档共用 [NavigationBarDefaults.containerColor]：M3 默认给侧栏 surface、底栏 surfaceContainer，并排摆会像两种层次。
+ * 两档都只有 tab 与账号入口；设置与登出在账号面板里（见 `HomeScreen` 的 `AccountPopup`）。
+ * 两档共用 [NavigationBarDefaults.containerColor]：M3 默认给侧栏 surface、底栏
+ * surfaceContainer，并排摆会像两种层次。
  */
 @Composable
 fun HomeTabLayout(
   selected: HomeTab,
-  currentUser: String,
+  currentAccount: Account?,
   onSelect: (HomeTab) -> Unit,
   onOpenAccount: () -> Unit,
-  onOpenSettings: () -> Unit,
   modifier: Modifier = Modifier,
   content: @Composable () -> Unit,
 ) {
@@ -79,8 +80,10 @@ fun HomeTabLayout(
               )
             }
             Spacer(Modifier.weight(1f))
-            SettingsItem(onOpenSettings)
-            AccountItem(currentUser, onOpenAccount)
+            // 80dp 是 M3 NavigationRail 的栏宽：包一层定宽 Box，长昵称只会省略，不会把栏顶开
+            Box(Modifier.width(80.dp), contentAlignment = Alignment.Center) {
+              AccountItem(currentAccount, onOpenAccount)
+            }
             Spacer(Modifier.height(4.dp))
           }
           Box(Modifier.weight(1f)) { contentSlot() }
@@ -92,7 +95,7 @@ fun HomeTabLayout(
           Box(Modifier.weight(1f)) { contentSlot() }
           NavigationBar {
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-              AccountItem(currentUser, onOpenAccount)
+              AccountItem(currentAccount, onOpenAccount)
             }
             HomeTab.entries.forEach { tab ->
               NavigationBarItem(
@@ -110,10 +113,13 @@ fun HomeTabLayout(
   }
 }
 
-/** 账号入口：首字母头像 + 用户名，和旁边的 tab 项一样「图标在上、文字在下」。不是页面，点了弹面板。 */
+/**
+ * 账号入口：头像 + 用户名，图标在上、文字在下；点了弹面板。宽度由调用处给 —— 侧栏包一层 80dp 的
+ * Box（栏宽固定），底栏每项由 `weight(1f)` 定宽。
+ */
 @Composable
 private fun AccountItem(
-  currentUser: String,
+  currentAccount: Account?,
   onClick: () -> Unit,
 ) {
   Column(
@@ -124,22 +130,23 @@ private fun AccountItem(
         .padding(horizontal = 12.dp, vertical = 6.dp),
     horizontalAlignment = Alignment.CenterHorizontally,
   ) {
-    MonogramAvatar(currentUser, size = 24.dp)
+    if (currentAccount == null) {
+      Icon(
+        painterResource(Res.drawable.ic_account_circle),
+        contentDescription = null,
+        modifier = Modifier.size(24.dp),
+      )
+    } else {
+      Avatar(currentAccount.name, currentAccount.avatar, size = 24.dp)
+    }
     Spacer(Modifier.height(4.dp))
     Text(
-      currentUser,
+      currentAccount?.name ?: "账号",
       style = MaterialTheme.typography.labelMedium,
       color = MaterialTheme.colorScheme.onSurfaceVariant,
       maxLines = 1,
       overflow = TextOverflow.Ellipsis,
     )
-  }
-}
-
-@Composable
-private fun SettingsItem(onClick: () -> Unit) {
-  IconButton(onClick = onClick) {
-    Icon(painterResource(Res.drawable.ic_settings), contentDescription = "设置")
   }
 }
 
@@ -167,10 +174,9 @@ private fun TabPreview() {
   var selected by remember { mutableStateOf(HomeTab.Timetable) }
   HomeTabLayout(
     selected = selected,
-    currentUser = "ekibun",
+    currentAccount = Account(id = "bgm-1", site = "bgm", name = "ekibun", session = ""),
     onSelect = { selected = it },
     onOpenAccount = {},
-    onOpenSettings = {},
   ) {
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
       Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
