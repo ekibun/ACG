@@ -22,15 +22,17 @@ class AccountRepositoryTest {
     TestEnv.ensurePaths()
   }
 
-  /** 落盘格式里带着 currentId；删掉当前账号后不该剩下任何账号。 */
+  /** 落盘格式里带着 current；删掉当前账号后不该剩下任何账号。 */
   @Test(timeout = 60000)
   fun loadsAccountsWithCurrentAndDropsTheCurrentOnRemove() =
     runBlocking {
       settingsStore.set(ACCOUNTS_KEY, SAVED)
 
       AccountRepository.load()
-      assertEquals("ekibun", AccountRepository.current.value?.name, "currentId points at a stored account")
+      assertEquals("ekibun", AccountRepository.current.value?.name, "current points at a stored account")
       assertEquals(setOf("bgm:1"), AccountRepository.accounts.value.keys)
+      assertEquals("1", AccountRepository.current.value?.id, "the stored field is the bare user id")
+      assertEquals("bgm:1", AccountRepository.current.value?.key, "the table key is derived, not stored")
 
       AccountRepository.remove("bgm:1")
       assertNull(AccountRepository.current.value, "removing the current account leaves none")
@@ -52,18 +54,18 @@ class AccountRepositoryTest {
 
   /** 同一个人重登：还是一条，会话换成新的，并且成为当前账号。 */
   @Test(timeout = 60000)
-  fun addOverwritesTheSameIdAndPersists() =
+  fun addOverwritesTheSameUserAndPersists() =
     runBlocking {
       settingsStore.set(ACCOUNTS_KEY, null)
       AccountRepository.load()
 
-      AccountRepository.add(Account(id = "bgm:1", site = "bgm", name = "ekibun", session = "old"))
-      AccountRepository.add(Account(id = "bgm:1", site = "bgm", name = "ekibun", session = "new"))
+      AccountRepository.add(Account(site = "bgm", id = "1", name = "ekibun", session = "old"))
+      AccountRepository.add(Account(site = "bgm", id = "1", name = "ekibun", session = "new"))
 
-      assertEquals(1, AccountRepository.accounts.value.size, "the same id is one account")
+      assertEquals(1, AccountRepository.accounts.value.size, "the same user is one account")
       val stored = AccountRepository.accounts.value.getValue("bgm:1")
       assertEquals("new", stored.session)
-      assertEquals("bgm:1", AccountRepository.current.value?.id, "a fresh login becomes current")
+      assertEquals("bgm:1", AccountRepository.current.value?.key, "a fresh login becomes current")
 
       // add 等写完才返回，所以这里读到的就是它写完的结果
       val raw = settingsStore.get(ACCOUNTS_KEY)
@@ -75,9 +77,9 @@ class AccountRepositoryTest {
     const val ACCOUNTS_KEY = "accounts"
 
     const val SAVED =
-      """{"currentId":"bgm:1","accounts":{"bgm:1":{"id":"bgm:1","site":"bgm","name":"ekibun","session":"{}"}}}"""
+      """{"current":"bgm:1","accounts":{"bgm:1":{"site":"bgm","id":"1","name":"ekibun","session":"{}"}}}"""
 
     const val SAVED_UNKNOWN_FIELD =
-      """{"accounts":{"bgm:9":{"id":"bgm:9","site":"bgm","name":"n","session":"s","unknown":true}}}"""
+      """{"accounts":{"bgm:9":{"site":"bgm","id":"9","name":"n","session":"s","unknown":true}}}"""
   }
 }

@@ -29,14 +29,14 @@ class InitJsPolyfillTest {
 
   @AfterTest
   fun reset() {
-    runBlocking { JsEngine.instance.reset() }
+    runBlocking { JsEngine.reset() }
   }
 
   private fun eval(body: String): Any? =
     runBlocking {
       val deferred =
         assertIs<Deferred<Any?>>(
-          JsEngine.instance.evaluate("(async () => { $body })()", "<polyfill>"),
+          JsEngine.evaluate("(async () => { $body })()", "<polyfill>"),
         )
       deferred.await()
     }

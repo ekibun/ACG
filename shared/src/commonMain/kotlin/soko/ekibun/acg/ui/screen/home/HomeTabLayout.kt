@@ -174,7 +174,7 @@ private fun TabPreview() {
   var selected by remember { mutableStateOf(HomeTab.Timetable) }
   HomeTabLayout(
     selected = selected,
-    currentAccount = Account(id = "bgm-1", site = "bgm", name = "ekibun", session = ""),
+    currentAccount = Account(site = "bgm", id = "ekibun", name = "ekibun", session = ""),
     onSelect = { selected = it },
     onOpenAccount = {},
   ) {

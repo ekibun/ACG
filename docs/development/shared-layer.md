@@ -234,14 +234,13 @@ WebView2 没有「只关掉菜单里那一项」的设置，`AreDefaultContextMe
 
 ### 3.6 `oauth` 的用法归插件
 
-⇒ `{{callback}}` 换进去的值必须在查询串里百分号编码（`: / ? #` 都要编）。
+⇒ `{{callback}}` 换进去的是回调地址**原文**，宿主不转义 —— 模板把占位符摆在放得下裸地址的位置
+（查询串的值：`:` `/` `?` 在 query 里本来就合法，RFC 3986 §3.4）就是一条合法授权链接，摆哪是插件的事。
 
 ⇒ 插件侧 `redirect_uri` 取 `split("?")[0]`，参数逐段 `decodeURIComponent`，不能整串解：值里的 `%26`
 会被解成 `&`，把参数切开。
 
 ⇒ 这里不做 token 交换，也不设超时（用户可能把浏览器挂很久）。
-
-⇒ 百分号编码按字节判 ASCII，非 ASCII 一律进 `%XX`，换进去的值在任何位置都合法。
 
 ---
 
@@ -264,6 +263,16 @@ QuickJS 桥按内部标签分派 JS 数字（`JS_TAG_INT` → `Long`、`JS_TAG_F
 
 ⇒ 宿主持有账号表（`data/AccountRepository.kt`），每个账号一份会话；插件不写登录态，也不读
 `Settings` 里的键。会话的形状、清 cookie 的坑与切账号的做法见 §5.9。
+
+⇒ **插件收的是整个账号，不是拆开的字段**：`openHome(account)` 的唯一参数是
+`{ site, id, name, session, avatar }`，由 `Account.toPluginParam()` 摊出，调用点显式转换 ——
+桥不认识 `Account`，也不替调用方猜字段（见 [quickjs-lifetime](./quickjs-lifetime.md)）。认 cookie 要
+`session`、拼站点路径要 `id`；以后加字段只改这一处。账号表键 `key`（`<站点>:<用户 id>`）由 `site` 与
+`id` 算出，不给插件、也不进落盘 JSON。
+
+⇒ **没有「自动识别 `@Serializable`」这条路**：注解是 BINARY 保留、也不生成公共接口，common 里没有
+`KClass → KSerializer` 的入口（`serializerOrNull(kClass)` 是 JVM 专属、内部靠反射找 `$serializer`）。
+何况「哪些字段能出门」本来就是业务判断 —— 该给插件的只有 `Account` 自己说得清的那几项。
 
 ### 4.4 收藏应答的两层
 
@@ -377,8 +386,9 @@ await webview(LOGIN, { show: true, onNavigate: (url) => (staysOnLogin(url) ? fal
 
 宿主不知道登录页长什么样，只调 `login()` 等一个账号回来。**离开登录页那一下就是收尾点**：
 `onNavigate` 返回非布尔值，平台层取消这次导航、`webview()` 立刻兑现那个值 —— 目标页不必再加载。
-登录成败交给异步的验人（`me()` 拉主页看页头用户块）：cookie 判据在 `onNavigate` 里做不了，
-`Cookies.get` 是异步的，而导航回调必须当场返回（`chii_auth` 也可能是 HttpOnly）。
+登录成败交给异步的验人（`login()` 离开登录页后调 `me()` 抓一次主页看页头用户块）：cookie 判据在
+`onNavigate` 里做不了，`Cookies.get` 是异步的，而导航回调必须当场返回（`chii_auth` 也可能是 HttpOnly），
+所以登录页一离开就再抓一次主页，认不出人就让登录失败、不建空号（`parseMe` 的判据见 bgm-plugin §四）。
 用户自己关掉页面则兑现 `undefined`，登录按取消处理。
 
 ⇒ **「页面加载完成」不是收尾点**：登录页不传 `script`，加载完正是等人输账号的时刻。`webview()`
@@ -400,7 +410,7 @@ await webview(LOGIN, { show: true, onNavigate: (url) => (staysOnLogin(url) ? fal
 
 ⇒ **应用会话只在「打开页面」这一下发生，并且由插件做**：jar 只有一份，登录过别的账号之后里面未
 必还是这个人，所以插件开页面前把会话装进去。宿主一侧没有任何 cookie 代码 —— 它读不懂串，也就不
-该动 jar。纯 `fetch` 的插件根本不需要 jar，带着会话参数就能取数（`bgm.js` 的 `me()` 直接塞
+该动 jar。纯 `fetch` 的插件根本不需要 jar，从账号里取会话就能取数（`bgm.js` 的 `me()` 直接塞
 `Cookie` 头）。
 
 ⇒ **装会话 = 先清本站点、再逐条写**（`bgm.js` 的 `openHome`）：先按 `Cookies.get` 的结果把本站点
@@ -430,7 +440,7 @@ jar 要到下一次打开页面才知道该是谁。它和 `remove` 一样是 `s
 
 ```js
 {
-  user?:        { userId, name, avatar },
+  user?:        { id, name, avatar },
   collections?: { items, hasMore },
   notify?:      { message, count },
   session?:     string            // 只有 login 有

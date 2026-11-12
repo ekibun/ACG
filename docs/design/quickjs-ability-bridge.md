@@ -142,7 +142,7 @@ val candidates = objWrap.javaClass.methods.filter { it.name == methodName && …
 
 `FormData` 每项映射为 `{ name, value, filename, type }` 四个键，`type` 仅在带 `filename` 时给出，对应 `Http` 的 multipart part。
 
-`oauth` 把 `url` 中的 `{{callback}}` 占位符替换为 `http://127.0.0.1:<端口>/<会话id>`（百分号编码形式），返回浏览器实际请求的完整 URL；参数需逐段 `decodeURIComponent`，token 交换不在引擎内完成。
+`oauth` 把 `url` 中的 `{{callback}}` 占位符替换为 `http://127.0.0.1:<端口>/<会话id>`（原样，不转义），返回浏览器实际请求的完整 URL；参数需逐段 `decodeURIComponent`，token 交换不在引擎内完成。
 
 `Settings` 只接受字符串值，`get` 缺键返回 `null`，`set` 传 `null` 表示删键；两者都是异步的，写也需 `await`。
 

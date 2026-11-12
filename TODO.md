@@ -240,7 +240,7 @@
 
 - **现状**：约定已定稿在 [shared-layer §5.10](./docs/development/shared-layer.md)，代码一处没落。插件每次
   调用交回 `{ user?, collections?, notify?, session? }`，宿主合并成一份全局快照，界面只读快照。
-  现在 `login()` 交的还是 `{ userId, name, avatar, session }`，`me()` 是插件内部函数，收藏页没有数据源。
+  现在 `login()` 交的还是 `{ id, name, avatar, session }`，`me()` 是插件内部函数，收藏页没有数据源。
 - **做的时候一起落**：`Snapshot` 类型 + `SnapshotStore`（`StateFlow`；只覆盖出现的字段；切账号整体
   替换）→ `PluginAccountLogin` 折 `user` 子对象 → `bgm.js` 的
   `collections({ session, user, status, type, page })`（watching 档打 `/`，顺带回 `user` / `notify`；

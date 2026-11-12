@@ -45,7 +45,7 @@ private fun webviewHostHealth(): String? {
     runBlocking {
       withTimeoutOrNull(HOST_HEALTH_TIMEOUT_MS) {
         runCatching {
-          JsEngine.instance.webviewAsync("about:blank", null, "1 + 1", null)
+          JsEngine.webviewAsync("about:blank", null, "1 + 1", null)
         }.getOrNull()
       }
     }

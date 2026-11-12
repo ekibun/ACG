@@ -290,9 +290,9 @@ scheme 分发 —— native 的 avio 回调从这里进来（见下文「播放�
   收藏 / 详情 / 搜索要的数据源客户端（曾有一个 `BgmSource`，把插件交回的 `Map` 收成强类型）已随旧
   收藏页一起删除，等对应页面真正做时再按 `XxxNetworkDataSource` 的形态重建；插件脚本
   `files/js/module/bgm.js` 仍在，网络出口依旧在插件里，见下文「脚本插件链」。
-- **`engine`** —— `JsEngine`，全进程单例（`JsEngine.instance`）。持一个惰性建的 QuickJS runtime，
-  把 JS 侧那一**份**能力桥 `_binding(method, args)` 落到 Kotlin 原语上；后台 WebView 驱动
-  `webviewAsync` 也住在这个文件里。细节见下文「脚本插件链」。
+- **`engine`** —— `JsEngine`，全进程单例（`object`，调用点只写 `JsEngine.callPlugin(…)`）。持一个
+  惰性建的 QuickJS runtime，把 JS 侧那一**份**能力桥 `_binding(method, args)` 落到 Kotlin 原语上；
+  后台 WebView 驱动 `webviewAsync` 也住在这个文件里。细节见下文「脚本插件链」。
 - **`player`** —— 播放链与网络 / 磁盘相接的唯一处：`HttpIO`（range 会话 + 白读推进 + 闲置超时）、
   `FileIO`（本地文件）、`IOHandler`（native `io_open` 的入口，按 scheme 分发到上面两者）。它们被
   native 的 avio 回调**同步调用**；同步读的折平（唯一一处 `runBlocking`）与作废投递口在 `:platform`

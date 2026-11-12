@@ -46,13 +46,13 @@ export async function login() {
 
   // 以「站点认得出这个人」为准：拿不到用户就让登录失败，不建空号
   const user = await me(session);
-  return { userId: user.userId, name: user.name, avatar: user.avatar, session };
+  return { id: user.id, name: user.name, avatar: user.avatar, session };
 }
 
 /** 打开站点主页：先把 jar 置成本账号的会话（页面一打开就认这个人），窗口留给用户自己关。 */
-export async function openHome(session) {
+export async function openHome(account) {
   await expireSiteCookies();
-  for (const [url, raw] of Object.entries(cookiesOf(session))) {
+  for (const [url, raw] of Object.entries(cookiesOf(account.session))) {
     for (const cookie of raw.split(";").map((value) => value.trim())) {
       if (cookie) await setCookie(url, cookie);
     }
@@ -62,7 +62,8 @@ export async function openHome(session) {
 
 /**
  * 从主页 HTML 认当前用户：`.idBadgerNeue a.avatar` 在就是登着，用户名取其 href 的 `/user/([^/]*)`，
- * 昵称取 `#header a`（站点已无这个 id，实际落回用户名）。判据与账号 id 的取法见 bgm-plugin §四。
+ * 昵称取 `#header a`（站点已无这个 id，实际落回用户名）。用户名会变成账号的 `id`（判据见
+ * bgm-plugin §四）。
  */
 export function parseMe(html) {
   const $ = load(html);
@@ -84,7 +85,7 @@ export function parseMe(html) {
   else if (avatarUrl && avatarUrl.startsWith("/")) avatarUrl = BASE + avatarUrl;
 
   return {
-    userId: username,
+    id: username,
     name: nickname || username,
     avatar: avatarUrl || null
   };

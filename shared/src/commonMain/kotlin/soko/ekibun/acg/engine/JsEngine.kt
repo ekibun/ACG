@@ -1,7 +1,6 @@
 package soko.ekibun.acg.engine
 
 import acg.shared.generated.resources.Res
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -27,22 +26,13 @@ import soko.ekibun.web.WebViewEvent
 import soko.ekibun.web.createWebviewContext
 import soko.ekibun.web.getWebviewCookieManager
 
-/** 授权链接里标出回调地址位置的占位符，见 [JsEngine.oauthAsync]。 */
-private const val CALLBACK_PLACEHOLDER = "{{callback}}"
-
-/** 百分号编码时不转义的字符（`encodeURIComponent` 的保留集）。 */
-private const val UNRESERVED_CHARS = "-_.!~*'()"
-
-private const val HEX_DIGITS = "0123456789ABCDEF"
-
-class JsEngine {
-  companion object {
-    val instance by lazy { JsEngine() }
-  }
-
+/**
+ * 插件的 JS runtime：全进程一个 `QuickJS` context，模块在两次调用之间因此是同一个实例。
+ */
+object JsEngine {
   private var quickjsDelegate: QuickJS? = null
 
-  /** 惰性创建 [QuickJS] 时用的互斥锁。 */
+  /** 建 runtime 与 [reset] 换新时用的互斥锁。 */
   private val quickjsLock = Any()
 
   private val quickjs: QuickJS
@@ -364,45 +354,21 @@ class JsEngine {
     }
   }
 
-  /** 外部浏览器桥：把 [templateUrl] 的 `{{callback}}` 换成编码后的回调地址，打开浏览器并等回调。 */
-  internal suspend fun oauthAsync(
-    templateUrl: String,
-    launch: suspend (String) -> Unit = ::launchExternalBrowser,
-  ): String {
-    if (!templateUrl.contains(CALLBACK_PLACEHOLDER)) {
-      throw JSError("oauth template has no $CALLBACK_PLACEHOLDER placeholder: $templateUrl")
+  /**
+   * 外部浏览器桥：把 [templateUrl] 的 `{{callback}}` 换成回调地址原文，打开浏览器并等回调。
+   *
+   * 不做任何转义 —— 模板把占位符摆在哪是插件的事（见 `docs/design/browser-login.md`）。
+   */
+  internal suspend fun oauthAsync(templateUrl: String): String {
+    if (!templateUrl.contains("{{callback}}")) {
+      throw JSError("oauth template has no {{callback}} placeholder: $templateUrl")
     }
     val session = createCallbackSession()
     try {
-      val authorizeUrl =
-        templateUrl.replace(CALLBACK_PLACEHOLDER, percentEncodeComponent(session.callbackUrl))
-      try {
-        launch(authorizeUrl)
-      } catch (e: CancellationException) {
-        throw e
-      } catch (t: Throwable) {
-        throw JSError("Launch external browser failed: ${t.message ?: t}")
-      }
+      launchExternalBrowser(templateUrl.replace("{{callback}}", session.callbackUrl))
       return session.awaitCallback()
     } finally {
       session.close()
     }
   }
-
-  /** 按 `encodeURIComponent` 的保留集做百分号编码（非 ASCII 取 UTF-8 字节）。 */
-  private fun percentEncodeComponent(value: String): String =
-    buildString {
-      value.encodeToByteArray().forEach { raw ->
-        val code = raw.toInt() and 0xFF
-        val char = code.toChar()
-        val keep =
-          code < 0x80 &&
-            (char in 'A'..'Z' || char in 'a'..'z' || char in '0'..'9' || UNRESERVED_CHARS.contains(char))
-        if (keep) {
-          append(char)
-        } else {
-          append('%').append(HEX_DIGITS[code shr 4]).append(HEX_DIGITS[code and 0xF])
-        }
-      }
-    }
 }

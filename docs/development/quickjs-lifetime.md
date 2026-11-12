@@ -51,7 +51,16 @@
 
 - `cache` 按**对象身份**记忆，用来切断循环引用。键必须用 `IdentityMap`：普通 `HashMap` 会对自引用的
   Map 无限递归算哈希（`StackOverflowError`），还会把「内容相等但不同一」的两个对象折叠成一个。
+  容器一律**先登记再填**（`jsNewObject` / `jsNewArray` 之后立刻 `cache[obj] = ret`，然后才逐个
+  `definePropertyValue`），否则自引用回来无票可命中，照样递归到底。
 - `definePropertyValue` 完整接管 k / v 两个句柄，且句柄一次性、不能复用。
+- `Map` 到 JS 就是普通对象（键的插入序即属性序）；自引用（`m["self"] = m`）靠上面那条「先登记
+  再填」收住。同一实例在**一次**转换内是同一个 JS 对象，跨两次 `callPlugin` 不保证 —— 每次过桥
+  都是一轮新的 cache。
+- 桥不替调用方摊自定义对象：`Account` 这类要么在调用点显式转成 `Map`（`Account.toPluginParam()`），
+  要么被 `jsWrapObject` 包成一条插件读不到字段的 Java 引用。不做「自动识别 `@Serializable`」——
+  注解是 BINARY 保留的、也不生成公共接口，common 里没有 `KClass → KSerializer` 的入口，自动就得
+  靠反射或代码生成，为几个字段不值。
 - `AutoCloseable` 不另开分支：`jsWrapObject` 挂的 `JavaObject` 就是析构回调回收它的抓手。
 
 ## 四、线程与关闭窗口

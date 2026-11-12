@@ -186,13 +186,13 @@ private fun AccountPopup(
             supportingContent = { Text(account.site) },
             leadingContent = { Avatar(account.name, account.avatar) },
             trailingContent = {
-              if (account.id == current?.id) {
+              if (account.key == current?.key) {
                 Icon(painterResource(Res.drawable.ic_check), contentDescription = null)
               }
             },
             modifier =
               Modifier.clickable {
-                onSelect(account.id)
+                onSelect(account.key)
                 onDismiss()
               },
           )
@@ -222,7 +222,7 @@ private fun AccountPopup(
                 // 登出只删这一条账号，连它的会话一起；删的正好是当前账号就切到剩下的第一个
                 IconButton(
                   onClick = {
-                    onRemove(current.id)
+                    onRemove(current.key)
                     onDismiss()
                   },
                 ) {
@@ -235,7 +235,7 @@ private fun AccountPopup(
                 error = null
                 scope.launch {
                   try {
-                    AccountRepository.openHome(current.id)
+                    AccountRepository.openHome(current.key)
                     onDismiss()
                   } catch (e: CancellationException) {
                     throw e

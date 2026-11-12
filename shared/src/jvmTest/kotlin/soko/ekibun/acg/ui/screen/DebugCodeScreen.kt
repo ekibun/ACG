@@ -57,7 +57,7 @@ fun DebugCodeScreen() {
           scope.launch {
             evalval =
               try {
-                val ret = JsEngine.instance.evaluate(text.text)
+                val ret = JsEngine.evaluate(text.text)
                 if (ret is Deferred<*>) ret.await() else ret
               } catch (e: JSError) {
                 e

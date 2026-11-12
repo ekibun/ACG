@@ -9,18 +9,44 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import soko.ekibun.common.settingsStore
 
-/** 一个已登录的账号。账号与会话归宿主持有，插件不存登录态 —— 所以同一个站点能登多个。 */
+/**
+ * 一个已登录的账号。账号与会话归宿主持有，插件不存登录态 —— 所以同一个站点能登多个。
+ *
+ * 交给插件的是整个账号（[toPluginParam]），不是拆开的会话串与用户 id。
+ */
 @Serializable
 data class Account(
-  val id: String,
   /** 插件标识；一个插件服务一个站点。 */
   val site: String,
+  /** 站点上的用户 id（`bgm` 是用户名，即 `/user/<用户名>` 那一段）。 */
+  val id: String,
   val name: String,
   /** 对宿主不透明的会话串，形状由插件定。 */
   val session: String,
   /** 站点交回的头像地址；没有就退回字母头像。 */
   val avatar: String? = null,
-)
+) {
+  /**
+   * 账号表键 `"$site:$id"`：表按它索引，当前账号记的也是它。
+   *
+   * 不进落盘 JSON —— `@Serializable` 只认构造参数。
+   */
+  val key = "$site:$id"
+
+  /**
+   * 交给插件的参数形状：字段与本类同名，[key] 不算（它是宿主自己的索引）。
+   *
+   * 桥不认识 [Account]，调用点要显式摊开（见 [PluginAccountLogin.openHome]）；加字段只改这一处。
+   */
+  fun toPluginParam(): Map<String, Any?> =
+    mapOf(
+      "site" to site,
+      "id" to id,
+      "name" to name,
+      "session" to session,
+      "avatar" to avatar,
+    )
+}
 
 /** 账号表与当前账号，界面只读这份。 */
 interface AccountStore {
@@ -29,14 +55,15 @@ interface AccountStore {
   val current: StateFlow<Account?>
 }
 
-/** 落盘形状：包一层对象，以后加字段不用改顶层；新字段给默认值就能平滑读写。 */
+/** 落盘形状：包一层对象，以后加字段不用改顶层。 */
 @Serializable
 private data class AccountsSave(
-  val currentId: String? = null,
+  /** 当前账号的键（[Account.key]）。 */
+  val current: String? = null,
   val accounts: Map<String, Account> = emptyMap(),
 )
 
-/** 宽松：删字段不炸（ignoreUnknownKeys），枚举缺值 / 显式 null 落默认（coerceInputValues）。 */
+/** 宽松：未知字段忽略，显式 null 落默认值。 */
 private val accountsJson =
   Json {
     ignoreUnknownKeys = true
@@ -67,39 +94,39 @@ object AccountRepository : AccountStore {
       settingsStore.get(ACCOUNTS_KEY)?.let { raw ->
         try {
           accountsJson.decodeFromString<AccountsSave>(raw)
-        } catch (e: IllegalArgumentException) {
+        } catch (_: IllegalArgumentException) {
           null
         }
       }
-    _accounts.value = stored?.accounts ?: emptyMap()
-    _current.value = stored?.currentId?.let(stored.accounts::get)
+    val accounts = stored?.accounts ?: emptyMap()
+    _accounts.value = accounts
+    _current.value = stored?.current?.let(accounts::get)
   }
 
   /** 登录成功后落表并选中；同一个人重登就盖掉旧的那条。 */
   suspend fun add(account: Account) {
-    _accounts.update { it + (account.id to account) }
+    _accounts.update { it + (account.key to account) }
     _current.value = account
     save()
   }
 
   /** 切换当前账号：内存立即生效，落盘跟着写完才返回。 */
-  suspend fun select(id: String) {
-    val account = _accounts.value[id] ?: return
+  suspend fun select(key: String) {
+    val account = _accounts.value[key] ?: return
     _current.value = account
     save()
   }
 
   /** 打开这个账号在站点上的主页（前台 webview，页面由插件开）；只读，不动账号表与当前账号。 */
-  suspend fun openHome(id: String) {
-    val account = _accounts.value[id] ?: return
+  suspend fun openHome(key: String) {
+    val account = _accounts.value[key] ?: return
     accountLogin.openHome(account)
   }
 
   /** 登出：删掉这条账号（会话跟着没了）；删的是当前账号就切到剩下的第一个。 */
-  suspend fun remove(id: String) {
-    val remaining = _accounts.value - id
-    _accounts.value = remaining
-    if (_current.value?.id == id) _current.value = remaining.values.firstOrNull()
+  suspend fun remove(key: String) {
+    _accounts.update { it - key }
+    if (_current.value?.key == key) _current.value = _accounts.value.values.firstOrNull()
     save()
   }
 
@@ -112,7 +139,7 @@ object AccountRepository : AccountStore {
     try {
       settingsStore.set(
         ACCOUNTS_KEY,
-        accountsJson.encodeToString(AccountsSave(currentId = _current.value?.id, accounts = _accounts.value)),
+        accountsJson.encodeToString(AccountsSave(current = _current.value?.key, accounts = _accounts.value)),
       )
     } catch (e: CancellationException) {
       throw e

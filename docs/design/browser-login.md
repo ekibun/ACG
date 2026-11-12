@@ -14,16 +14,18 @@ const callbackUrl = await oauth(templateUrl);
 ```
 
 - **`templateUrl`** 是授权地址，回调地址的位置由占位符 `{{callback}}` 标出。引擎把它换成
-  `http://127.0.0.1:<端口>/<会话id>` 的**百分号编码**形式（授权链接把它放在 `redirect_uri`
-  这种查询串参数里，`: / ? #` 必须编码）。
+  `http://127.0.0.1:<端口>/<会话id>` 的**原文**，不做任何转义 —— 模板把占位符摆在放得下裸地址的
+  位置就是合法授权链接（查询串的值：`:` `/` `?` 在 query 里本来就合法，RFC 3986 §3.4），摆哪是
+  插件的事。要 `%3A%2F%2F` 形式的服务商接不了：编码得发生在替换那一刻，而值只有宿主知道 ——
+  插件既然认定这个地址「发过来就是合法的」，那这条桥就只保证「原样换进去」。
 - **返回值**是浏览器**实际请求的那个完整 URL**，原样、未解码、含查询串：
 
   ```
   http://127.0.0.1:51987/9f3a4b6c2d1e0f8a7b5c4d3e?code=4808dfb7…&state=probe123
   ```
 
-- 没有模板占位符、或浏览器起不来时 **reject**（[`JSError`](../../platform/src/commonMain/kotlin/soko/ekibun/quickjs/JSError.kt)），
-  不回空值 —— 回空值会让插件误判成"用户点了取消"。
+- 没有模板占位符时 **reject**（[`JSError`](../../platform/src/commonMain/kotlin/soko/ekibun/quickjs/JSError.kt)）；
+  浏览器起不来时平台异常原样 reject（不包一层）。都不回空值 —— 回空值会让插件误判成"用户点了取消"。
 - **不超时**：用户可能把浏览器标签挂在后台很久再回来点登录。
 
 插件侧两件必须做对的事：
@@ -124,5 +126,6 @@ const token = await fetch(tokenEndpoint, {
 | 验什么 | 在哪 |
 | --- | --- |
 | 回环服务器本身（地址形状、按路径区分、原样交付、撤掉即 404、请求并行不串扰） | `platform/src/jvmTest/kotlin/soko/ekibun/browser/CallbackSessionTest.kt` |
-| `oauthAsync` 的编排（占位符换成什么、返回什么形状；`launch` 注入，不真开浏览器） | `JsEngineTest.oauthSubstitutesEncodedCallback`（原 `BrowserLoginTest` 已删） |
+| `oauthAsync` 的占位符校验（模板里没有 `{{callback}}` 就 reject，`args[0]` 原样到达） | `JsEngineTest.oauthRejectsTemplateWithoutPlaceholder` |
+| 授权地址换入与回跳返回 | 不乐观测：真调 `launchExternalBrowser` 会弹系统浏览器。宿主侧只剩一个调用点，形状由契约那几条钉住 |
 | JS 侧 `oauth` 的真派发（只走模板校验那一支 —— 真跑到底会弹浏览器） | `shared/src/jvmTest/kotlin/soko/ekibun/acg/engine/JsEngineTest.kt` |
