@@ -134,10 +134,10 @@ private fun AccountItem(
       Icon(
         painterResource(Res.drawable.ic_account_circle),
         contentDescription = null,
-        modifier = Modifier.size(24.dp),
+        modifier = Modifier.size(28.dp),
       )
     } else {
-      Avatar(currentAccount.name, currentAccount.avatar, size = 24.dp)
+      Avatar(currentAccount.name, currentAccount.avatar)
     }
     Spacer(Modifier.height(4.dp))
     Text(

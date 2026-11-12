@@ -19,7 +19,7 @@ fun Avatar(
   name: String,
   url: String?,
   modifier: Modifier = Modifier,
-  size: Dp = 24.dp,
+  size: Dp = 28.dp,
 ) {
   if (url == null) {
     Box(

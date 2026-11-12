@@ -11,9 +11,13 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -156,6 +160,8 @@ private fun AccountPopup(
     Surface(
       modifier =
         Modifier
+          // 这层覆盖物在窗口根上，各页 Scaffold 的内缩管不到它：Android 的导航条 / 状态栏要自己避开
+          .windowInsetsPadding(WindowInsets.systemBars)
           .padding(bottom = 72.dp, start = 8.dp)
           .widthIn(max = 360.dp)
           // 卡片自己吃掉点击，免得不小心点到卡片也把面板关了
@@ -201,7 +207,7 @@ private fun AccountPopup(
           colors = ListItemDefaults.colors(containerColor = Color.Transparent),
           headlineContent = { Text("添加账号") },
           leadingContent = {
-            Icon(painterResource(Res.drawable.ic_account_circle), contentDescription = null)
+            Icon(painterResource(Res.drawable.ic_account_circle), contentDescription = null, Modifier.size(28.dp))
           },
           modifier = Modifier.clickable(onClick = onAddAccount),
         )
