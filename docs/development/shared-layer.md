@@ -386,10 +386,14 @@ await webview(LOGIN, { show: true, onNavigate: (url) => (staysOnLogin(url) ? fal
 
 宿主不知道登录页长什么样，只调 `login()` 等一个账号回来。**离开登录页那一下就是收尾点**：
 `onNavigate` 返回非布尔值，平台层取消这次导航、`webview()` 立刻兑现那个值 —— 目标页不必再加载。
-登录成败交给异步的验人（`login()` 离开登录页后调 `me()` 抓一次主页看页头用户块）：cookie 判据在
+登录成败交给异步的验人（`login()` 离开登录页后自己抓一次 `/settings` 看页头用户块）：cookie 判据在
 `onNavigate` 里做不了，`Cookies.get` 是异步的，而导航回调必须当场返回（`chii_auth` 也可能是 HttpOnly），
-所以登录页一离开就再抓一次主页，认不出人就让登录失败、不建空号（`parseMe` 的判据见 bgm-plugin §四）。
+所以登录页一离开就再抓一次设置页，认不出人就让登录失败、不建空号（判据见 bgm-plugin §四）。
 用户自己关掉页面则兑现 `undefined`，登录按取消处理。
+
+⇒ **验人抓 `/settings`，不抓主页**：两个页面共用同一份页头（`.idBadgerNeue a.avatar` 给出用户名与头像），
+昵称在设置页是 `input[name="nickname"]` 的 value、在主页是 `#header` 里那句「Hi! 昵称」，前者是结构化
+字段、后者要抠文本，而且实测设置页固定 22 KB，主页随收藏与动态涨到 130–627 KB。
 
 ⇒ **「页面加载完成」不是收尾点**：登录页不传 `script`，加载完正是等人输账号的时刻。`webview()`
 只在五种情况下兑现 —— `script` 给出非空结果、`onNavigate` 给出结束值、命中拦截、加载失败、用户关闭。
@@ -410,7 +414,7 @@ await webview(LOGIN, { show: true, onNavigate: (url) => (staysOnLogin(url) ? fal
 
 ⇒ **应用会话只在「打开页面」这一下发生，并且由插件做**：jar 只有一份，登录过别的账号之后里面未
 必还是这个人，所以插件开页面前把会话装进去。宿主一侧没有任何 cookie 代码 —— 它读不懂串，也就不
-该动 jar。纯 `fetch` 的插件根本不需要 jar，从账号里取会话就能取数（`bgm.js` 的 `me()` 直接塞
+该动 jar。纯 `fetch` 的插件根本不需要 jar，从账号里取会话就能取数（`bgm.js` 的 `login()` 验人时直接塞
 `Cookie` 头）。
 
 ⇒ **装会话 = 先清本站点、再逐条写**（`bgm.js` 的 `openHome`）：先按 `Cookies.get` 的结果把本站点

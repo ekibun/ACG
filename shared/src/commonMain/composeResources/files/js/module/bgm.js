@@ -18,6 +18,25 @@ const staysOnLogin = (url) => LOGIN_STAYS.some((path) => url.startsWith(BASE + p
 /** 会话里的 `url → "n=v; …"` 表：形状是本插件自己定的 `{ cookies: { "<url>": "n=v; ..." } }`。 */
 const cookiesOf = (session) => JSON.parse(session).cookies || {};
 
+/** 带会话取一页 HTML：网页端认 cookie，不另找 token —— 会话里 @ 本站的那条原样塞进 `Cookie`。 */
+const fetchHtml = async (session, url) => {
+  const response = await fetch(url, { headers: { Cookie: cookiesOf(session)[BASE] || "" } });
+  if (!response.ok) throw new Error("bangumi " + url + " failed (" + response.status + ")");
+  return response.text();
+};
+
+/** 站点给的是协议相对地址（`//lain.bgm.tv/…`）或站内路径，补成完整 URL。 */
+const absolute = (url) =>
+  !url ? null : url.startsWith("//") ? "https:" + url : url.startsWith("/") ? BASE + url : url;
+
+/** 封面 / 头像：`src` 优先，其次懒加载的 `data-cfsrc`，最后是内联样式里的 background-image。 */
+const imageOf = (node) =>
+  absolute(
+    node.attr("src") ||
+      node.attr("data-cfsrc") ||
+      (/background-image:url\('([^']*)'\)/.exec(node.attr("style") || "") || [])[1]
+  );
+
 /** 写一条 cookie：域固定成 `.bgm.tv`，与站点 `Set-Cookie` 落进 jar 的那条一致（见 §5.9）。 */
 const setCookie = (url, cookie) => Cookies.set(url, cookie + "; Domain=." + HOST + "; Path=/");
 
@@ -29,7 +48,7 @@ const expireSiteCookies = async () => {
   }
 };
 
-/** 走一遍站点登录页（前台），离开登录页即收尾；成败交给 [me] 验。 */
+/** 走一遍站点登录页（前台），离开登录页即收尾，再抓设置页验人。 */
 export async function login() {
   // jar 里还留着上一个账号的登录态时，登录页会直接认出那个人
   await expireSiteCookies();
@@ -44,9 +63,18 @@ export async function login() {
   if (!cookie) throw new Error("bangumi 登录页没有留下 cookie");
   const session = JSON.stringify({ cookies: { [BASE]: cookie } });
 
-  // 以「站点认得出这个人」为准：拿不到用户就让登录失败，不建空号
-  const user = await me(session);
-  return { id: user.id, name: user.name, avatar: user.avatar, session };
+  // 以「站点认得出这个人」为准：拿不到用户就让登录失败，不建空号。设置页固定二十来 KB，
+  // 主页随收藏与动态涨到几百 KB，页头却是同一份（v0 的 `/v0/me` 要 OAuth token，这里只有 cookie）
+  const $ = load(await fetchHtml(session, BASE + "/settings"));
+  // 页头在就是登着；未登录时这块只有 `.guest` 的登录/注册
+  const avatarLink = $(".idBadgerNeue a.avatar").first();
+  if (!avatarLink.length) throw new Error("bangumi 未登录：页头只有登录/注册");
+  const id = (/\/user\/([^/]*)/.exec(avatarLink.attr("href") || "") || [])[1];
+  if (!id) throw new Error("bangumi 用户链接里没有用户名");
+  // 昵称是设置表单里的一个字段；账号没设昵称就落回用户名
+  const name = ($('input[name="nickname"]').first().attr("value") || "").trim() || id;
+
+  return { id, name, avatar: imageOf(avatarLink.find("span.avatarNeue").first()), session };
 }
 
 /** 打开站点主页：先把 jar 置成本账号的会话（页面一打开就认这个人），窗口留给用户自己关。 */
@@ -58,44 +86,4 @@ export async function openHome(account) {
     }
   }
   return webview(BASE, { show: true });
-}
-
-/**
- * 从主页 HTML 认当前用户：`.idBadgerNeue a.avatar` 在就是登着，用户名取其 href 的 `/user/([^/]*)`，
- * 昵称取 `#header a`（站点已无这个 id，实际落回用户名）。用户名会变成账号的 `id`（判据见
- * bgm-plugin §四）。
- */
-export function parseMe(html) {
-  const $ = load(html);
-  const avatarLink = $(".idBadgerNeue a.avatar").first();
-  if (!avatarLink.length) {
-    throw new Error("bangumi 未登录：页头只有登录/注册");
-  }
-
-  const username = (/\/user\/([^/]*)/.exec(avatarLink.attr("href") || "") || [])[1];
-  if (!username) throw new Error("bangumi 用户链接里没有用户名");
-  const nickname = $("#header a").first().text().trim();
-
-  const avatar = avatarLink.find("span.avatarNeue").first();
-  let avatarUrl =
-    avatar.attr("src") ||
-    avatar.attr("data-cfsrc") ||
-    (/background-image:url\('([^']*)'\)/.exec(avatar.attr("style") || "") || [])[1];
-  if (avatarUrl && avatarUrl.startsWith("//")) avatarUrl = "https:" + avatarUrl;
-  else if (avatarUrl && avatarUrl.startsWith("/")) avatarUrl = BASE + avatarUrl;
-
-  return {
-    id: username,
-    name: nickname || username,
-    avatar: avatarUrl || null
-  };
-}
-
-/** 抓一次主页交给 [parseMe]；v0 要 OAuth token，这里只有网页登录的 cookie。 */
-export async function me(session) {
-  const response = await fetch(BASE + "/", {
-    headers: { Cookie: cookiesOf(session)[BASE] || "" }
-  });
-  if (!response.ok) throw new Error("bangumi home failed (" + response.status + ")");
-  return parseMe(await response.text());
 }
