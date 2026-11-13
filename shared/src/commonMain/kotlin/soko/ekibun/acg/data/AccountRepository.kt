@@ -9,11 +9,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import soko.ekibun.common.settingsStore
 
-/**
- * 一个已登录的账号。账号与会话归宿主持有，插件不存登录态 —— 所以同一个站点能登多个。
- *
- * 交给插件的是整个账号（[toPluginParam]），不是拆开的会话串与用户 id。
- */
+/** 一个已登录的账号。会话归宿主持有、插件不存登录态，所以同一站点能登多个；交给插件的是整个账号。 */
 @Serializable
 data class Account(
   /** 插件标识；一个插件服务一个站点。 */
@@ -26,18 +22,10 @@ data class Account(
   /** 站点交回的头像地址；没有就退回字母头像。 */
   val avatar: String? = null,
 ) {
-  /**
-   * 账号表键 `"$site:$id"`：表按它索引，当前账号记的也是它。
-   *
-   * 不进落盘 JSON —— `@Serializable` 只认构造参数。
-   */
+  /** 账号表键 `"$site:$id"`；不进落盘 JSON（`@Serializable` 只认构造参数）。 */
   val key = "$site:$id"
 
-  /**
-   * 交给插件的参数形状：字段与本类同名，[key] 不算（它是宿主自己的索引）。
-   *
-   * 桥不认识 [Account]，调用点要显式摊开（见 [PluginAccountLogin.openHome]）；加字段只改这一处。
-   */
+  /** 交给插件的参数：字段与本类同名，不含 [key]；桥不认识 [Account]，加字段只改这一处。 */
   fun toPluginParam(): Map<String, Any?> =
     mapOf(
       "site" to site,
@@ -123,17 +111,21 @@ object AccountRepository : AccountStore {
     accountLogin.openHome(account)
   }
 
-  /** 登出：删掉这条账号（会话跟着没了）；删的是当前账号就切到剩下的第一个。 */
+  /** 登出：删掉这条账号（会话跟着没了）；删的是当前账号就切到剩下的第一个，并清掉它的收藏表。 */
   suspend fun remove(key: String) {
+    val wasCurrent = _current.value?.key == key
     _accounts.update { it - key }
-    if (_current.value?.key == key) _current.value = _accounts.value.values.firstOrNull()
+    if (wasCurrent) {
+      _current.value = _accounts.value.values.firstOrNull()
+      // 收藏表跟着账号走：登出后表里那份属于它，留着会被同一个人重登时直接摆出来
+      CollectionRepository.clear()
+    }
     save()
   }
 
   /**
-   * 调用方先改内存再进来，提交顺序就是点击顺序；写本身由 `DataStore` 串行。
-   *
-   * 失败只留日志：内存已经改了，这次运行里账号就是可用的，不该把登录或切换回报成失败。
+   * 调用方先改内存再进来，提交顺序即点击顺序；写由 `DataStore` 串行。
+   * 失败只留日志：内存已改，这次运行里账号就是可用的，不该把登录或切换报成失败。
    */
   private suspend fun save() {
     try {

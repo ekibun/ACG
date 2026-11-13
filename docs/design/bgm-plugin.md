@@ -6,6 +6,11 @@
 >
 > **状态（2026-11）：** Kotlin 侧的实现（`BgmSource`、收藏页、`CollectionState`）已删除，重写时按本文的
 > 接口与分页结论来。插件脚本 `files/js/module/bgm.js` 仍在，下文描述的是它。
+>
+> **状态（2026-11-13）：收藏也改成网页解析** —— 现行契约是插件的 `collections(account, key, page)`，
+> 宿主侧是 `data/CollectionTable.kt` 的按档表（调度在 `data/CollectionRepository.kt`），见
+> [shared-layer §5.10](../development/shared-layer.md)。下文 §四的 v0 结论与 §五里 `CollectionState`
+> 那几处是当时的记录，改代码前不要按它们走。
 
 第一个**真实的**插件：`files/js/module/bgm.js` + Kotlin 侧的 `BgmSource` + 收藏页。
 这份文档记的是分层裁定、键空间归属、OAuth 与 v0 接口的实测结论。改 `bgm.js` 的导出面、
@@ -94,11 +99,10 @@
 
 版面照 `.workbuddy/ref/Bangumi` 的 `fragment_collection.xml`（顶部一排筛选、下面一排列出条目类型、
 再下面列表）。差异只有一处：参考实现用 `ViewPager` 让**每种条目类型一个 `Fragment`**，
-各自的 `loadCollectionList` 持有一份列表；这里用**一份 `CollectionState` + 页签切换**。
-理由是翻页、并发应答作废、登录态这些逻辑只写一遍——`ViewPager` 版要写五遍，而五份之间
-唯一的差别是构造参数。
+各自的 `loadCollectionList` 持有一份列表；这里用**一份按档的表**（`CollectionTable`：键 → 读到第几页）
+加两排筛选 —— 类型一排 tab、状态一排 chip —— 翻页、并发作废、登录态这些逻辑只写一遍。
 
-> **DO:** 筛选换得快时把**过期的应答**丢掉（`CollectionState` 的 `generation`）。界面上换筛选是
+> **DO:** 切换档、连点筛选时把**过期的应答**丢掉（表记 `accountKey`，写回前再比一次）。界面上换筛选是
 > 连点就能触发的，两轮请求会同时在飞；没有这道闸，先发的后回就把后发的挤掉，页面停在已经不被
 > 选中的那个筛选上——**不报错，只错内容**。
 

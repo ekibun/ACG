@@ -8,8 +8,11 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -42,15 +45,12 @@ import soko.ekibun.acg.data.ThemeSettings
 import soko.ekibun.acg.ui.comp.Avatar
 import soko.ekibun.acg.ui.theme.AppTheme
 
-/** 侧栏与底栏的分界，M3 medium 的起点。 */
+/** 侧栏与底栏的分界，M3 medium 的起点；量的是窗口宽。 */
 private val RailBreakpoint = 600.dp
 
 /**
- * 导航条的两副面孔：<600dp 底栏、≥600dp 侧栏。
- *
- * 两档都只有 tab 与账号入口；设置与登出在账号面板里（见 `HomeScreen` 的 `AccountPopup`）。
- * 两档共用 [NavigationBarDefaults.containerColor]：M3 默认给侧栏 surface、底栏
- * surfaceContainer，并排摆会像两种层次。
+ * 导航条两副面孔：<600dp 底栏、≥600dp 侧栏。两档都只有 tab 与账号入口（设置与登出在 `HomeScreen`
+ * 的账号面板里）；两档共用 [NavigationBarDefaults.containerColor]，否则并排看像两种层次。
  */
 @Composable
 fun HomeTabLayout(
@@ -92,7 +92,8 @@ fun HomeTabLayout(
 
       else -> {
         Column(Modifier.fillMaxSize()) {
-          Box(Modifier.weight(1f)) { contentSlot() }
+          // 底栏自己避开了系统导航条，内容区不再避一次（否则列表底部多一块空白）
+          Box(Modifier.weight(1f).consumeWindowInsets(WindowInsets.navigationBars)) { contentSlot() }
           NavigationBar {
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
               AccountItem(currentAccount, onOpenAccount)
@@ -113,10 +114,7 @@ fun HomeTabLayout(
   }
 }
 
-/**
- * 账号入口：头像 + 用户名，图标在上、文字在下；点了弹面板。宽度由调用处给 —— 侧栏包一层 80dp 的
- * Box（栏宽固定），底栏每项由 `weight(1f)` 定宽。
- */
+/** 账号入口：头像 + 用户名，点了弹面板。宽度由调用处给 —— 侧栏包 80dp 的 Box，底栏靠 `weight(1f)`。 */
 @Composable
 private fun AccountItem(
   currentAccount: Account?,

@@ -211,12 +211,17 @@ resolveEpisode(line, episode)     → { url, headers? }            // sort + lin
 > - DTO + mapper 只做了**收藏**这一条链路（`me` / `collections`），`Subject` / `Episode` 那套
 >   领域模型一个都没建 —— 收藏页要的字段直接从应答折到界面用的 data class。
 
-> **落地状态（2026-11 更新）：** 上述实现已整体删除 —— `ui/screen/collection/`（旧收藏页与
+> **落地状态（2026-11 更新）：** 上述实现已整体删除 —— `ui/screen/home/tab/CollectionScreen.kt`（旧收藏页与
 > `CollectionState`）、`acg/source/BgmSource.kt` 及其测试都不在了，改为「跟着 UI 一步步做」：
-> 页面做到哪一步就建那一处需要的数据层，不预先铺 DTO / mapper。当前只有
-> `acg/data/AccountRepository.kt`。上表「保留并搬进新结构」那行里的 `generation` 过期应答、
-> 凭据回填与分页，重写收藏页时按 [shared-layer §5.3](../development/shared-layer.md) 与
-> [bgm-plugin.md](./bgm-plugin.md) 重建。
+> 页面做到哪一步就建那一处需要的数据层，不预先铺 DTO / mapper。上表「保留并搬进新结构」那行里的
+> `generation` 过期应答、凭据回填与分页，重写收藏页时按
+> [shared-layer §5.3](../development/shared-layer.md) 与 [bgm-plugin.md](./bgm-plugin.md) 重建。
+>
+> **落地状态（2026-11-13 更新）：** 收藏页已重建 —— 数据层是 `acg/data/CollectionTable.kt`
+> （一份按档的表与三条纯规则，每档自带「在飞哪一页」与「哪一页失败」）加 `acg/data/CollectionRepository.kt`
+> （调度：每档一个 job、过期应答靠取消 + 表的 `accountKey` 挡掉，没有代际计数），界面是 `ui/screen/home/tab/collection/`（类型 tab + 状态 chip），插件契约见
+> [shared-layer §5.10](../development/shared-layer.md)。凭据回填随网页登录一起没了；分页是宿主累积，
+> 插件每次只给一页。
 > - 服务商知识**不在 Kotlin 里**，挪进了 JS 插件 `files/js/module/bgm.js`；§3 里「客户端放
 >   `acg.catalog.bgm`」的隐含前提（Kotlin 侧直接调 v0）没有采纳。
 > - 限流退避、`epochTimeMs()`、kotlinx-serialization、`model` 包、持久化分片**都还没做**；

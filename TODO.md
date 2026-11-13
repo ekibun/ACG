@@ -180,12 +180,19 @@
 
 - **现状**：设计定稿于 [docs/design/architecture-design.md](./docs/design/architecture-design.md)  
   （2026-10-02，调研纪要见 [docs/design/architecture-research.md](./docs/design/architecture-research.md)），未落地。
-- **已落地的第一个切片（2026-10）**：Bangumi OAuth 登录 + 收藏页，形态依据见
+- **已落地的第一个切片（2026-10，形态已被下一条取代）**：Bangumi OAuth 登录 + 收藏页，形态依据见
   [docs/design/bgm-plugin.md](./docs/design/bgm-plugin.md)。它**不按本文的包名与分层走**：客户端
   叫 `acg.source.BgmSource`（不是 `acg.catalog.bgm`）、服务商知识在 JS 插件里而不在 Kotlin、
   领域模型（`acg.model`）一个都没建、持久化是扁平字符串设置表而不是分片。清单里剩下的
   `epochTimeMs()` / kotlinx-serialization / `model` / 持久化分片 / `HtmlParser` / 限流退避
   **仍在**。已知缺口逐条列在 bgm-plugin.md §六（token 刷新、收藏写操作、条目详情页、限流退避）。
+- **收藏这一条链路（2026-11 首次落地）**：登录改成站内网页登录，收藏改走网页解析 —— 数据层是
+  `acg/data/CollectionTable.kt` 的按档表（每档自带「在飞哪一页」与「哪一页失败」，调度在
+  `CollectionRepository.kt`），界面在
+  `ui/screen/home/tab/collection/`，契约见 [shared-layer §5.10](./docs/development/shared-layer.md)。
+  在此之前这条路上只有一句「收藏还没接」的占位页：旧实现（`BgmSource`、`CollectionState` 与那版
+  310 行的收藏页）已在 `52e16a4` 的归零重写里删掉，不在本次范围内。「插件信封 + 全局快照」同样
+  没有落地，也不再按那个方向做。
 - **落地顺序**（architecture-design.md §5）：`epochTimeMs()` 墙钟原语 + kotlinx-serialization 依赖  
   （**改依赖需用户确认**）→ `acg.model` 领域类型 → `acg.catalog.bgm`（DTO + mapper + 限流退避）  
   → 持久化分片 + 收藏/历史仓库 → `HtmlParser` 宿主原语 + JS 数据源契约（含 B23 流式 response）+ Line 绑定 →  
@@ -235,17 +242,6 @@
   常量），片尾冲刷也逐帧吐；③ 探针跑长片与 4K 各一次都不触发 `Static surface pool size exceeded`；
   ④ 文档里的口径与 `extra_hw_frames` 的实值一致；⑤ 送包的 `<0` 按轮次失败结束（不重试、不当收下），
   收帧侧的 `<0` 不再折叠成「没帧」。
-
-### E10. 插件返回的信封 + 全局快照（等收藏页一起做）
-
-- **现状**：约定已定稿在 [shared-layer §5.10](./docs/development/shared-layer.md)，代码一处没落。插件每次
-  调用交回 `{ user?, collections?, notify?, session? }`，宿主合并成一份全局快照，界面只读快照。
-  现在 `login()` 交的还是 `{ id, name, avatar, session }`，`me()` 是插件内部函数，收藏页没有数据源。
-- **做的时候一起落**：`Snapshot` 类型 + `SnapshotStore`（`StateFlow`；只覆盖出现的字段；切账号整体
-  替换）→ `PluginAccountLogin` 折 `user` 子对象 → `bgm.js` 的
-  `collections({ session, user, status, type, page })`（watching 档打 `/`，顺带回 `user` / `notify`；
-  其它档打 `/anime/list/<user>/<status>`，只有 `collections`）→ 收藏页读快照。
-- **完成判据**：账号卡、收藏页、角标三处都由同一份快照驱动；`bgm.js` 里没有多余的认人请求。
 
 ---
 

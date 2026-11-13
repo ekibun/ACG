@@ -18,17 +18,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -51,16 +48,12 @@ import soko.ekibun.acg.ui.comp.Avatar
 import soko.ekibun.acg.ui.nav.AppRoute
 import soko.ekibun.acg.ui.nav.BackHandler
 import soko.ekibun.acg.ui.screen.account.AddAccountDialog
-import soko.ekibun.acg.ui.screen.home.tab.CollectionScreen
 import soko.ekibun.acg.ui.screen.home.tab.CommunityScreen
 import soko.ekibun.acg.ui.screen.home.tab.SearchScreen
 import soko.ekibun.acg.ui.screen.home.tab.TimetableScreen
+import soko.ekibun.acg.ui.screen.home.tab.collection.CollectionScreen
 
-/**
- * 主页：只管自己的 tab、账号面板与添加账号弹层，页面导航都交给 [onNavigate]。
- *
- * tab 不是路由，切它只换正文；设置是压栈的页面，从窗口根替换掉主页，回来时 tab 由 saveable 还原。
- */
+/** 主页：只管自己的 tab、账号面板与添加账号弹层，页面导航交给 [onNavigate]；tab 不是路由，切它只换正文。 */
 @Composable
 fun HomeScreen(
   onNavigate: (AppRoute) -> Unit,
@@ -80,6 +73,9 @@ fun HomeScreen(
     if (accountOpen) accountOpen = false else tab = HomeTab.Collection
   }
 
+  // 切 tab 会销毁上一个 tab 的组合；按 tab 存住各自的 saveable 状态，切回来输入词之类的还在
+  val tabStates = rememberSaveableStateHolder()
+
   Box(modifier.fillMaxSize()) {
     HomeTabLayout(
       selected = tab,
@@ -87,7 +83,15 @@ fun HomeScreen(
       onSelect = { tab = it },
       onOpenAccount = { accountOpen = true },
     ) {
-      TabContent(tab)
+      // 各页自己的顶栏、动作都在它们里面；这里只换正文
+      tabStates.SaveableStateProvider(tab) {
+        when (tab) {
+          HomeTab.Timetable -> TimetableScreen()
+          HomeTab.Collection -> CollectionScreen()
+          HomeTab.Community -> CommunityScreen()
+          HomeTab.Search -> SearchScreen()
+        }
+      }
     }
 
     if (accountOpen) {
@@ -110,28 +114,6 @@ fun HomeScreen(
 
     // 添加账号只是「挑一个站点、等插件登录完」，没有要留下的状态，居中一张卡就够
     if (addAccountOpen) AddAccountDialog(onDismiss = { addAccountOpen = false })
-  }
-}
-
-/** tab 的顶栏由主页统一给，正文各页自己写：四个 tab 各一个文件，加 tab 就在这里加一条。 */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun TabContent(tab: HomeTab) {
-  // 切 tab 会销毁上一个 tab 的组合；按 tab 存住各自的 saveable 状态，切回来输入词之类的还在
-  val tabStates = rememberSaveableStateHolder()
-  Scaffold(
-    topBar = { TopAppBar(title = { Text(tab.title) }) },
-  ) { padding ->
-    Box(Modifier.fillMaxSize().padding(padding)) {
-      tabStates.SaveableStateProvider(tab) {
-        when (tab) {
-          HomeTab.Timetable -> TimetableScreen()
-          HomeTab.Collection -> CollectionScreen()
-          HomeTab.Community -> CommunityScreen()
-          HomeTab.Search -> SearchScreen()
-        }
-      }
-    }
   }
 }
 

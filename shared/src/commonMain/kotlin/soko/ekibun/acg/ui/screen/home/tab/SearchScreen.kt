@@ -2,7 +2,6 @@ package soko.ekibun.acg.ui.screen.home.tab
 
 import acg.shared.generated.resources.Res
 import acg.shared.generated.resources.ic_search
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -31,12 +30,11 @@ fun SearchScreen(modifier: Modifier = Modifier) {
       singleLine = true,
       modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
     )
-    Box(Modifier.weight(1f)) {
-      EmptyState(
-        icon = Res.drawable.ic_search,
-        title = "搜索还没接",
-        description = "结果要来自各插件的数据源",
-      )
-    }
+    EmptyState(
+      icon = Res.drawable.ic_search,
+      title = "搜索还没接",
+      description = "结果要来自各插件的数据源",
+      modifier = Modifier.weight(1f),
+    )
   }
 }

@@ -31,6 +31,10 @@ max_line_length = 120
 # 做法出自 compose-rules 的 ktlint 接入文档，比整条规则关掉精确得多。
 ktlint_function_naming_ignore_when_annotated_with = Composable
 
+# compose-rules 默认不满新的 CompositionLocal（隐式依赖）。这里只有一个理由充分的：
+# 输入方式全应用一份、根上写、各处只读，见 `ui/comp/InputSource.kt`。
+compose_allowed_composition_locals = LocalActiveInputSource
+
 # 项目故意用 `main.kt` / `jni.kt` / `X.android.kt` / `X.jvm.kt` 这类文件名，
 # 不是「文件名必须与类名一致」。
 ktlint_standard_filename = disabled
