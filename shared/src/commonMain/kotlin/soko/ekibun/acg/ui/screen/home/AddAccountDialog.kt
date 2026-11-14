@@ -1,4 +1,4 @@
-package soko.ekibun.acg.ui.screen.account
+package soko.ekibun.acg.ui.screen.home
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable

@@ -47,7 +47,6 @@ import soko.ekibun.acg.data.AccountRepository
 import soko.ekibun.acg.ui.comp.Avatar
 import soko.ekibun.acg.ui.nav.AppRoute
 import soko.ekibun.acg.ui.nav.BackHandler
-import soko.ekibun.acg.ui.screen.account.AddAccountDialog
 import soko.ekibun.acg.ui.screen.home.tab.CommunityScreen
 import soko.ekibun.acg.ui.screen.home.tab.SearchScreen
 import soko.ekibun.acg.ui.screen.home.tab.TimetableScreen
